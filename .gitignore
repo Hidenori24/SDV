@@ -39,3 +39,10 @@
 
 # debug information files
 *.dwo
+
+# CMake build directory
+build/
+_deps/
+
+# macOS system files
+.DS_Store
