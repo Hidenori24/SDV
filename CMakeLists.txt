@@ -28,3 +28,25 @@ if (MSVC)
 else()
   target_compile_options(sdv_sim PRIVATE -Wall -Wextra -Wpedantic)
 endif()
+# ---- Testing ----
+include(CTest)
+enable_testing()
+
+include(FetchContent)
+
+FetchContent_Declare(
+  Catch2
+  GIT_REPOSITORY https://github.com/catchorg/Catch2.git
+  GIT_TAG v3.5.4
+)
+FetchContent_MakeAvailable(Catch2)
+
+add_executable(unit_tests
+  tests/test_engine_model.cpp
+  tests/test_vehicle_dynamics_model.cpp
+)
+
+target_include_directories(unit_tests PRIVATE src)
+target_link_libraries(unit_tests PRIVATE Catch2::Catch2WithMain)
+
+add_test(NAME unit_tests COMMAND unit_tests)
