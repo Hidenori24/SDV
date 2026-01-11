@@ -2,13 +2,15 @@
 #include "rte/rte.h"
 #include <algorithm>
 
+#include "model/engine_model.h"
+
 namespace Swc::Engine {
 
-struct Params {
-    float max_accel_mps2 = 2.0f; // v1 default
-};
+// struct Params {
+//     float max_accel_mps2 = Model::EngineParams{}.max_accel_mps2;
+// };
 
-static Params g_params{};
+static Model::EngineParams g_params{};
 
 void Init() {}
 
@@ -21,12 +23,9 @@ void Main10ms(double /*dt_s*/)
 
     auto cmd = Rte::Rte_Read_ActuatorCmd();
 
-    if (sf.estop || sf.system_state == Rte::SystemState::EStop) {
-        cmd.drive_accel_cmd = 0.0f;
-    } else {
-        const float throttle = std::clamp(in.throttle, 0.0f, 1.0f);
-        cmd.drive_accel_cmd = throttle * g_params.max_accel_mps2;
-    }
+    bool estop = sf.estop || sf.system_state == Rte::SystemState::EStop;
+
+    cmd.drive_accel_cmd = Model::ComputeDriveAccel(in.throttle, estop, g_params);
 
     Rte::Rte_Write_ActuatorCmd(cmd);
 }
