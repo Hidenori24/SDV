@@ -6,10 +6,6 @@
 
 namespace Swc::Engine {
 
-// struct Params {
-//     float max_accel_mps2 = Model::EngineParams{}.max_accel_mps2;
-// };
-
 static Model::EngineParams g_params{};
 
 void Init() {}
