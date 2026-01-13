@@ -1,4 +1,4 @@
-# SDV システムアーキテクチャ
+# SDV システムアーキテクチャ (Mermaid版)
 
 ## 1. 全体構成図
 
@@ -174,62 +174,6 @@ flowchart TD
 **Model Functions**:
 - `StepLongitudinal(state, dt, drive, brake, estop, params)`
 - `StepLateral(state, dt, steer_angle, params)`
-        estop (bool)
-
-Logic:
-  if (estop):
-    decel = max_decel_mps2
-  else:
-    decel = clamp(brake) × max_decel_mps2
-
-Model Function: ComputeBrakeDecel(brake, estop, params)
-```
-
-### Steering制御
-
-```
-Input:  steer (-1..1)      Output: steer_angle_cmd (rad)
-        estop (bool)
-        dt (s)
-
-State: steer_angle_rad (current steering angle)
-
-Logic:
-  target = steer × max_steer_angle (if !estop)
-  target = 0.0 (if estop)
-  
-  α = 1 - exp(-dt / τ)
-  new_angle = current + α × (target - current)
-
-Model Function: StepSteeringDynamics(current, target, tau, dt, params)
-```
-
-### Vehicle Dynamics
-
-```
-Input:  drive_accel_cmd (m/s²)
-        brake_decel_cmd (m/s²)
-        steer_angle_cmd (rad)
-        estop (bool)
-
-State:  v, x, y, yaw, yaw_rate, wheel_omega
-
-Logic (Bicycle Model):
-  Longitudinal:
-    accel = drive - brake - drag
-    if (estop): accel -= estop_decel
-    v = clamp(v + accel×dt, 0, v_max)
-    
-  Lateral:
-    yaw_rate = v / L × tan(δ)
-    yaw += yaw_rate × dt
-    x += v×cos(yaw)×dt
-    y += v×sin(yaw)×dt
-
-Model Functions:
-  StepLongitudinal(state, dt, drive, brake, estop, params)
-  StepLateral(state, dt, steer_angle, params)
-```
 
 ---
 
@@ -237,13 +181,14 @@ Model Functions:
 
 ### Model層テスト
 
-```
-Pure Function Test (Catch2)
-
-INPUT → [Pure Function] → OUTPUT
-↓                          ↓
-Deterministic         Verifiable
-No side effects       No RTE dependency
+```mermaid
+flowchart LR
+    Input["INPUT<br/>Deterministic"]
+    Func["Pure Function<br/>No side effects"]
+    Output["OUTPUT<br/>Verifiable<br/>No RTE dependency"]
+    
+    Input --> Func
+    Func --> Output
 ```
 
 **例**:
@@ -257,23 +202,34 @@ TEST_CASE("Engine: throttle 0.5 → accel 1.0") {
 
 ### SWC層テスト
 
-```
-Integration Test with Mock RTE (Catch2 + mock_rte.h)
-
-Mock RTE Setup → SWC Main() → Output Verification
-    ↓              ↓              ↓
-Set Input      Call Model    Check RTE
-Values         Functions     Output
+```mermaid
+flowchart LR
+    Setup["Mock RTE Setup<br/>Set Input Values"]
+    Call["SWC Main()<br/>Call Model Functions"]
+    Verify["Output Verification<br/>Check RTE Output"]
+    
+    Setup --> Call
+    Call --> Verify
 ```
 
 **例**:
 ```cpp
-TEST_CASE("EngineSWC: reads throttle, writes accel") {
-    Mock_Rte_SetDriverInput({{throttle=0.5f}});
-    Mock_Rte_SetSafety({{estop=false}});
+TEST_CASE("EngineSWC: RTE integration") {
+    // Setup Mock RTE
+    Rte::DriverInput driver_in{};
+    driver_in.throttle = 0.5f;
     
+    Rte::Safety safety{};
+    safety.estop = false;
+    safety.system_state = Rte::SystemState::Normal;
+    
+    Mock_Rte_SetDriverInput(driver_in);
+    Mock_Rte_SetSafety(safety);
+    
+    // Execute SWC
     Swc::Engine::Main10ms(0.01);
     
+    // Verify output
     auto cmd = Mock_Rte_Written_ActuatorCmd();
     REQUIRE(cmd.drive_accel_cmd == Approx(1.0f));
 }
@@ -285,73 +241,65 @@ TEST_CASE("EngineSWC: reads throttle, writes accel") {
 
 ### 周期的実行（10ms）
 
-```
-TimeBase (10ms tick)
-  ↓
-  ├─→ DriverInputSWC::Main10ms() ─→ RTE.DriverInput update
-  │
-  ├─→ EngineSWC::Main10ms()
-  │   ├─ RTE_Read_DriverInput()
-  │   ├─ RTE_Read_Safety()
-  │   ├─ Model::ComputeDriveAccel()
-  │   └─ RTE_Write_ActuatorCmd()
-  │
-  ├─→ BrakeSWC::Main10ms()
-  │   ├─ RTE_Read_DriverInput()
-  │   ├─ RTE_Read_Safety()
-  │   ├─ Model::ComputeBrakeDecel()
-  │   └─ RTE_Write_ActuatorCmd()
-  │
-  ├─→ SteeringSWC::Main10ms()
-  │   ├─ RTE_Read_DriverInput()
-  │   ├─ RTE_Read_Safety()
-  │   ├─ Model::StepSteeringDynamics()
-  │   └─ RTE_Write_ActuatorCmd()
-  │
-  ├─→ VehicleDynamicsSWC::Main10ms()
-  │   ├─ RTE_Read_ActuatorCmd()
-  │   ├─ RTE_Read_VehicleState()
-  │   ├─ Model::StepLongitudinal()
-  │   ├─ Model::StepLateral()
-  │   └─ RTE_Write_VehicleState()
-  │
-  ├─→ Logging::Main10ms()
-  │   └─ RTE_Read_* & CSV output
-  │
-  └─→ Diag::Main10ms()
-      └─ Signal sanity check
+```mermaid
+flowchart TD
+    TimeBase["TimeBase<br/>10ms tick"]
+    
+    subgraph Loop["Periodic Execution"]
+        DriverInputSWC["DriverInputSWC::Main10ms()<br/>Read driver input → Write to RTE"]
+        EngineSWC["EngineSWC::Main10ms()<br/>Read DriverInput + Safety<br/>Call Model::ComputeDriveAccel<br/>Write ActuatorCmd"]
+        BrakeSWC["BrakeSWC::Main10ms()<br/>Read DriverInput + Safety<br/>Call Model::ComputeDecel<br/>Write ActuatorCmd"]
+        SteeringSWC["SteeringSWC::Main10ms()<br/>Read DriverInput + Safety<br/>Call Model::StepSteeringDynamics<br/>Write ActuatorCmd"]
+        VehicleDynSWC["VehicleDynamicsSWC::Main10ms()<br/>Read ActuatorCmd + VehicleState<br/>Call Model::Step Longitudinal/Lateral<br/>Write VehicleState"]
+        Logging["Logging::Main10ms()<br/>Read RTE signals → CSV output"]
+        Diag["Diag::Main10ms()<br/>Signal sanity check"]
+    end
+    
+    TimeBase --> DriverInputSWC
+    DriverInputSWC --> EngineSWC
+    EngineSWC --> BrakeSWC
+    BrakeSWC --> SteeringSWC
+    SteeringSWC --> VehicleDynSWC
+    VehicleDynSWC --> Logging
+    Logging --> Diag
+    Diag -->|Wait 10ms| TimeBase
 ```
 
 ---
 
 ## 6. データフロー
 
-```
-Driver Input
-    ↓
-┌───┴─────────────────────────┐
-│                             │
-v                             v
-EngineSWC                 SteeringSWC
-  ↓                          ↓
-drive_accel_cmd         steer_angle_cmd
-  ↓                          ↓
-  └─────────┬────────────────┘
-            ↓
-      BrakeSWC
-            ↓
-      brake_decel_cmd
-            ↓
-      ┌──────┴──────────────┐
-      │                     │
-      v                     v
-VehicleDynamicsSWC    [Actuation System]
-  ↓
-[Updated State]
-  v, x, y, yaw, ...
-  ↓
-  ├─→ Logging (CSV output)
-  └─→ Safety Monitor (Heartbeat check)
+```mermaid
+flowchart LR
+    Driver["Driver Input<br/>throttle, brake, steer"]
+    Engine["EngineSWC<br/>drive_accel_cmd"]
+    Brake["BrakeSWC<br/>brake_decel_cmd"]
+    Steering["SteeringSWC<br/>steer_angle_cmd"]
+    VehicleDyn["VehicleDynamicsSWC<br/>VehicleState update"]
+    Actuator["Actuation System<br/>Physical Vehicle"]
+    Logging["Logging<br/>CSV Output"]
+    Safety["Safety Monitor<br/>Heartbeat Check"]
+    
+    Driver -->|throttle| Engine
+    Driver -->|brake| Brake
+    Driver -->|steer| Steering
+    
+    Engine -->|drive_accel_cmd| VehicleDyn
+    Brake -->|brake_decel_cmd| VehicleDyn
+    Steering -->|steer_angle_cmd| VehicleDyn
+    
+    VehicleDyn -->|v, x, y, yaw...| Actuator
+    VehicleDyn -->|VehicleState| Logging
+    VehicleDyn -->|VehicleState| Safety
+    
+    Actuator -.->|Feedback| VehicleDyn
+    
+    style Driver fill:#ffffcc
+    style Engine fill:#ccffcc
+    style Brake fill:#ccffcc
+    style Steering fill:#ccffcc
+    style VehicleDyn fill:#ccccff
+    style Actuator fill:#ffcccc
 ```
 
 ---
@@ -421,62 +369,3 @@ struct VehicleParams {
     float estop_decel_mps2 = 6.0f;
 };
 ```
-
-  - SafetySupervisorSWC
-- RTE
-  - Rte_Read / Rte_Write（Signal Buffer）
-  - Runnable dispatcher（タスク周期で呼び出す）
-- BSW
-  - TimeBase（dt、周期タスク）
-  - Com（信号の外部入出力：v1はプロセス内、後でUDP）
-  - Nvm(Config)（パラメータ永続化）
-  - Diag/Watchdog（状態監視、ハートビート）
-  - Logging（CSV、リプレイ）
-- Platform
-  - OS依存（時計、ファイル、ソケット等）抽象
-
-## データフロー（v1）
-
-```mermaid
-flowchart LR
-  UI[Python UI/Scenario] -->|DriverInput| Com
-  Com --> RTE
-  RTE --> DriverInputSWC
-  DriverInputSWC -->|signals| RTE
-
-  RTE --> EngineSWC
-  RTE --> BrakeSWC
-  RTE --> SteeringSWC
-
-  EngineSWC -->|DriveCmd| RTE
-  BrakeSWC -->|BrakeCmd| RTE
-  SteeringSWC -->|SteerAngle| RTE
-
-  RTE --> VehicleDynamicsSWC
-  VehicleDynamicsSWC -->|VehicleState| RTE
-  RTE --> Logging
-  RTE --> Safety[SafetySupervisorSWC]
-  Safety -->|E-Stop| RTE
-```
-
-## 実行形態
-
-- v1: 単一プロセス（シンプルな周期スケジューラでRunnableを呼ぶ）
-- v1+（拡張）: ComをUDP化し、UI/可視化を別プロセスへ分離
-- v2: SWC差し替え（Control系など）をプロセス分離し更新対象へ
-
-## 状態遷移（Safety）
-
-- Normal: 通常動作
-- Degraded: 一部異常（ログは継続、制限動作）
-- EStop: 強制停止（出力無効、速度0へ収束）
-
-EStopは「最優先」で、他のSWCの出力より常に上位で適用される。
-
-## 物理モデル（v1）
-
-v1は “それっぽさ” を優先し、最小の2Dモデルを採用する。
-
-- 縦（速度）: エンジン駆動 + ブレーキ減速（飽和・一次遅れは任意）
-- 横（旋回）: キネマティック・バイシクルモデル
-- 車輪回転: v と半径 r から wheel_omega を算出（整合を維持）
