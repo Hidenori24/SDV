@@ -44,6 +44,12 @@ FetchContent_MakeAvailable(Catch2)
 add_executable(unit_tests
   tests/test_engine_model.cpp
   tests/test_vehicle_dynamics_model.cpp
+  tests/test_engine_swc.cpp
+  src/swc/engine_swc.cpp
+  src/rte/rte.cpp
+  src/bsw/timebase.cpp
+  src/bsw/logging.cpp
+  src/bsw/diag.cpp
 )
 
 target_include_directories(unit_tests PRIVATE src)

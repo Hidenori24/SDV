@@ -23,7 +23,7 @@
 #ifndef MOCK_RTE_H
 #define MOCK_RTE_H
 
-#include "rte.h"
+#include "../src/rte/rte.h"
 
 // ============================================================
 // Mock RTE Global Signal Buffers
@@ -94,10 +94,10 @@ inline void Mock_Rte_SetDriverInput(const Rte::DriverInput& in)
  * @param sf Safety status to set
  * @note Called by test to prepare safety state before SWC execution
  */
-inline void Mock_Rte_SetSafety(const Rte::Safety& sf)
-{
-    g_safety = sf;
-}
+// inline void Mock_Rte_SetSafety(const Rte::Safety& sf)
+// {
+//     g_safety = sf;
+// }
 /**
  * @brief Reset all Mock RTE signals to default values
  * @note Call this between test cases to ensure clean state
