@@ -47,6 +47,7 @@ add_executable(unit_tests
   tests/test_engine_swc.cpp
   tests/test_brake_model.cpp
   tests/test_brake_swc.cpp
+  tests/test_engine_brake_integration.cpp
   src/swc/engine_swc.cpp
   src/swc/brake_swc.cpp
   src/rte/rte.cpp
