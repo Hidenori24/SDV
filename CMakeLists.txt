@@ -45,6 +45,7 @@ add_executable(unit_tests
   tests/test_engine_model.cpp
   tests/test_vehicle_dynamics_model.cpp
   tests/test_engine_swc.cpp
+  tests/test_brake_model.cpp
   src/swc/engine_swc.cpp
   src/rte/rte.cpp
   src/bsw/timebase.cpp
