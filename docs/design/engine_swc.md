@@ -137,7 +137,14 @@ void Main10ms(double dt) {
 
 6. throttle のクランプテスト（1.5 → 2.0）
 
-**ステータス**: ❌ **未実装**
+**ステータス**: ✅ **完了** (2026-01-25)
+
+**実装ファイル**:
+- Model層: [src/model/engine_model.hpp](../../src/model/engine_model.hpp)
+- SWC層: [src/swc/engine_swc.cpp](../../src/swc/engine_swc.cpp)
+- Mock RTE: [tests/mock_rte.h](../../tests/mock_rte.h)
+- Model テスト: [tests/test_engine_model.cpp](../../tests/test_engine_model.cpp)
+- SWC テスト: [tests/test_engine_swc.cpp](../../tests/test_engine_swc.cpp)
 
 ---
 
@@ -145,17 +152,45 @@ void Main10ms(double dt) {
 
 ### 6.1 リグレッションテスト
 
-- [ ] Model層テストが PASS
-- [ ] SWC層テストが PASS
-- [ ] 既存シミュレーション実行で **ログ出力が変わらない** ことを確認
+- [x] Model層テストが PASS（4 test cases, 8 assertions）
+- [x] SWC層テストが PASS（6 test cases, 14 assertions）
+- [x] 既存シミュレーション実行で **ログ出力が変わらない** ことを確認
+
+**シミュレーション結果 (2026-01-25)**:
+```
+drive_accel_cmd 統計:
+  平均: 0.360 m/s²
+  最大: 1.200 m/s²
+  サンプル数: 1000
+
+全体統計:
+  平均throttle: 0.180
+  平均速度: 0.975 m/s
+  シミュレーション時間: 10.0 s
+```
+
+ベースラインログ: `build/logs/baseline_20260125_102855.csv`
 
 ---
 
 ## 7. 完了条件
 
 - [x] Model層（engine_model.h）実装・テスト完了
-- [ ] SWC層 (engine_swc.cpp) Model呼び出しに置き換え
-- [ ] Mock RTE 実装
-- [ ] SWC層テスト実装
-- [ ] 全テスト PASS
-- [ ] リグレッション確認
+- [x] SWC層 (engine_swc.cpp) Model呼び出しに置き換え
+- [x] Mock RTE 実装
+- [x] SWC層テスト実装
+- [x] 全テスト PASS
+- [x] リグレッション確認
+
+---
+
+## 8. 次のステップ
+
+Engine SWC 実装完了後、以下のコンポーネントに展開可能：
+
+- **Brake SWC**: [tasks/brake/README.md](../../tasks/brake/README.md) - ブレーキ制御実装
+- **Steering SWC**: [tasks/steering/README.md](../../tasks/steering/README.md) - ステアリング制御実装
+- **Safety SWC**: [tasks/safety/README.md](../../tasks/safety/README.md) - 安全監視機能実装
+- **VehicleDynamics SWC**: [tasks/vehicledynamics/README.md](../../tasks/vehicledynamics/README.md) - 車両運動モデル改善
+
+同様のテスト駆動開発パターン（Model層→Mock RTE→SWC層テスト）を適用可能。
