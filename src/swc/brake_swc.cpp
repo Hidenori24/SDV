@@ -1,14 +1,10 @@
 #include "swc/brake_swc.h"
 #include "rte/rte.h"
-#include <algorithm>
+#include "model/brake_model.h"
 
 namespace Swc::Brake {
 
-struct Params {
-    float max_decel_mps2 = 4.0f; // v1 default
-};
-
-static Params g_params{};
+static Model::BrakeParams g_params{};
 
 void Init() {}
 const char* Version() { return "BrakeSWC-v0.0.1"; }
@@ -20,12 +16,8 @@ void Main10ms(double /*dt_s*/)
 
     auto cmd = Rte::Rte_Read_ActuatorCmd();
 
-    if (sf.estop || sf.system_state == Rte::SystemState::EStop) {
-        cmd.brake_decel_cmd = g_params.max_decel_mps2; // force braking
-    } else {
-        const float brake = std::clamp(in.brake, 0.0f, 1.0f);
-        cmd.brake_decel_cmd = brake * g_params.max_decel_mps2;
-    }
+    bool estop = sf.estop || sf.system_state == Rte::SystemState::EStop;
+    cmd.brake_decel_cmd = Model::ComputeBrakeDecel(in.brake, estop, g_params);
 
     Rte::Rte_Write_ActuatorCmd(cmd);
 }

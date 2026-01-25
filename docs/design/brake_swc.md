@@ -104,15 +104,39 @@ else:
 1. `brake=0.5, estop=false` → `decel=2.0`
 2. `estop=true` → `decel=4.0`
 3. `brake > 1.0` → clamp確認
+4. `system_state=EStop` → 強制制動
+5. `brake=0` → decel=0
+6. `brake < 0` → clamp確認
 
-**ステータス**: ❌ **未実装**
+**ステータス**: ✅ **完了** (2026-01-25)
+
+**実装ファイル**:
+- Model層: [src/model/brake_model.h](../../src/model/brake_model.h)
+- SWC層: [src/swc/brake_swc.cpp](../../src/swc/brake_swc.cpp)
+- Model テスト: [tests/test_brake_model.cpp](../../tests/test_brake_model.cpp)
+- SWC テスト: [tests/test_brake_swc.cpp](../../tests/test_brake_swc.cpp)
 
 ---
 
 ## 6. 完了条件
 
-- [ ] Model層（brake_model.h）実装・テスト完了
-- [ ] SWC層 (brake_swc.cpp) Model呼び出しに置き換え
-- [ ] SWC層テスト実装
-- [ ] 全テスト PASS
-- [ ] リグレッション確認
+- [x] Model層（brake_model.h）実装・テスト完了
+- [x] SWC層 (brake_swc.cpp) Model呼び出しに置き換え
+- [x] SWC層テスト実装
+- [x] 全テスト PASS
+- [x] リグレッション確認
+
+**テスト結果 (2026-01-25)**:
+```
+Model層: 8 test cases, 9 assertions - すべて PASS
+SWC層: 6 test cases - すべて PASS
+全体: 24 test cases, 29 assertions - すべて PASS
+```
+
+**シミュレーション結果**:
+```
+brake_decel_cmd 統計:
+  平均: 0.480 m/s²
+  最大: 2.400 m/s²
+  サンプル数: 1000
+```
