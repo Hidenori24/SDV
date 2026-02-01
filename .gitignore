@@ -44,5 +44,12 @@
 build/
 _deps/
 
+# Python virtual environments
+venv_*/
+*.pyc
+__pycache__/
+
 # macOS system files
 .DS_Store
+*.DS_Store
+**/.DS_Store
