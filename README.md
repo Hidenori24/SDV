@@ -55,7 +55,32 @@
 実行例:
 - ./build/sdv_sim
 
-実行すると `logs/latest.csv` にログが出ます（雛形）。
+実行すると `build/logs/latest.csv` にログが出ます（雛形）。
+
+## データ可視化
+
+シミュレーション実行後、Python 可視化ツールで結果をグラフ表示できます：
+
+```bash
+# 初回のみ：Python 仮想環境とパッケージをインストール
+python3 -m venv venv_viz
+source venv_viz/bin/activate
+pip install matplotlib numpy
+
+# 可視化実行（PNG/PDF 生成）
+python3 tools/python/plot_integration_test.py
+```
+
+出力ファイル：
+- `docs/test_reports/plots/engine_brake_integration_plot.png` (1967x1397px, 152KB)
+- `docs/test_reports/plots/engine_brake_integration_plot.pdf` (37KB)
+
+グラフ内容：
+- 📊 ドライバー入力（アクセル・ブレーキ）
+- ⚙️ アクチュエータコマンド（エンジン・ブレーキ）
+- 🔗 相関分析（入出力の線形性確認）
+- 🚗 車速の時間推移
+- 🗺️ 車両軌跡（X-Y 平面）
 
 ## 開発の進め方（重要）
 
