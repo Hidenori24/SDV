@@ -32,14 +32,16 @@
 
 ## ドキュメント
 
-- docs/design/00_overview.md : 全体方針と用語
-- docs/design/01_architecture.md : 全体設計（層、データフロー）
-- docs/design/02_interfaces_signals.md : 信号I/F定義
-- docs/design/03_components.md : 部品設計（SWC/BSW/RTE）
-- docs/design/04_tasks_scheduling.md : タスク設計（周期、順序）
-- docs/design/05_safety_logging_update.md : 安全/ログ/更新設計
-- docs/design/06_roadmap_dod.md : 作成順序、成果物、完成条件（DoD）
-- docs/adr/ADR-0001-autosar-like-architecture.md : 重要設計判断（ADR）
+- [docs/design/00_overview.md](docs/design/00_overview.md) : 全体方針、用語、進捗管理
+- [docs/design/01_architecture.md](docs/design/01_architecture.md) : 全体設計（層、データフロー）
+- [docs/design/02_interfaces_signals.md](docs/design/02_interfaces_signals.md) : 信号I/F定義
+- [docs/design/03_components.md](docs/design/03_components.md) : 部品設計（SWC/BSW/RTE）
+- [docs/design/04_tasks_scheduling.md](docs/design/04_tasks_scheduling.md) : タスク設計（周期、順序）
+- [docs/design/05_safety_logging_update.md](docs/design/05_safety_logging_update.md) : 安全/ログ/更新設計
+- [docs/design/06_roadmap_dod.md](docs/design/06_roadmap_dod.md) : 作成順序、成果物、完成条件（DoD）
+- [docs/adr/ADR-0001-autosar-like-architecture.md](docs/adr/ADR-0001-autosar-like-architecture.md) : 重要設計判断（ADR）
+
+進捗を追うときは、まず [docs/design/00_overview.md](docs/design/00_overview.md) を見て、詳細な完成条件は [docs/design/06_roadmap_dod.md](docs/design/06_roadmap_dod.md) を参照。
 
 ## ビルド・実行（雛形）
 
