@@ -11,6 +11,31 @@ SDVらしさ（v1）は次を指す。
 - 安全監督（SafetySupervisor）が異常時に必ず停止できる
 - パラメータ更新（Config/NVM）で挙動が変化し、ロールバックできる
 
+## 進捗管理
+
+ロードマップに対応する進捗チェック。詳細な完成条件は 06_roadmap_dod.md を参照。
+
+- [x] 0. 骨格固定
+	- RTE、TimeBase、Logging、各SWCの枠は実装済み
+- [x] 1. Engineのみ
+	- throttle から drive_accel_cmd を生成し、車速と wheel_omega を更新できる
+- [x] 2. Steeringのみ
+	- steer から steer_angle_cmd を生成し、yaw を更新できる
+- [x] 3. Brakeのみ
+	- brake から brake_decel_cmd を生成し、v >= 0 を維持できる
+- [x] 4. 統合（縦→横→Pose）
+	- Engine / Brake / Steering / VehicleDynamics の最小統合は実装済み
+- [ ] 5. SDV v1
+	- SafetySupervisor の本格監視、Config更新、ロールバック、UI/Com疎結合は未完
+
+直近の不足:
+
+- [ ] SafetySupervisor の heartbeat 監視と自動 E-Stop
+- [ ] Config/NVM 更新とロールバック
+- [ ] UI / シナリオ入力の外部化
+- [ ] Steering / 統合 / Safety の自動テスト
+- [ ] 同一入力での再現性確認
+
 ## 非ゴール（v1ではやらない）
 
 - 実車相当の物理モデル（タイヤスリップ等の高精度）
