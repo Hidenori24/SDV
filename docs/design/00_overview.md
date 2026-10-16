@@ -30,8 +30,9 @@ SDVらしさ（v1）は次を指す。
   - Engine / Brake / Steering / VehicleDynamics の最小統合は実装済み
   - x, y, yaw, wheel_omega の更新が一貫して動作する
 - [~] 5. SDV v1（一部実装）
-  - [~] SafetySupervisor: estop → system_state=EStop の反映とシステムハートビート更新のみ実装済み（単体テスト: test_safety_swc.cpp）
-  - [ ] SafetySupervisor: SWC別ハートビート監視（Watchdog タイムアウト → EStop）は未実装
+  - [x] SafetySupervisor: SWC別ハートビート監視（Watchdog）を実装済み。1つ途絶 → Degraded、2つ以上 → EStop（ラッチ）
+    - 単体テスト: test_safety_logic.cpp / test_safety_swc.cpp / test_watchdog_integration.cpp
+    - 故障注入: `sdv_sim --stall <swc>:<t_s>`
   - [ ] Config/NVM 更新とロールバック
   - [ ] UI / シナリオ入力の外部化（現状は内蔵シナリオ）
   - [ ] 統合テスト・再現性確認

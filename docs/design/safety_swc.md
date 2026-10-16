@@ -30,76 +30,69 @@
 
 | 項目 | 値 | 型 | 説明 |
 |------|----|----|------|
-| **入力** | `heartbeat_status` | struct | 各SWCのハートビート情報 |
-| **パラメータ** | `hb_timeout_ms` | uint32_t | ハートビートタイムアウト閾値（1000 ms） |
-| **出力** | `estop` | bool | 緊急停止フラグ |
-| | `system_state` | enum | システム状態（Normal / Degraded / EStop） |
+| **入力** | 生存カウンタ | `Bsw::Diag::GetAliveCount(Component)` | 各SWCが10msごとに `ReportAlive()` で加算 |
+| | `Safety.estop` | bool | 外部 E-Stop 要求（UI/ハードウェア） |
+| **パラメータ** | `heartbeat_timeout_ms` | uint32_t | 生存カウンタが進まない時間の許容値（1000 ms） |
+| **出力** | `Safety.estop` | bool | 緊急停止フラグ（外部要求 OR ウォッチドッグのラッチ） |
+| | `Safety.system_state` | enum | Normal / Degraded / EStop |
 
 ---
 
 ## 4. ロジック
 
-### 4.1 ハートビート監視
+### 4.1 ハートビート監視（実装済み）
+
+監視対象: Engine, Brake, Steering, VehicleDynamics。各SWCは `Main10ms()` の最後で `Bsw::Diag::ReportAlive()` を呼ぶ。
+Safety（100ms周期）は各カウンタを前回値と比較する（`Model::UpdateHeartbeat`）。
 
 ```
-各SWC（Engine, Brake, Steering, VehicleDynamics）に対して：
-  - 前フレームとの時刻差をチェック
-  - dt > timeout_ms → 「SWC応答なし」と判定
-  - 1つでも応答なし → system_state = Degraded
-  - 複数の応答なし → system_state = EStop
+カウンタが進んだ        → 無応答時間 = 0
+カウンタが進まない      → 無応答時間 += 100ms
+無応答時間 > timeout    → 「SWC応答なし」（既定: 1000 ms 超 = 11周期目）
 ```
 
-### 4.2 状態遷移
+### 4.2 状態遷移（`Model::ComputeSafetyState`）
 
 ```
-      [Normal]
-         ↑ ↓
-   1個未応答
-      [Degraded]
-         ↓
-   2個以上未応答
-      [EStop]
+応答なし 0個   → Normal
+応答なし 1個   → Degraded   （SWCが復帰すれば Normal に戻る）
+応答なし 2個以上 → EStop     （ラッチ。SWCが復帰しても解除されない）
 ```
 
 ### 4.3 E-Stop フラグ
 
 ```
-estop = true when:
-  - system_state == EStop, OR
-  - 外部 E-Stop 信号 (UI/ハードウェア)
+estop = 外部 E-Stop 要求 OR ウォッチドッグがラッチした EStop
+system_state = estop ? EStop : (Normal | Degraded)
 ```
+
+- ウォッチドッグ由来の EStop は `Safety::Init()`（リセット）でのみ解除される。
+- 外部要求のみの場合は、要求を取り下げれば Normal に戻る。
+
+### 4.4 故障注入
+
+`sdv_sim --stall <engine|brake|steering|vehicledynamics>:<t_s>` を複数指定可能。指定時刻以降そのSWCの実行を止める。
+例: `sdv_sim --stall steering:3 --stall brake:3.5` → 4.12 s に Degraded、4.62 s に EStop。
 
 ---
 
-## 5. テスト戦略
+## 5. テスト
 
-### 5.1 Model層テスト（test_safety_logic.cpp）
-
-**テストケース**：
-1. すべてのハートビートが正常 → `system_state = Normal`
-2. 1つのSWCが応答なし → `system_state = Degraded`
-3. 複数SWCが応答なし → `system_state = EStop`
-
-**ステータス**: ❌ **未実装**
-
-### 5.2 SWC層テスト（test_safety_swc.cpp）
-
-**テストケース**：
-1. 初期状態で `estop=false, system_state=Normal`
-2. SWCのハートビートが途絶すると状態遷移
-3. 外部 E-Stop 信号で即座に `estop=true`
-
-**ステータス**: ❌ **未実装**
+- `tests/test_safety_logic.cpp`: Model層（状態判定、タイムアウト境界、復帰、パラメータ）
+- `tests/test_safety_swc.cpp`: SWC層（ラッチ、復帰、外部E-Stop）
+- `tests/test_watchdog_integration.cpp`: 実SWC+実RTEでの結合（誤検出なし60s、Degraded、EStopで停車）
 
 ---
 
 ## 6. 完了条件
 
-- [ ] ハートビート監視ロジック実装
-- [ ] 状態遷移ロジック実装
-- [ ] Model層テスト実装
-- [ ] SWC層テスト実装
-- [ ] 全テスト PASS
-- [ ] リグレッション確認
+- [x] ハートビート監視ロジック実装
+- [x] 状態遷移ロジック実装
+- [x] Model層テスト実装
+- [x] SWC層テスト実装
+- [x] 全テスト PASS
+- [x] リグレッション確認（通常シナリオのログが従来と一致）
 
-**優先度**: 低（Engine / Brake / Steering 完了後に実装予定）
+## 7. 今後
+
+- Rust 版 (`rust/sdv-core`) へのウォッチドッグ移植とブラウザGUIからの故障注入

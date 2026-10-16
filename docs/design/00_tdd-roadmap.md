@@ -156,7 +156,7 @@ src/model/
   ├─ brake_model.h               ❌ 未実装
   ├─ steering_model.h            ❌ 未実装
   ├─ vehicledynamics_model.h     ✅ 部分実装（StepLongitudinal のみ）
-  └─ safety_logic.h              ❌ 未実装
+  └─ safety_logic.h              ✅ 完了
 ```
 
 ### SWC層（src/swc/）
@@ -168,7 +168,7 @@ src/swc/
   ├─ steering_swc.cpp            ✅ 完了
   ├─ vehicledynamics_swc.cpp     ⚠️ 部分修正（StepLateral 追加待ち）
   ├─ driverinput_swc.cpp         ✅ 変更不要
-  └─ safety_swc.cpp              ❌ 未修正
+  └─ safety_swc.cpp              ✅ 完了（Watchdog）
 ```
 
 ### テスト層（tests/）
@@ -184,8 +184,8 @@ tests/
   ├─ test_steering_model.cpp                 ✅ 完了
   ├─ test_steering_swc.cpp                   ✅ 完了
   ├─ test_vehicledynamics_swc.cpp            ❌ 未実装
-  ├─ test_safety_logic.cpp                   ❌ 未実装
-  └─ test_safety_swc.cpp                     ✅ 現状挙動を固定（Watchdog未実装）
+  ├─ test_safety_logic.cpp                   ✅ 完了
+  └─ test_safety_swc.cpp                     ✅ 完了
 ```
 
 ---
