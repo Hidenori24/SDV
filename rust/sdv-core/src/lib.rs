@@ -7,6 +7,7 @@ pub mod failsafe;
 pub mod model;
 pub mod nvm;
 pub mod rte;
+pub mod scenario;
 pub mod safety;
 pub mod sim;
 pub mod swc;

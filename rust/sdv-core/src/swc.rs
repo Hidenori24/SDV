@@ -2,7 +2,8 @@
 //! (mirrors `src/swc/*.cpp`).
 
 use crate::model::*;
-use crate::rte::{DriverInput, Rte};
+use crate::rte::Rte;
+use crate::scenario::Scenario;
 use crate::safety::SafetySupervisor;
 
 #[derive(Default)]
@@ -67,29 +68,12 @@ impl VehicleDynamicsSwc {
     }
 }
 
-/// Built-in demo scenario (same as C++ DriverInputSWC).
+/// Driver input from a scenario (the built-in demo scenario is the C++ DriverInputSWC).
 pub struct DriverInputSwc;
 impl DriverInputSwc {
-    pub fn scenario_input(t: f32) -> DriverInput {
-        let (throttle, brake, steer) = if t < 2.0 {
-            (0.6, 0.0, 0.0)
-        } else if t < 5.0 {
-            (0.2, 0.0, 0.2)
-        } else if t < 7.0 {
-            (0.0, 0.6, 0.0)
-        } else {
-            (0.0, 0.0, 0.0)
-        };
-        DriverInput {
-            throttle: f32::clamp(throttle, 0.0, 1.0),
-            brake: f32::clamp(brake, 0.0, 1.0),
-            steer: f32::clamp(steer, -1.0, 1.0),
-        }
-    }
-
     /// 20 ms task, scenario mode: drive the inputs from the simulated time.
-    pub fn main_20ms_scenario(rte: &mut Rte) {
-        rte.input = Self::scenario_input(rte.state.t);
+    pub fn main_20ms_scenario(rte: &mut Rte, scenario: &Scenario) {
+        rte.input = scenario.input_at(rte.state.t);
     }
 }
 

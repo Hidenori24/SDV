@@ -57,6 +57,6 @@ fn vehicle_dynamics_advances_time_and_speed() {
 fn scenario_input_follows_simulated_time() {
     let mut rte = Rte::default();
     rte.state.t = 3.0;
-    DriverInputSwc::main_20ms_scenario(&mut rte);
+    DriverInputSwc::main_20ms_scenario(&mut rte, &sdv_core::scenario::Scenario::demo());
     assert_eq!((rte.input.throttle, rte.input.steer), (0.2, 0.2));
 }
