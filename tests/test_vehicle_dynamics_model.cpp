@@ -143,6 +143,7 @@ TEST_CASE("StepVehicle: estop stops the car and with it the turning") {
   REQUIRE(s.v == 0.0f);
   REQUIRE_THAT(s.yaw_rate, WithinAbs(0.0f, 1e-9f));
 }
+
 // ============================================================
 // Grip limit (lateral acceleration <= mu * g) and the spec / physics / derived split
 // ============================================================

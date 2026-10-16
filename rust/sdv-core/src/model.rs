@@ -76,6 +76,9 @@ pub struct VehicleParams {
     pub linear_drag: f32,
     pub max_speed_mps: f32,
     pub estop_decel_mps2: f32,
+    /// Tyre-road friction coefficient: the lateral acceleration is limited to `mu * g`.
+    pub tire_friction_mu: f32,
+    pub gravity_mps2: f32,
 }
 impl Default for VehicleParams {
     // Matches the parameters actually used by the C++ VehicleDynamicsSWC.
@@ -86,6 +89,8 @@ impl Default for VehicleParams {
             linear_drag: 0.15,
             max_speed_mps: 3.0,
             estop_decel_mps2: 6.0,
+            tire_friction_mu: 0.6,
+            gravity_mps2: 9.81,
         }
     }
 }
@@ -120,7 +125,16 @@ pub fn step_vehicle(
     o.v = (o.v + accel * dt).clamp(0.0, p.max_speed_mps);
 
     let l = p.wheelbase_m.max(1e-3);
-    o.yaw_rate = (o.v / l) * steer_angle_cmd.tan();
+
+    // Grip limit (same as the C++ Model): |v * yaw_rate| <= mu * g, i.e. the steering angle that takes
+    // effect is at most atan(L * mu * g / v^2). Within the limit the angle is unchanged.
+    let mut steer = steer_angle_cmd;
+    if o.v > 0.0 {
+        let a_lat_max = (p.tire_friction_mu * p.gravity_mps2).max(1e-3);
+        let limit = (l * a_lat_max / (o.v * o.v)).atan();
+        steer = steer.clamp(-limit, limit);
+    }
+    o.yaw_rate = (o.v / l) * steer.tan();
     o.yaw += o.yaw_rate * dt;
 
     o.x += o.v * o.yaw.cos() * dt;

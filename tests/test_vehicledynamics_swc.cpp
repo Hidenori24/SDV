@@ -110,6 +110,7 @@ TEST_CASE("VehicleSWC: reports alive every step", "[vehicledynamics_swc]") {
     VehicleSwcFixture::Run(7);
     REQUIRE(Bsw::Diag::GetAliveCount(Bsw::Diag::Component::VehicleDynamics) == 7);
 }
+
 TEST_CASE("VehicleSWC: full lock at top speed is limited by tyre grip, at low speed it is not", "[vehicledynamics_swc]") {
     {
         VehicleSwcFixture f;

@@ -42,6 +42,11 @@ fn config_and_nvm_through_the_c_api() {
     assert!(buf().contains("\"max_accel_mps2\": 2.0"));
     let slow = speed_after_half_second();
 
+    // derived values of the running config
+    sdv_derived_json();
+    let d = buf();
+    assert!(d.contains("min_turn_radius_m") && d.contains("max_lateral_accel_mps2") && d.contains("turn_curve"), "{d}");
+
     // commit a valid config and reboot with it
     assert_eq!(commit(r#"{"engine":{"max_accel_mps2":4.0}}"#), 0);
     assert_eq!(sdv_nvm_slot_status(0), 1, "seq 1");
@@ -52,7 +57,7 @@ fn config_and_nvm_through_the_c_api() {
     // an invalid config is rejected, the errors are readable, nothing changes
     assert_eq!(commit(r#"{"engine":{"max_accel_mps2":99},"safety":{"heartbeat_timeout_ms":1}}"#), 1);
     let e = buf();
-    assert!(e.contains("engine.max_accel_mps2") && e.contains("safety.heartbeat_timeout_ms"), "{e}");
+    assert!(e.contains("vehicle_spec.max_accel_mps2") && e.contains("tuning.safety.heartbeat_timeout_ms"), "{e}");
     assert_eq!(sdv_nvm_slot_status(0), 1);
 
     // second commit, then rollback

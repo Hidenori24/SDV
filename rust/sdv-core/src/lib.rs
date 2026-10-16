@@ -224,6 +224,14 @@ pub extern "C" fn sdv_config_json() {
     set_buf(json.into_bytes());
 }
 
+/// Put the derived values of the running config (minimum turn radius, lateral acceleration limit,
+/// critical speed, and the full-lock turn curve over the speed range) into the buffer as JSON.
+#[no_mangle]
+pub extern "C" fn sdv_derived_json() {
+    let json = with_sim(|s| s.config().derived_json());
+    set_buf(json.into_bytes());
+}
+
 /// Put the JSON of the built-in default config into the buffer.
 #[no_mangle]
 pub extern "C" fn sdv_default_config_json() {
