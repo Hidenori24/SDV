@@ -27,6 +27,20 @@ cargo build --release --target wasm32-unknown-unknown # -> target/wasm32-unknown
 - フェイルセーフのタイムアウトは ms で指定し、10msティックに切り上げて使う
 - `tests/config.rs`: 形式・検証・境界値と、Config が挙動（加速・最高速度・旋回・Watchdog検出時間・フェイルセーフ反応時間）を実際に変えること
 
+## シナリオ（入力と故障注入のJSON）
+`scenario.rs`: ドライバー入力の時系列と、時刻指定のイベントを JSON で与える（[ADR-0003](../docs/adr/ADR-0003-config-nvm.md) 段階5）。
+```json
+{ "schema": 1, "name": "demo",
+  "steps":  [ {"until_s": 2.0, "throttle": 0.6}, {"until_s": 5.0, "throttle": 0.2, "steer": 0.2}, {"until_s": 7.0, "brake": 0.6} ],
+  "after":  { },
+  "events": [ {"at_s": 3.0, "action": "stall", "target": "steering"}, {"at_s": 4.0, "action": "bus_down"} ] }
+```
+- 時刻 `t` の入力は「`t < until_s` を満たす最初のステップ」、なければ `after`（既定は全部0）。`Scenario::demo()` が C++ の内蔵シナリオと同一
+- イベント: `stall` / `resume`（`target`: engine / brake / steering / vehicledynamics）、`estop` / `estop_release`、`bus_down` / `bus_up`、`vcu_stall` / `vcu_resume`。シミュレーション時刻（Plant の時計。Plant を止めると止まる）が `at_s` に達したとき1回だけ発火（C++ の `--stall` と同じ）
+- 検証: 未知の項目・範囲外・ステップの時刻の増加順・`target` の要否・件数上限（各64）。全エラーを `steps[1].steer` のようなパス付きで返す
+- `Sim::set_scenario` で設定（リセットすると同じシナリオを最初から再生）。`use_scenario` が真のときだけ有効
+- `tests/scenario.rs`: 形式・検証・実行・**同じシナリオなら同じログ（再現性）**、C++ の基準ログ4本（通常 + 故障注入3パターン）を JSON シナリオで全行再現
+
 ## NVM（疑似不揮発メモリ）
 `nvm.rs`: Config を A/B 2面（Active / Backup）+ 世代番号 + CRC32 で保存する（[ADR-0003](../docs/adr/ADR-0003-config-nvm.md)）。
 - `commit(json)`: 検証に通ったものだけ保存（`Backup ← Active`、`Active ← 新Config`。保存するのは既定値を補った完全な形）。落ちたら何も変えず、全エラーを返す

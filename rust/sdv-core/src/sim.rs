@@ -4,6 +4,7 @@
 
 use crate::bus::{Bus, Frame, Node};
 use crate::config::Config;
+use crate::scenario::{Action, Event, Scenario, Target};
 use crate::failsafe::{self, FailsafeParams, FailsafeStatus};
 use crate::model::*;
 use crate::rte::Rte;
@@ -84,6 +85,10 @@ pub struct Sim {
     /// true: DriverInput follows the built-in demo scenario (like the C++ app);
     /// false: the input is controlled from outside (GUI).
     use_scenario: bool,
+    scenario: Scenario,
+    /// Scenario events sorted by time, and how many have fired already.
+    events: Vec<Event>,
+    next_event: usize,
     tick: u64,
 }
 
@@ -104,6 +109,9 @@ impl Sim {
             failsafe: config.failsafe_params(),
             config,
             use_scenario: false,
+            scenario: Scenario::demo(),
+            events: Vec::new(),
+            next_event: 0,
             tick: 0,
         }
     }
@@ -114,8 +122,42 @@ impl Sim {
     /// The demo-scenario flag is kept; injected faults are cleared.
     pub fn set_config(&mut self, config: Config) {
         let use_scenario = self.use_scenario;
+        let scenario = std::mem::take(&mut self.scenario);
         *self = Self::with_config(config);
         self.use_scenario = use_scenario;
+        self.set_scenario(scenario);
+    }
+
+    /// Install the scenario used in scenario mode (inputs + events). Events restart from the beginning.
+    pub fn set_scenario(&mut self, scenario: Scenario) {
+        self.events = scenario.sorted_events();
+        self.scenario = scenario;
+        self.next_event = 0;
+    }
+
+    pub fn scenario(&self) -> &Scenario { &self.scenario }
+
+    fn apply_event(&mut self, ev: Event) {
+        let comp = |t: Option<Target>| match t {
+            Some(Target::Engine) => Some(Component::Engine),
+            Some(Target::Brake) => Some(Component::Brake),
+            Some(Target::Steering) => Some(Component::Steering),
+            Some(Target::Vehicledynamics) => Some(Component::VehicleDynamics),
+            None => None,
+        };
+        match ev.action {
+            Action::Stall | Action::Resume => {
+                if let Some(c) = comp(ev.target) {
+                    self.set_stall(c, ev.action == Action::Stall);
+                }
+            }
+            Action::Estop => self.set_estop_request(true),
+            Action::EstopRelease => self.set_estop_request(false),
+            Action::BusDown => self.set_bus_down(true),
+            Action::BusUp => self.set_bus_down(false),
+            Action::VcuStall => self.set_vcu_stall(true),
+            Action::VcuResume => self.set_vcu_stall(false),
+        }
     }
 
     // ---- signal access (the GUI / tests see the system through these) ----
@@ -209,6 +251,15 @@ impl Sim {
         let i = self.tick;
         let dt = DT_10MS;
 
+        // Scenario events fire when the simulated time (the plant's clock) reaches them.
+        if self.use_scenario {
+            while self.next_event < self.events.len() && self.plant.rte.state.t >= self.events[self.next_event].at_s {
+                let ev = self.events[self.next_event];
+                self.next_event += 1;
+                self.apply_event(ev);
+            }
+        }
+
         // Phase 0: VCU transmits (Safety every 10 ms, DriverInput every 20 ms)
         for ecu_rte in [&mut self.engine.rte, &mut self.brake.rte, &mut self.steering.rte] {
             ecu_rte.rx_age.driver = ecu_rte.rx_age.driver.saturating_add(1);
@@ -265,7 +316,7 @@ impl Sim {
         // Phase 3: VCU tasks (see the sensor values and alive counters of this tick)
         if !self.vcu.stalled {
             if i % 2 == 0 && self.use_scenario {
-                DriverInputSwc::main_20ms_scenario(&mut self.vcu.rte);
+                DriverInputSwc::main_20ms_scenario(&mut self.vcu.rte, &self.scenario);
             }
             if i % 10 == 0 {
                 self.vcu.safety_swc.main_100ms(&mut self.vcu.rte, DT_100MS_MS);
