@@ -4,6 +4,16 @@
 設計判断の経緯は [ADR-0002（ECU分割）](../adr/ADR-0002-ecu-partitioning.md) と [ADR-0003（Config/NVM）](../adr/ADR-0003-config-nvm.md) を参照。
 C++ 実装は参照実装として「ECUなし・1つの RTE」のまま残している（[01_architecture.md](01_architecture.md) はその構成）。
 
+## 図の一覧
+
+| 図 | 内容 |
+|---|---|
+| [ECU ごとの内部アーキテクチャ](img/ecu_internal.svg)（§1.1） | 各ノードの SWC・Model・RTE・BSW と送受信するフレーム |
+| [ECU 間のアーキテクチャ](img/ecu_network.svg)（§1.2） | 車載バス・直結線・フレーム・故障注入点・フェイルセーフ |
+| [C++ と Rust の関係](img/cpp_rust.svg)（§9） | モジュールの対応、Rust だけにあるもの、基準ログによる照合 |
+
+（SVG 図は `tools/diagrams/gen_all.py` で生成。クリックすると拡大して見られる）
+
 ## 1. 全体構成
 
 VCU・3つのECU・Plant（制御対象）が仮想バスでつながる。**RTE は ECU ごとに 1 つ**持つ。
@@ -36,6 +46,20 @@ flowchart TB
 
 - 太線（`==>`）は**直結**のアクチュエータ線。VCU の Safety も Plant へは直結（E-Stop 線）で届く。直結はバス障害（遅延・欠損・断）の影響を受けない
 - VCU が停止すると Safety / DriverInput が届かなくなるが、各 ECU が自律的にフェイルセーフへ入る（§5）
+
+### 1.1 ECU ごとの内部アーキテクチャ
+
+どのノードも同じ 4 層（SWC・Model・RTE・BSW）を持つ。RTE は ECU ごとに 1 つで、SWC は渡された RTE だけを読み書きする。
+ECU 間は「受信 → RTE」「RTE → 送信」だけでつながる。
+
+[![ECUごとの内部アーキテクチャ](img/ecu_internal.svg)](img/ecu_internal.svg)
+
+### 1.2 ECU 間のアーキテクチャ
+
+ECU 間は車載バスのフレーム（遅延・欠損・断を注入できる）。Plant とのアクチュエータ線・E-Stop 線は直結で、バス障害の影響を受けない。
+図の ①〜③ は故障注入の入口（ECU/Plant の停止、VCU の停止、バス障害）。
+
+[![ECU間のアーキテクチャ](img/ecu_network.svg)](img/ecu_network.svg)
 
 ## 2. バスマトリクス
 
@@ -176,6 +200,8 @@ flowchart LR
 - GitHub Pages に公開（`.github/workflows/pages.yml`）。サーバー不要
 
 ## 9. C++ と Rust の関係
+
+[![C++ と Rust の関係](img/cpp_rust.svg)](img/cpp_rust.svg)
 
 | 項目 | C++（`src/`） | Rust（`rust/sdv-core`） |
 |---|---|---|
