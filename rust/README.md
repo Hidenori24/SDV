@@ -20,26 +20,26 @@ cargo build --release --target wasm32-unknown-unknown # -> target/wasm32-unknown
 - `tests/ecu_bus.rs` / `tests/bus.rs`: ECUごとのRTE、バスの配送・遅延・バスマトリクス
 - `tests/swc_rte.rs`: SWC単体と、RTEが独立していること
 
-## Config（調整パラメータ・JSON）
-[ADR-0003](../docs/adr/ADR-0003-config-nvm.md) の Config を実装済み（`config.rs`）。
-- `config::parse(json)`: 欠けた項目は既定値（現状の定数と同一）、未知の項目は拒否、範囲外が1つでもあれば全体を拒否し、`項目パス: 理由` を**すべて**返す。`config::to_json` で書き出し
-- `Sim::with_config(cfg)` で起動、`Sim::set_config(cfg)` で入れ替え（再起動扱い）、`Sim::reset()` は同じ Config で再起動
-- フェイルセーフのタイムアウトは ms で指定し、10msティックに切り上げて使う
-- `tests/config.rs`: 形式・検証・境界値と、Config が挙動（加速・最高速度・旋回・Watchdog検出時間・フェイルセーフ反応時間）を実際に変えること
+## Config（車の諸元・物理・調整値・JSON）
+[ADR-0003](../docs/adr/ADR-0003-config-nvm.md)（改訂1: schema 2）の Config（`config.rs`）。4 つに分ける。
+- `vehicle_spec`（諸元）: ホイールベース、車輪半径、最大舵角、舵のサーボの遅れ、最高速度、最大加速度・減速度、E-Stop の減速。Plant と実機の ECU ソフトが使う
+- `physics`（物理）: 重力、**タイヤの摩擦係数 μ**、走行抵抗。Plant だけが使う（実機では自然が決める）
+- `tuning`（調整）: E-Stop 時の最大減速、Watchdog のタイムアウト、フェイルセーフのタイムアウト
+- 導出値（`Config::derived()` / `derived_json()`、**読み取り専用**）: 最小旋回半径 `L/tan(δmax)`、横加速度の上限 `μ×g`、摩擦が効き始める速度、速度ごとの旋回の曲線
 
-## シナリオ（入力と故障注入のJSON）
-`scenario.rs`: ドライバー入力の時系列と、時刻指定のイベントを JSON で与える（[ADR-0003](../docs/adr/ADR-0003-config-nvm.md) 段階5）。
 ```json
-{ "schema": 1, "name": "demo",
-  "steps":  [ {"until_s": 2.0, "throttle": 0.6}, {"until_s": 5.0, "throttle": 0.2, "steer": 0.2}, {"until_s": 7.0, "brake": 0.6} ],
-  "after":  { },
-  "events": [ {"at_s": 3.0, "action": "stall", "target": "steering"}, {"at_s": 4.0, "action": "bus_down"} ] }
+{ "schema": 2,
+  "vehicle_spec": { "wheelbase_m": 0.20, "wheel_radius_m": 0.03, "max_steer_angle_rad": 0.40, "steer_time_constant_s": 0.15,
+                    "top_speed_mps": 3.0, "max_accel_mps2": 2.0, "max_decel_mps2": 4.0, "estop_decel_mps2": 6.0 },
+  "physics": { "gravity_mps2": 9.81, "tire_friction_mu": 0.6, "drag_coeff": 0.15 },
+  "tuning": { "estop_max_decel_mps2": 4.0, "safety": { "heartbeat_timeout_ms": 1000 },
+              "failsafe": { "driver_timeout_ms": 200, "safety_timeout_ms": 100 } } }
 ```
-- 時刻 `t` の入力は「`t < until_s` を満たす最初のステップ」、なければ `after`（既定は全部0）。`Scenario::demo()` が C++ の内蔵シナリオと同一
-- イベント: `stall` / `resume`（`target`: engine / brake / steering / vehicledynamics）、`estop` / `estop_release`、`bus_down` / `bus_up`、`vcu_stall` / `vcu_resume`。シミュレーション時刻（Plant の時計。Plant を止めると止まる）が `at_s` に達したとき1回だけ発火（C++ の `--stall` と同じ）
-- 検証: 未知の項目・範囲外・ステップの時刻の増加順・`target` の要否・件数上限（各64）。全エラーを `steps[1].steer` のようなパス付きで返す
-- `Sim::set_scenario` で設定（リセットすると同じシナリオを最初から再生）。`use_scenario` が真のときだけ有効
-- `tests/scenario.rs`: 形式・検証・実行・**同じシナリオなら同じログ（再現性）**、C++ の基準ログ4本（通常 + 故障注入3パターン）を JSON シナリオで全行再現
+- `config::parse(json)`: 欠けた項目は既定値、未知の項目は拒否、範囲外が1つでもあれば全体を拒否し、`項目パス: 理由` を**すべて**返す。`config::to_json` は常に schema 2 で書き出す
+- **schema 1 は自動で schema 2 に変換して読む**（`"schema": 1`、または `schema` がなく旧形式のキーを含む場合）。範囲エラーは変換後の schema 2 のパスで報告する。旧形式と新形式のキーの混在は拒否
+- **タイヤの限界**: Plant は有効な舵角を `atan(L×μ×g/v²)` に制限する（横加速度 ≤ μ×g）。既定値（μ=0.6）では 3 m/s のフルロックで 363°/s → 約 112°/s。C++ の Model と同じ式（暫定の写し）
+- `Sim::with_config(cfg)` で起動、`Sim::set_config(cfg)` で入れ替え（再起動扱い）、`Sim::reset()` は同じ Config で再起動
+- `tests/config.rs`: 形式・検証・境界値、schema 1 の変換、導出値、Config が挙動（加速・最高速度・旋回・摩擦・Watchdog・フェイルセーフ）を実際に変えること
 
 ## NVM（疑似不揮発メモリ）
 `nvm.rs`: Config を A/B 2面（Active / Backup）+ 世代番号 + CRC32 で保存する（[ADR-0003](../docs/adr/ADR-0003-config-nvm.md)）。
@@ -77,7 +77,7 @@ C++ 側の挙動を変えた場合は、`sdv_sim` を再実行して golden を�
 | `sdv_set_bus(delay_ticks, loss_permille, down)` | 車載バスの遅延(10msティック)・欠損(‰)・断。ECU→Plant の直結線は対象外 |
 | `sdv_set_vcu_stall(on)` | VCU（DriverInput + Safety）の停止/再開 |
 | `sdv_boot()` | NVMから Config を読み込み（Active → Backup → 既定値）、その Config で再起動。戻り値: 0 Active / 1 Backup / 2 既定値 |
-| `sdv_config_json()` / `sdv_default_config_json()` | 実行中 / 既定の Config の JSON をバッファに入れる（`sdv_buf_ptr` / `sdv_buf_len` で読む） |
+| `sdv_config_json()` / `sdv_default_config_json()` / `sdv_derived_json()` | 実行中 / 既定の Config の JSON、実行中の Config の導出値（最小旋回半径・横加速度の上限・旋回の曲線）をバッファに入れる（`sdv_buf_ptr` / `sdv_buf_len` で読む） |
 | `sdv_nvm_commit(ptr, len)` | JSON を検証して Active に保存。0 成功 / 1 不正（理由は1行1件でバッファ）/ 2 文字コード不正。適用は次の `sdv_boot` |
 | `sdv_nvm_rollback()` | `Active ← Backup`。0 成功 / 1 バックアップなし |
 | `sdv_nvm_slot_status(slot)` | -1 空 / -2 破損 / それ以外は世代番号（slot 0 Active, 1 Backup） |

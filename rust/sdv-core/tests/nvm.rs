@@ -8,7 +8,7 @@ fn nvm() -> Nvm<MemStorage> {
 }
 
 fn accel(c: &Config) -> f32 {
-    c.engine.max_accel_mps2
+    c.vehicle_spec.max_accel_mps2
 }
 
 fn commit(n: &mut Nvm<MemStorage>, accel_mps2: f32) -> u32 {

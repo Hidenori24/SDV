@@ -100,11 +100,11 @@ impl Sim {
     /// Boot with a given (already validated) config.
     pub fn with_config(config: Config) -> Self {
         Self {
-            vcu: Vcu { rte: Rte::default(), safety_swc: SafetySwc::new(config.safety), stalled: false },
-            engine: Ecu::with_swc(EngineSwc::new(config.engine)),
-            brake: Ecu::with_swc(BrakeSwc::new(config.brake)),
-            steering: Ecu::with_swc(SteeringSwc::new(config.steering)),
-            plant: Ecu::with_swc(VehicleDynamicsSwc::new(config.vehicle)),
+            vcu: Vcu { rte: Rte::default(), safety_swc: SafetySwc::new(config.safety_params()), stalled: false },
+            engine: Ecu::with_swc(EngineSwc::new(config.engine_params())),
+            brake: Ecu::with_swc(BrakeSwc::new(config.brake_params())),
+            steering: Ecu::with_swc(SteeringSwc::new(config.steering_params())),
+            plant: Ecu::with_swc(VehicleDynamicsSwc::new(config.vehicle_params())),
             bus: Bus::new(0),
             failsafe: config.failsafe_params(),
             config,
