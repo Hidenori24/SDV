@@ -56,3 +56,6 @@ __pycache__/
 
 # make files
 make/**
+# Rust
+rust/**/target/
+web/sdv_core.wasm
