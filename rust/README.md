@@ -9,6 +9,12 @@ cargo test                                            # C++の参照ログとの
 cargo build --release --target wasm32-unknown-unknown # -> target/wasm32-unknown-unknown/release/sdv_core.wasm
 ```
 
+## 構成（RTE / SWC / Sim）
+- `rte.rs`: 信号の入れ物 `Rte`（DriverInput / ActuatorCmd / VehicleState / Safety）。**ECUごとに1インスタンス**持つ想定（[ADR-0002](../docs/adr/ADR-0002-ecu-partitioning.md)）
+- `swc.rs`: Engine / Brake / Steering / VehicleDynamics / DriverInput / Safety の各SWC。渡された `Rte` だけを読み書きする
+- `sim.rs`: 10ms固定ステップのスケジューラ。現状は1つの `Rte` を全SWCで共有（ECU分割は次のPRで導入）
+- `tests/swc_rte.rs`: SWC単体と、RTEが独立していること
+
 ## Safety（ウォッチドッグ）
 C++ の `src/model/safety_logic.h` と `Swc::Safety`（`safety_swc.cpp`）を移植済みです。
 - `model.rs`: `update_heartbeat` / `count_failed` / `compute_safety_state`（生存カウンタの停止検出と Normal/Degraded/EStop 判定）

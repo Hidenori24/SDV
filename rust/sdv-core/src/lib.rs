@@ -2,8 +2,10 @@
 //! the browser (WebAssembly, plain C ABI - no wasm-bindgen required).
 
 pub mod model;
+pub mod rte;
 pub mod safety;
 pub mod sim;
+pub mod swc;
 
 use sim::{Component, Row, Sim};
 use std::sync::Mutex;
@@ -44,15 +46,15 @@ pub extern "C" fn sdv_reset() {
 /// 1: follow the built-in demo scenario, 0: external (GUI) input.
 #[no_mangle]
 pub extern "C" fn sdv_use_scenario(on: i32) {
-    with_sim(|s| s.use_scenario = on != 0);
+    with_sim(|s| s.set_use_scenario(on != 0));
 }
 
 #[no_mangle]
 pub extern "C" fn sdv_set_input(throttle: f32, brake: f32, steer: f32) {
     with_sim(|s| {
-        s.input.throttle = throttle.clamp(0.0, 1.0);
-        s.input.brake = brake.clamp(0.0, 1.0);
-        s.input.steer = steer.clamp(-1.0, 1.0);
+        s.input_mut().throttle = throttle.clamp(0.0, 1.0);
+        s.input_mut().brake = brake.clamp(0.0, 1.0);
+        s.input_mut().steer = steer.clamp(-1.0, 1.0);
     });
 }
 
