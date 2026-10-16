@@ -12,11 +12,29 @@ pub mod sim;
 pub mod swc;
 
 use bus::Node;
+use nvm::{MemStorage, Nvm, Slot, SlotStatus, Source};
 use sim::{Component, Row, Sim};
 use std::sync::Mutex;
 
 static SIM: Mutex<Option<Sim>> = Mutex::new(None);
 static OUT: Mutex<[f32; 32]> = Mutex::new([0.0; 32]);
+
+static NVM: Mutex<Option<Nvm<MemStorage>>> = Mutex::new(None);
+/// Scratch buffer the host reads after calls that return text / bytes (`sdv_buf_ptr` / `sdv_buf_len`).
+static BUF: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+
+fn with_nvm<R>(f: impl FnOnce(&mut Nvm<MemStorage>) -> R) -> R {
+    let mut g = NVM.lock().unwrap();
+    f(g.get_or_insert_with(|| Nvm::new(MemStorage::default())))
+}
+
+fn set_buf(bytes: Vec<u8>) {
+    *BUF.lock().unwrap() = bytes;
+}
+
+fn slot_of(i: i32) -> Slot {
+    if i == 0 { Slot::Active } else { Slot::Backup }
+}
 
 fn with_sim<R>(f: impl FnOnce(&mut Sim) -> R) -> R {
     let mut g = SIM.lock().unwrap();
@@ -130,4 +148,151 @@ pub extern "C" fn sdv_out_ptr() -> *const f32 {
 #[no_mangle]
 pub extern "C" fn sdv_out_len() -> i32 {
     OUT_LEN as i32
+}
+
+// ---------------------------------------------------------------------------
+// Config / NVM (ADR-0003). Text and bytes go through host-allocated memory and
+// the scratch buffer.
+// ---------------------------------------------------------------------------
+
+/// Allocate `n` bytes of WASM memory for the host to write into. Release with `sdv_free`.
+#[no_mangle]
+pub extern "C" fn sdv_alloc(n: i32) -> *mut u8 {
+    let mut v = vec![0u8; n.max(0) as usize];
+    let p = v.as_mut_ptr();
+    std::mem::forget(v);
+    p
+}
+
+/// # Safety contract
+/// `ptr` / `n` must be a pair previously returned by / passed to `sdv_alloc`.
+#[no_mangle]
+pub extern "C" fn sdv_free(ptr: *mut u8, n: i32) {
+    if !ptr.is_null() && n >= 0 {
+        // SAFETY: the pair comes from `sdv_alloc`, which leaked a Vec of exactly this length/capacity.
+        unsafe { drop(Vec::from_raw_parts(ptr, n as usize, n as usize)) }
+    }
+}
+
+fn host_bytes<'a>(ptr: *const u8, n: i32) -> &'a [u8] {
+    if ptr.is_null() || n <= 0 {
+        return &[];
+    }
+    // SAFETY: the host passes a region it allocated with `sdv_alloc` and filled.
+    unsafe { std::slice::from_raw_parts(ptr, n as usize) }
+}
+
+#[no_mangle]
+pub extern "C" fn sdv_buf_ptr() -> *const u8 {
+    BUF.lock().unwrap().as_ptr()
+}
+
+#[no_mangle]
+pub extern "C" fn sdv_buf_len() -> i32 {
+    BUF.lock().unwrap().len() as i32
+}
+
+/// Boot: load the config from the NVM (Active, else Backup, else defaults) and restart the sim with it.
+/// Returns the source: 0 active, 1 backup, 2 defaults.
+#[no_mangle]
+pub extern "C" fn sdv_boot() -> i32 {
+    let loaded = with_nvm(|n| n.load());
+    with_sim(|s| s.set_config(loaded.config));
+    match loaded.source {
+        Source::Active => 0,
+        Source::Backup => 1,
+        Source::Defaults => 2,
+    }
+}
+
+/// Put the JSON of the running config into the buffer.
+#[no_mangle]
+pub extern "C" fn sdv_config_json() {
+    let json = with_sim(|s| config::to_json(s.config()));
+    set_buf(json.into_bytes());
+}
+
+/// Put the JSON of the built-in default config into the buffer.
+#[no_mangle]
+pub extern "C" fn sdv_default_config_json() {
+    set_buf(config::to_json(&config::Config::default()).into_bytes());
+}
+
+/// Validate and store a config JSON. 0 ok, 1 invalid (the problems, one `path: reason` per line, are in the buffer),
+/// 2 not UTF-8. Nothing is stored unless 0. It takes effect on the next `sdv_boot`.
+#[no_mangle]
+pub extern "C" fn sdv_nvm_commit(ptr: *const u8, n: i32) -> i32 {
+    let Ok(json) = std::str::from_utf8(host_bytes(ptr, n)) else {
+        return 2;
+    };
+    match with_nvm(|nvm| nvm.commit(json)) {
+        Ok(_) => 0,
+        Err(nvm::NvmError::Invalid(errors)) => {
+            let text = errors.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n");
+            set_buf(text.into_bytes());
+            1
+        }
+        Err(nvm::NvmError::NoBackup) => 1,
+    }
+}
+
+/// `Active <- Backup`. 0 ok, 1 no valid backup. Takes effect on the next `sdv_boot`.
+#[no_mangle]
+pub extern "C" fn sdv_nvm_rollback() -> i32 {
+    match with_nvm(|nvm| nvm.rollback()) {
+        Ok(_) => 0,
+        Err(_) => 1,
+    }
+}
+
+/// Slot status: -1 empty, -2 corrupt, otherwise the sequence number. `slot`: 0 active, 1 backup.
+#[no_mangle]
+pub extern "C" fn sdv_nvm_slot_status(slot: i32) -> i32 {
+    match with_nvm(|nvm| nvm.load().slots[slot_of(slot) as usize]) {
+        SlotStatus::Empty => -1,
+        SlotStatus::Corrupt => -2,
+        SlotStatus::Valid { seq } => seq as i32,
+    }
+}
+
+/// Copy the raw bytes of a slot into the buffer (to persist them). 1 if the slot has data, 0 if empty.
+#[no_mangle]
+pub extern "C" fn sdv_nvm_read(slot: i32) -> i32 {
+    match with_nvm(|nvm| nvm.storage().read(slot_of(slot))) {
+        Some(bytes) => {
+            set_buf(bytes);
+            1
+        }
+        None => {
+            set_buf(Vec::new());
+            0
+        }
+    }
+}
+
+/// Restore the raw bytes of a slot (previously saved with `sdv_nvm_read`).
+#[no_mangle]
+pub extern "C" fn sdv_nvm_write(slot: i32, ptr: *const u8, n: i32) {
+    let bytes = host_bytes(ptr, n).to_vec();
+    with_nvm(|nvm| nvm.storage_mut().write(slot_of(slot), bytes));
+}
+
+#[no_mangle]
+pub extern "C" fn sdv_nvm_erase(slot: i32) {
+    with_nvm(|nvm| nvm.storage_mut().erase(slot_of(slot)));
+}
+
+/// Fault injection: flip a byte in the middle of a slot.
+#[no_mangle]
+pub extern "C" fn sdv_nvm_corrupt(slot: i32) {
+    with_nvm(|nvm| {
+        let slot = slot_of(slot);
+        if let Some(mut bytes) = nvm.storage().read(slot) {
+            let mid = bytes.len() / 2;
+            if let Some(b) = bytes.get_mut(mid) {
+                *b ^= 0xFF;
+            }
+            nvm.storage_mut().write(slot, bytes);
+        }
+    });
 }

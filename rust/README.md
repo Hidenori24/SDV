@@ -62,6 +62,14 @@ C++ 側の挙動を変えた場合は、`sdv_sim` を再実行して golden を�
 | `sdv_set_estop(on)` | 外部 E-Stop 要求（ウォッチドッグ由来の EStop はラッチされ、`sdv_reset()` でのみ解除） |
 | `sdv_set_bus(delay_ticks, loss_permille, down)` | 車載バスの遅延(10msティック)・欠損(‰)・断。ECU→Plant の直結線は対象外 |
 | `sdv_set_vcu_stall(on)` | VCU（DriverInput + Safety）の停止/再開 |
+| `sdv_boot()` | NVMから Config を読み込み（Active → Backup → 既定値）、その Config で再起動。戻り値: 0 Active / 1 Backup / 2 既定値 |
+| `sdv_config_json()` / `sdv_default_config_json()` | 実行中 / 既定の Config の JSON をバッファに入れる（`sdv_buf_ptr` / `sdv_buf_len` で読む） |
+| `sdv_nvm_commit(ptr, len)` | JSON を検証して Active に保存。0 成功 / 1 不正（理由は1行1件でバッファ）/ 2 文字コード不正。適用は次の `sdv_boot` |
+| `sdv_nvm_rollback()` | `Active ← Backup`。0 成功 / 1 バックアップなし |
+| `sdv_nvm_slot_status(slot)` | -1 空 / -2 破損 / それ以外は世代番号（slot 0 Active, 1 Backup） |
+| `sdv_nvm_read(slot)` / `sdv_nvm_write(slot, ptr, len)` / `sdv_nvm_erase(slot)` | 面の生バイトの取り出し・復元・消去（ブラウザの永続化用） |
+| `sdv_nvm_corrupt(slot)` | 故障注入: 面の中央の1バイトを反転 |
+| `sdv_alloc(n)` / `sdv_free(ptr, n)` | ホストが文字列・バイト列を渡すためのメモリ確保 |
 | `sdv_set_stall(component, on)` | SWC の故障注入。component: 0 engine / 1 brake / 2 steering / 3 vehicledynamics |
 | `sdv_step(n)` | 10ms × n 進める |
 | `sdv_out_ptr()` / `sdv_out_len()` | 出力バッファ（f32）: `t,x,y,yaw,v,yaw_rate,wheel_omega,throttle,brake,steer,drive_accel_cmd,brake_decel_cmd,steer_angle_cmd,estop,system_state` に続けて、SWCごとの無応答時間 `silent_ms`（engine, brake, steering, vehicledynamics）。続いて ECU（engine, brake, steering）ごとのフェイルセーフ状態（bit0: DriverInput途絶, bit1: Safety途絶）。全22要素 |

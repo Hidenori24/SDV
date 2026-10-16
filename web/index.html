@@ -59,6 +59,17 @@ button.estop.on{background:#fff;color:var(--danger);outline:4px solid var(--dang
 .ecurow{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
 .ecumap .swc{width:100%}
 .swc .st{white-space:pre-line}
+.cfg{margin:10px 0;border:1px solid var(--line);border-radius:8px;padding:6px 10px}
+.cfg summary{cursor:pointer;font-weight:600;color:var(--sub);font-size:13px}
+.cfg textarea{width:100%;margin-top:8px;font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:6px;resize:vertical}
+.cfg .nvm{display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-top:8px;font-size:12px}
+.cfg .nvm span{border:1px solid var(--line);border-radius:6px;padding:2px 6px;background:var(--bg)}
+.cfg .nvm span.bad{border-color:var(--danger);color:var(--danger);font-weight:700}
+.cfg .nvm span.src{grid-column:1/-1}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.msg{margin-top:6px;font-size:12px;white-space:pre-wrap;min-height:1.2em}
+.msg.ok{color:var(--ok)}
+.msg.err{color:var(--danger);font-weight:600}
 .busline{position:relative;height:22px;border-radius:6px;background:var(--accent);color:#fff;font-size:12px;font-weight:700;text-align:center;line-height:22px}
 .busline.degraded{background:var(--warn);color:#1d2330}
 .busline.down{background:var(--danger)}
@@ -116,6 +127,29 @@ h2{font-size:13px;margin:0 0 4px;color:var(--sub);font-weight:600}
     <div class="row"><label for="bloss">バス欠損</label><input id="bloss" type="range" min="0" max="100" step="1" value="0"><output id="blossO">0 %</output></div>
     <div class="btns"><button id="bdown" aria-pressed="false">バス断</button></div>
     <p class="hint" style="margin-top:4px">ノードのクリックで停止/再開。無応答が1.0秒を超えるとVCUのWatchdogが検出（1つ → DEGRADED、2つ以上 → E-STOP ラッチ、リセットで解除）。バスが途切れても各ECUはフェイルセーフで自律的に止まります。</p>
+    <details id="cfgbox" class="cfg">
+      <summary>設定（Config / NVM）</summary>
+      <div class="nvm" id="nvmStatus"></div>
+      <textarea id="cfgText" spellcheck="false" rows="14" aria-label="Config JSON"></textarea>
+      <div class="btns">
+        <button id="cfgSave" class="primary">検証して保存 → 再起動</button>
+        <button id="cfgRollback">ロールバック</button>
+        <button id="nvmReboot">再起動（NVMから読込）</button>
+      </div>
+      <div class="btns"><span class="hint" style="margin:0;align-self:center">例:</span>
+        <button class="preset" data-p="default">既定</button>
+        <button class="preset" data-p="sport">高出力</button>
+        <button class="preset" data-p="strict">厳しい監視</button>
+        <button class="preset" data-p="bad">不正な例</button>
+      </div>
+      <div class="btns"><span class="hint" style="margin:0;align-self:center">故障注入:</span>
+        <button id="corruptA">Active破損</button>
+        <button id="corruptB">Backup破損</button>
+        <button id="nvmWipe">NVM消去</button>
+      </div>
+      <div id="cfgMsg" class="msg" role="status" aria-live="polite"></div>
+      <p class="hint">未指定の項目は既定値、未知の項目や範囲外の値は拒否されます（保存されません）。保存したConfigは再起動で有効になり、ブラウザに保存されます。壊れた場合はBackup、両方だめなら既定値で起動します。</p>
+    </details>
     <h2>状態量</h2>
     <dl class="stats">
       <div><dt>t</dt><dd id="s_t">0</dd></div><div><dt>v [m/s]</dt><dd id="s_v">0</dd></div>
