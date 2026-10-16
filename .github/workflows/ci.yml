@@ -26,12 +26,19 @@ jobs:
         run: ctest --test-dir build --output-on-failure
       - name: Run simulator and keep log
         run: |
-          mkdir -p logs
+          mkdir -p logs out
           ./build/sdv_sim
+          cp logs/latest.csv out/latest.csv
+          ./build/sdv_sim --stall brake:2
+          cp logs/latest.csv out/cpp_stall_brake2.csv
+          ./build/sdv_sim --stall steering:3 --stall brake:3.5
+          cp logs/latest.csv out/cpp_stall_steering3_brake3.5.csv
+          ./build/sdv_sim --stall engine:1 --stall vehicledynamics:2
+          cp logs/latest.csv out/cpp_stall_engine1_vd2.csv
       - uses: actions/upload-artifact@v7
         with:
           name: cpp-sim-log
-          path: logs/latest.csv
+          path: out/*.csv
 
   rust-tests:
     name: rust-tests
@@ -61,8 +68,15 @@ jobs:
           path: out
       - name: C++ log must match committed golden file
         run: |
-          diff -u rust/sdv-core/tests/golden/cpp_latest.csv out/latest.csv \
-            || { echo "::error::C++ output changed. If intended, regenerate rust/sdv-core/tests/golden/cpp_latest.csv (see CONTRIBUTING.md)."; exit 1; }
+          status=0
+          diff -u rust/sdv-core/tests/golden/cpp_latest.csv out/latest.csv || status=1
+          for f in cpp_stall_brake2 cpp_stall_steering3_brake3.5 cpp_stall_engine1_vd2; do
+            diff -u rust/sdv-core/tests/golden/$f.csv out/$f.csv || status=1
+          done
+          if [ $status -ne 0 ]; then
+            echo "::error::C++ output changed. If intended, regenerate the golden files in rust/sdv-core/tests/golden (see CONTRIBUTING.md)."
+            exit 1
+          fi
 
   # Single stable check to require in branch protection.
   ci-ok:

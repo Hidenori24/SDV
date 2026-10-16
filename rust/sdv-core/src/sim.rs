@@ -3,6 +3,7 @@
 //! then 20 ms: DriverInput, 100 ms: Safety.
 
 use crate::model::*;
+use crate::safety::{SafetySupervisor, SwcStatus};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct DriverInput {
@@ -51,7 +52,18 @@ impl Row {
     }
 }
 
+/// SWCs supervised by the watchdog (index = position in the alive-counter array).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(usize)]
+pub enum Component {
+    Engine = 0,
+    Brake = 1,
+    Steering = 2,
+    VehicleDynamics = 3,
+}
+
 pub const DT_10MS: f32 = 0.010;
+pub const DT_100MS_MS: u32 = 100;
 
 pub struct Sim {
     pub input: DriverInput,
@@ -67,6 +79,11 @@ pub struct Sim {
     vehicle: VehicleParams,
     steer_angle: f32,
     tick: u64,
+    supervisor: SafetySupervisor,
+    /// Alive counters (bumped by each SWC when it runs), like `Bsw::Diag::ReportAlive`.
+    alive: [u64; 4],
+    /// Fault injection: a stalled SWC is not executed (and therefore stops reporting alive).
+    stalled: [bool; 4],
 }
 
 impl Sim {
@@ -83,9 +100,28 @@ impl Sim {
             vehicle: VehicleParams::default(),
             steer_angle: 0.0,
             tick: 0,
+            supervisor: SafetySupervisor::new(),
+            alive: [0; 4],
+            stalled: [false; 4],
         }
     }
 
+    /// Fault injection (like `sdv_sim --stall`): stop (`true`) or resume (`false`) executing a SWC.
+    pub fn set_stall(&mut self, c: Component, stalled: bool) {
+        self.stalled[c as usize] = stalled;
+    }
+
+    /// External E-Stop request (UI / hardware); read directly by the SWCs like the RTE `estop` flag.
+    pub fn set_estop_request(&mut self, on: bool) {
+        self.safety.estop = on;
+    }
+
+    /// Watchdog view of each SWC: [engine, brake, steering, vehicledynamics].
+    pub fn swc_status(&self) -> [SwcStatus; 4] {
+        self.supervisor.status()
+    }
+
+    /// Reset everything (this releases a latched watchdog EStop and clears injected stalls).
     pub fn reset(&mut self) {
         let use_scenario = self.use_scenario;
         *self = Self::new();
@@ -119,21 +155,33 @@ impl Sim {
         let i = self.tick;
         let estop = self.estop();
 
-        // Engine, Brake
-        self.cmd.drive_accel_cmd = compute_drive_accel(self.input.throttle, estop, &self.engine);
-        self.cmd.brake_decel_cmd = compute_brake_decel(self.input.brake, estop, &self.brake);
-
+        // A stalled SWC neither updates its outputs nor reports alive.
+        // Engine
+        if !self.stalled[Component::Engine as usize] {
+            self.cmd.drive_accel_cmd = compute_drive_accel(self.input.throttle, estop, &self.engine);
+            self.alive[Component::Engine as usize] += 1;
+        }
+        // Brake
+        if !self.stalled[Component::Brake as usize] {
+            self.cmd.brake_decel_cmd = compute_brake_decel(self.input.brake, estop, &self.brake);
+            self.alive[Component::Brake as usize] += 1;
+        }
         // Steering
-        let target = compute_steer_target(self.input.steer, estop, &self.steering);
-        self.steer_angle = step_steering_dynamics(self.steer_angle, target, DT_10MS, &self.steering);
-        self.cmd.steer_angle_cmd = self.steer_angle;
-
-        // VehicleDynamics
-        self.state = step_vehicle(
-            &self.state, DT_10MS,
-            self.cmd.drive_accel_cmd, self.cmd.brake_decel_cmd, self.cmd.steer_angle_cmd,
-            estop, &self.vehicle,
-        );
+        if !self.stalled[Component::Steering as usize] {
+            let target = compute_steer_target(self.input.steer, estop, &self.steering);
+            self.steer_angle = step_steering_dynamics(self.steer_angle, target, DT_10MS, &self.steering);
+            self.cmd.steer_angle_cmd = self.steer_angle;
+            self.alive[Component::Steering as usize] += 1;
+        }
+        // VehicleDynamics (a stalled plant also freezes simulated time, as in C++)
+        if !self.stalled[Component::VehicleDynamics as usize] {
+            self.state = step_vehicle(
+                &self.state, DT_10MS,
+                self.cmd.drive_accel_cmd, self.cmd.brake_decel_cmd, self.cmd.steer_angle_cmd,
+                estop, &self.vehicle,
+            );
+            self.alive[Component::VehicleDynamics as usize] += 1;
+        }
 
         let row = Row { input: self.input, cmd: self.cmd, state: self.state, safety: self.safety };
 
@@ -141,8 +189,10 @@ impl Sim {
             self.input = Self::scenario_input(self.state.t);
         }
         if i % 10 == 0 {
-            self.safety.system_state =
-                if self.safety.estop { SystemState::EStop } else { SystemState::Normal };
+            // Safety SWC: `safety.estop` holds the external request; the watchdog latch is OR-ed in.
+            let (estop, state) = self.supervisor.main_100ms(self.alive, DT_100MS_MS, self.safety.estop);
+            self.safety.estop = estop;
+            self.safety.system_state = state;
         }
         self.tick += 1;
         row

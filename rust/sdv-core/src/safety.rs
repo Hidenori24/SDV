@@ -2,6 +2,14 @@
 
 use crate::model::*;
 
+/// Liveness of one monitored SWC, as seen by the watchdog.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SwcStatus {
+    pub alive: bool,
+    /// Time during which the SWC's alive counter did not advance.
+    pub silent_ms: u32,
+}
+
 pub struct SafetySupervisor {
     params: SafetyParams,
     monitors: [HeartbeatMonitor; 4],
@@ -16,6 +24,15 @@ impl SafetySupervisor {
 
     pub fn reset(&mut self) {
         *self = Self::new();
+    }
+
+    /// Per-SWC liveness as of the last `main_100ms` call: [engine, brake, steering, vehicledynamics].
+    pub fn status(&self) -> [SwcStatus; 4] {
+        let mut out = [SwcStatus { alive: true, silent_ms: 0 }; 4];
+        for (o, m) in out.iter_mut().zip(&self.monitors) {
+            *o = SwcStatus { alive: m.silent_ms <= self.params.heartbeat_timeout_ms, silent_ms: m.silent_ms };
+        }
+        out
     }
 
     /// One 100 ms cycle. `alive` = alive counters of [engine, brake, steering, vehicledynamics];

@@ -34,6 +34,8 @@ mkdir -p logs && ./build/sdv_sim
 cp logs/latest.csv rust/sdv-core/tests/golden/cpp_latest.csv
 ```
 
+故障注入ログの golden（`cpp_stall_*.csv`）の再生成コマンドは `rust/sdv-core/tests/golden/README.md` を参照。
+
 ## CI とPRのOK条件
 
 `.github/workflows/ci.yml`（PRと `main` への push で実行）:
