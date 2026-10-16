@@ -55,7 +55,14 @@ button.estop.on{background:#fff;color:var(--danger);outline:4px solid var(--dang
 .safety .sub{font-size:12px;opacity:.9}
 .safety.degraded{background:var(--warn);color:#1d2330}
 .safety.estop{background:var(--danger)}
-.swcs{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.ecumap{display:grid;gap:6px}
+.ecurow{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+.ecumap .swc{width:100%}
+.swc .st{white-space:pre-line}
+.busline{position:relative;height:22px;border-radius:6px;background:var(--accent);color:#fff;font-size:12px;font-weight:700;text-align:center;line-height:22px}
+.busline.degraded{background:var(--warn);color:#1d2330}
+.busline.down{background:var(--danger)}
+.direct{text-align:center;font-size:11px;color:var(--sub);border-top:2px dashed var(--line);padding-top:2px}
 .swc{display:block;text-align:left;padding:6px 8px;line-height:1.3}
 .swc .nm{font-weight:700}
 .swc .st{display:block;font-size:12px;color:var(--sub)}
@@ -97,9 +104,18 @@ h2{font-size:13px;margin:0 0 4px;color:var(--sub);font-weight:600}
     <div class="row"><label for="spd">再生速度</label><input id="spd" type="range" min="0.25" max="4" step="0.25" value="1"><output id="spdO">1.0x</output></div>
     <h2 style="margin-top:12px">Safety状態</h2>
     <div id="safety" class="safety" role="status" aria-live="polite"><span class="ico" id="safetyIco">●</span><div><div class="lbl" id="safetyLbl">NORMAL</div><div class="sub" id="safetySub">正常</div></div></div>
-    <h2>SWC監視（故障注入）</h2>
-    <div id="swcs" class="swcs"></div>
-    <p class="hint" style="margin-top:4px">SWCを止めると、1.0秒を超えて応答がない時点で検出されます。1つ → DEGRADED、2つ以上 → E-STOP（ラッチ。リセットで解除）。</p>
+    <h2>ECU構成（故障注入）</h2>
+    <div class="ecumap" id="ecumap">
+      <div id="n_vcu"></div>
+      <div class="busline" id="busline"><span id="busLbl">車載バス 正常</span></div>
+      <div class="ecurow" id="ecus"></div>
+      <div class="direct">▼ アクチュエータ線（直結）　▲ センサ</div>
+      <div id="n_plant"></div>
+    </div>
+    <div class="row"><label for="bdelay">バス遅延</label><input id="bdelay" type="range" min="0" max="50" step="1" value="0"><output id="bdelayO">0 ms</output></div>
+    <div class="row"><label for="bloss">バス欠損</label><input id="bloss" type="range" min="0" max="100" step="1" value="0"><output id="blossO">0 %</output></div>
+    <div class="btns"><button id="bdown" aria-pressed="false">バス断</button></div>
+    <p class="hint" style="margin-top:4px">ノードのクリックで停止/再開。無応答が1.0秒を超えるとVCUのWatchdogが検出（1つ → DEGRADED、2つ以上 → E-STOP ラッチ、リセットで解除）。バスが途切れても各ECUはフェイルセーフで自律的に止まります。</p>
     <h2>状態量</h2>
     <dl class="stats">
       <div><dt>t</dt><dd id="s_t">0</dd></div><div><dt>v [m/s]</dt><dd id="s_v">0</dd></div>
