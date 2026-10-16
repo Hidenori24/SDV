@@ -23,6 +23,7 @@ header span{color:var(--sub);font-size:12px}
 main{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:12px;padding:0 16px 16px;max-width:1200px;margin:0 auto}
 @media (max-width:820px){main{grid-template-columns:1fr}}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px}
+#wheel{height:150px;margin-bottom:4px}
 canvas{display:block;width:100%;border-radius:6px}
 #view{height:360px;background:var(--bg)}
 #chart{height:120px;margin-top:8px}
@@ -56,7 +57,9 @@ h2{font-size:13px;margin:0 0 4px;color:var(--sub);font-weight:600}
     <p class="hint">キー操作: ↑/W=アクセル ↓/S=ブレーキ ←→/A,D=ステア Space=E-Stop。キー入力はスライダーに反映されます。</p>
   </section>
   <aside class="card">
-    <h2>ドライバー入力</h2>
+    <h2>ステアリング</h2>
+    <canvas id="wheel"></canvas>
+    <h2 style="margin-top:8px">ドライバー入力</h2>
     <div class="row"><label for="thr">Throttle</label><input id="thr" type="range" min="0" max="1" step="0.01" value="0"><output id="thrO">0.00</output></div>
     <div class="row"><label for="brk">Brake</label><input id="brk" type="range" min="0" max="1" step="0.01" value="0"><output id="brkO">0.00</output></div>
     <div class="row"><label for="str">Steer</label><input id="str" type="range" min="-1" max="1" step="0.01" value="0"><output id="strO">0.00</output></div>

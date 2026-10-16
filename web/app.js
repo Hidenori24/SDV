@@ -111,6 +111,24 @@ function drawView(o) {
   g.fillText("グリッド 0.25 m", 8 * d, H - 8 * d);
 }
 
+// ステアリングホイール: 舵角(steerCmd, 最大±0.4rad)を ±450° の見た目回転に対応させる（表示用の比率）
+function drawWheel(o) {
+  const c = $("wheel"), d = fit(c), g = c.getContext("2d");
+  const W = c.width, H = c.height, r = Math.min(W, H) * 0.38;
+  const steer = o[IDX.steerCmd], rot = (steer / 0.4) * (450 * Math.PI / 180);
+  g.clearRect(0, 0, W, H);
+  g.save(); g.translate(W / 2, H / 2 - 6 * d); g.rotate(rot);
+  g.strokeStyle = css("--ink"); g.fillStyle = css("--ink"); g.lineCap = "round";
+  g.lineWidth = r * 0.16; g.beginPath(); g.arc(0, 0, r, 0, 7); g.stroke();       // リム
+  g.lineWidth = r * 0.12; g.beginPath(); g.moveTo(-r, 0); g.lineTo(r, 0);        // 左右スポーク
+  g.moveTo(0, 0); g.lineTo(0, r); g.stroke();                                    // 下スポーク
+  g.beginPath(); g.arc(0, 0, r * 0.2, 0, 7); g.fill();                           // ハブ
+  g.fillStyle = css("--accent"); g.beginPath(); g.roundRect(-r * 0.06, -r - r * 0.12, r * 0.12, r * 0.24, 3 * d); g.fill(); // 12時マーク
+  g.restore();
+  g.fillStyle = css("--sub"); g.font = `${11 * d}px system-ui`; g.textAlign = "center";
+  g.fillText(`${(rot * 180 / Math.PI).toFixed(0)}°`, W / 2, H - 4 * d); g.textAlign = "start";
+}
+
 function drawChart() {
   const c = $("chart"), d = fit(c), g = c.getContext("2d");
   const W = c.width, H = c.height;
@@ -168,7 +186,7 @@ function frame(ts) {
     while (hist.length && hist[0].t < hist[hist.length - 1].t - HISTORY_S - 1) hist.shift();
   }
   const o = out();
-  drawView(o); drawChart(); updateHud(o);
+  drawView(o); drawWheel(o); drawChart(); updateHud(o);
 }
 
 (async () => {
