@@ -3,7 +3,11 @@
 
 const $ = (id) => document.getElementById(id);
 const IDX = { t:0, x:1, y:2, yaw:3, v:4, yawRate:5, wheel:6, thr:7, brk:8, str:9, acc:10, dec:11, steerCmd:12, estop:13, state:14 };
-const STATE_NAMES = ["Normal", "Degraded", "EStop"];
+const SAFETY = [
+  { cls: "normal",   ico: "●", lbl: "NORMAL",   sub: "正常" },
+  { cls: "degraded", ico: "▲", lbl: "DEGRADED", sub: "縮退運転" },
+  { cls: "estop",    ico: "■", lbl: "E-STOP",   sub: "非常停止" },
+];
 const HISTORY_S = 10;
 
 let wasm, mem;
@@ -161,8 +165,9 @@ function updateHud(o) {
   $("s_sc").textContent = deg(o[IDX.steerCmd]);
   $("s_ac").textContent = o[IDX.acc].toFixed(2);
   $("s_dc").textContent = o[IDX.dec].toFixed(2);
-  const st = STATE_NAMES[o[IDX.state]] || "?";
-  $("state").textContent = st; $("state").classList.toggle("estop", o[IDX.state] === 2);
+  const sf = SAFETY[o[IDX.state]] || { cls: "degraded", ico: "?", lbl: "UNKNOWN", sub: "不明" };
+  $("safety").className = "safety " + sf.cls;
+  $("safetyIco").textContent = sf.ico; $("safetyLbl").textContent = sf.lbl; $("safetySub").textContent = sf.sub;
   if (scenario) { setSlider("thr", o[IDX.thr]); setSlider("brk", o[IDX.brk]); setSlider("str", o[IDX.str]); }
 }
 

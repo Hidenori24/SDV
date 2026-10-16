@@ -7,12 +7,12 @@
 <style>
 :root{
   --bg:#f4f5f7; --panel:#fff; --ink:#1d2330; --sub:#6b7385; --line:#dfe3ea;
-  --accent:#2563eb; --danger:#dc2626; --ok:#16a34a; --grid:#e6e9ef; --car:#2563eb; --trail:#93b4f5;
+  --accent:#2563eb; --warn:#f59e0b; --danger:#dc2626; --ok:#16a34a; --grid:#e6e9ef; --car:#2563eb; --trail:#93b4f5;
 }
 @media (prefers-color-scheme: dark){
   :root:not([data-theme="light"]){
     --bg:#0f131a; --panel:#171c26; --ink:#e6e9f0; --sub:#8e97aa; --line:#272e3b;
-    --accent:#5b8def; --danger:#ef4444; --ok:#34d399; --grid:#1f2531; --car:#5b8def; --trail:#2f4a85;
+    --accent:#5b8def; --warn:#fbbf24; --danger:#ef4444; --ok:#34d399; --grid:#1f2531; --car:#5b8def; --trail:#2f4a85;
   }
 }
 *{box-sizing:border-box}
@@ -40,8 +40,12 @@ button.estop.on{outline:3px solid color-mix(in srgb,var(--danger) 40%,transparen
 .stats{display:grid;grid-template-columns:1fr 1fr;gap:6px 12px;margin:0}
 .stats div{display:flex;justify-content:space-between;border-bottom:1px dashed var(--line);padding:2px 0}
 .stats dt{color:var(--sub)}.stats dd{margin:0;font-variant-numeric:tabular-nums}
-.badge{display:inline-block;padding:0 8px;border-radius:99px;font-size:12px;font-weight:600;color:#fff;background:var(--ok)}
-.badge.estop{background:var(--danger)}
+.safety{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:10px;color:#fff;background:var(--ok);margin:4px 0 8px;transition:background .15s}
+.safety .ico{font-size:22px;line-height:1;width:26px;text-align:center}
+.safety .lbl{font-size:18px;font-weight:800;letter-spacing:.04em;line-height:1.1}
+.safety .sub{font-size:12px;opacity:.9}
+.safety.degraded{background:var(--warn);color:#1d2330}
+.safety.estop{background:var(--danger)}
 h2{font-size:13px;margin:0 0 4px;color:var(--sub);font-weight:600}
 .hint{color:var(--sub);font-size:12px;margin-top:8px}
 #err{display:none;color:var(--danger);padding:0 16px}
@@ -70,7 +74,9 @@ h2{font-size:13px;margin:0 0 4px;color:var(--sub);font-weight:600}
       <button id="pause">一時停止</button>
     </div>
     <div class="row"><label for="spd">再生速度</label><input id="spd" type="range" min="0.25" max="4" step="0.25" value="1"><output id="spdO">1.0x</output></div>
-    <h2 style="margin-top:12px">状態 <span id="state" class="badge">Normal</span></h2>
+    <h2 style="margin-top:12px">Safety状態</h2>
+    <div id="safety" class="safety" role="status" aria-live="polite"><span class="ico" id="safetyIco">●</span><div><div class="lbl" id="safetyLbl">NORMAL</div><div class="sub" id="safetySub">正常</div></div></div>
+    <h2>状態量</h2>
     <dl class="stats">
       <div><dt>t</dt><dd id="s_t">0</dd></div><div><dt>v [m/s]</dt><dd id="s_v">0</dd></div>
       <div><dt>x [m]</dt><dd id="s_x">0</dd></div><div><dt>y [m]</dt><dd id="s_y">0</dd></div>
