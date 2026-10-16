@@ -43,6 +43,10 @@
 
 進捗を追うときは、まず [docs/design/00_overview.md](docs/design/00_overview.md) を見て、詳細な完成条件は [docs/design/06_roadmap_dod.md](docs/design/06_roadmap_dod.md) を参照。
 
+## 開発・テスト（TDD）
+
+Rust / C++ / C の実装はすべてTDDで進めます。進め方、テスト実行方法、PRのOK条件（GitHub Actionsの `ci-ok` が緑）は [CONTRIBUTING.md](CONTRIBUTING.md) を参照。
+
 ## ビルド・実行（雛形）
 
 要件:
