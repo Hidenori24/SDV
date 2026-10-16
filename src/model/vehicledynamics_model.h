@@ -87,7 +87,6 @@ inline VehicleState StepLateral(
   VehicleState out = s;
 
   const float L = std::max(p.wheelbase_m, 1e-3f);
-
   float steer = steer_angle_cmd;
   if (out.v > 0.0f) {
     const float a_lat_max = std::max(p.tire_friction_mu * p.gravity_mps2, 1e-3f);
