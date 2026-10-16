@@ -108,7 +108,7 @@ h2{font-size:13px;margin:0 0 4px;color:var(--sub);font-weight:600}
     <div class="row"><label for="str">Steer(右+)</label><input id="str" type="range" min="-1" max="1" step="0.01" value="0"><output id="strO">0.00</output></div>
     <div class="btns">
       <button id="estop" class="estop" aria-pressed="false">E-STOP（Space）</button>
-      <button id="scn">デモシナリオ</button>
+      <button id="scn">シナリオ再生</button>
       <button id="reset">リセット</button>
       <button id="pause">一時停止</button>
     </div>
@@ -149,6 +149,22 @@ h2{font-size:13px;margin:0 0 4px;color:var(--sub);font-weight:600}
       </div>
       <div id="cfgMsg" class="msg" role="status" aria-live="polite"></div>
       <p class="hint">未指定の項目は既定値、未知の項目や範囲外の値は拒否されます（保存されません）。保存したConfigは再起動で有効になり、ブラウザに保存されます。壊れた場合はBackup、両方だめなら既定値で起動します。</p>
+    </details>
+    <details id="scnbox" class="cfg">
+      <summary>シナリオ（入力・故障のタイムライン）</summary>
+      <textarea id="scnText" spellcheck="false" rows="14" aria-label="Scenario JSON"></textarea>
+      <div class="btns">
+        <button id="scnPlay" class="primary">検証して再生</button>
+      </div>
+      <div class="btns"><span class="hint" style="margin:0;align-self:center">例:</span>
+        <button class="scnpreset" data-p="demo">デモ</button>
+        <button class="scnpreset" data-p="fault">ECU2つ停止</button>
+        <button class="scnpreset" data-p="bus">バス断</button>
+        <button class="scnpreset" data-p="estop">E-Stop</button>
+        <button class="scnpreset" data-p="bad">不正な例</button>
+      </div>
+      <div id="scnMsg" class="msg" role="status" aria-live="polite"></div>
+      <p class="hint">入力は「until_s までのステップ」、その後は after。events は時刻（シミュレーション時間）で1回発火します（stall / resume / estop / estop_release / bus_down / bus_up / vcu_stall / vcu_resume）。同じシナリオなら毎回同じ走りになります。</p>
     </details>
     <h2>状態量</h2>
     <dl class="stats">

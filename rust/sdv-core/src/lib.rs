@@ -18,7 +18,7 @@ use sim::{Component, Row, Sim};
 use std::sync::Mutex;
 
 static SIM: Mutex<Option<Sim>> = Mutex::new(None);
-static OUT: Mutex<[f32; 32]> = Mutex::new([0.0; 32]);
+static OUT: Mutex<[f32; 40]> = Mutex::new([0.0; 40]);
 
 static NVM: Mutex<Option<Nvm<MemStorage>>> = Mutex::new(None);
 /// Scratch buffer the host reads after calls that return text / bytes (`sdv_buf_ptr` / `sdv_buf_len`).
@@ -46,10 +46,11 @@ fn with_sim<R>(f: impl FnOnce(&mut Sim) -> R) -> R {
 /// [t, x, y, yaw, v, yaw_rate, wheel_omega, throttle, brake, steer,
 ///  drive_accel_cmd, brake_decel_cmd, steer_angle_cmd, estop, system_state,
 ///  silent_ms[engine, brake, steering, vehicledynamics],
-///  failsafe[engine ECU, brake ECU, steering ECU]]  (bit0: DriverInput timeout, bit1: Safety timeout)
-pub const OUT_LEN: usize = 22;
+///  failsafe[engine ECU, brake ECU, steering ECU],  (bit0: DriverInput timeout, bit1: Safety timeout)
+///  injected faults: stalled[engine, brake, steering, plant, vcu], bus_down]  (1.0 = active)
+pub const OUT_LEN: usize = 28;
 
-fn publish(row: &Row, status: &[safety::SwcStatus; 4], failsafe: &[failsafe::FailsafeStatus; 3]) {
+fn publish(row: &Row, status: &[safety::SwcStatus; 4], failsafe: &[failsafe::FailsafeStatus; 3], faults: &[f32; 6]) {
     let mut o = OUT.lock().unwrap();
     o[..15].copy_from_slice(&[
         row.state.t, row.state.x, row.state.y, row.state.yaw, row.state.v,
@@ -64,6 +65,7 @@ fn publish(row: &Row, status: &[safety::SwcStatus; 4], failsafe: &[failsafe::Fai
     for (i, f) in failsafe.iter().enumerate() {
         o[19 + i] = (f.driver_timeout as u8 | (f.safety_timeout as u8) << 1) as f32;
     }
+    o[22..28].copy_from_slice(faults);
 }
 
 #[no_mangle]
@@ -131,11 +133,20 @@ pub extern "C" fn sdv_step(n: i32) {
         }
         last.map(|row| {
             let fs = [Node::Engine, Node::Brake, Node::Steering].map(|n| s.ecu_failsafe(n));
-            (row, s.swc_status(), fs)
+            let f = |b: bool| b as u8 as f32;
+            let faults = [
+                f(s.is_stalled(Component::Engine)),
+                f(s.is_stalled(Component::Brake)),
+                f(s.is_stalled(Component::Steering)),
+                f(s.is_stalled(Component::VehicleDynamics)),
+                f(s.vcu_stalled()),
+                f(s.bus_is_down()),
+            ];
+            (row, s.swc_status(), fs, faults)
         })
     });
-    if let Some((row, status, fs)) = last {
-        publish(&row, &status, &fs);
+    if let Some((row, status, fs, faults)) = last {
+        publish(&row, &status, &fs, &faults);
     }
 }
 
@@ -296,4 +307,38 @@ pub extern "C" fn sdv_nvm_corrupt(slot: i32) {
             nvm.storage_mut().write(slot, bytes);
         }
     });
+}
+
+/// Validate and install a scenario JSON (inputs + timed events). 0 ok, 1 invalid (the problems, one
+/// `path: reason` per line, are in the buffer; the running scenario is unchanged), 2 not UTF-8.
+/// Scenario mode is switched with `sdv_use_scenario`; `sdv_reset` replays the scenario from the start.
+#[no_mangle]
+pub extern "C" fn sdv_set_scenario(ptr: *const u8, n: i32) -> i32 {
+    let Ok(json) = std::str::from_utf8(host_bytes(ptr, n)) else {
+        return 2;
+    };
+    match scenario::parse(json) {
+        Ok(sc) => {
+            with_sim(|s| s.set_scenario(sc));
+            0
+        }
+        Err(errors) => {
+            let text = errors.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n");
+            set_buf(text.into_bytes());
+            1
+        }
+    }
+}
+
+/// Put the JSON of the running scenario into the buffer.
+#[no_mangle]
+pub extern "C" fn sdv_scenario_json() {
+    let json = with_sim(|s| scenario::to_json(s.scenario()));
+    set_buf(json.into_bytes());
+}
+
+/// Put the JSON of the built-in demo scenario into the buffer.
+#[no_mangle]
+pub extern "C" fn sdv_demo_scenario_json() {
+    set_buf(scenario::to_json(&scenario::Scenario::demo()).into_bytes());
 }
