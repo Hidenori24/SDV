@@ -46,8 +46,8 @@ inline float ComputeBrakeDecel(float brake_0_1, bool estop, const BrakeParams& p
 ```
 
 **完了条件**:
-- [ ] ファイルが作成される
-- [ ] コンパイルエラーなし
+- [x] ファイルが作成される
+- [x] コンパイルエラーなし
 
 ---
 
@@ -65,8 +65,8 @@ inline float ComputeBrakeDecel(float brake_0_1, bool estop, const BrakeParams& p
 5. `brake > 1.0` → clamp で `decel=4.0`
 
 **完了条件**:
-- [ ] コンパイルエラーなし
-- [ ] 5つ以上のテストケースが実装される
+- [x] コンパイルエラーなし
+- [x] 5つ以上のテストケースが実装される
 
 ---
 
@@ -80,8 +80,8 @@ ctest --verbose
 ```
 
 **完了条件**:
-- [ ] `test_brake_model` PASS
-- [ ] ビルドエラーなし
+- [x] `test_brake_model` PASS
+- [x] ビルドエラーなし
 
 ---
 
@@ -105,8 +105,8 @@ Rte::Rte_Write_ActuatorCmd(cmd);
 ```
 
 **完了条件**:
-- [ ] コンパイルエラーなし
-- [ ] 既存動作と同一（リグレッション確認後）
+- [x] コンパイルエラーなし
+- [x] 既存動作と同一（リグレッション確認後）
 
 ---
 
@@ -123,8 +123,8 @@ Rte::Rte_Write_ActuatorCmd(cmd);
 4. RTE Read/Write の正確性
 
 **完了条件**:
-- [ ] コンパイルエラーなし
-- [ ] 4つ以上のテストケースが実装される
+- [x] コンパイルエラーなし
+- [x] 4つ以上のテストケースが実装される
 
 ---
 
@@ -137,8 +137,8 @@ ctest --verbose
 ```
 
 **チェックリスト**:
-- [ ] `test_brake_model` PASS
-- [ ] `test_brake_swc` PASS
+- [x] `test_brake_model` PASS
+- [x] `test_brake_swc` PASS
 
 ---
 
@@ -150,8 +150,8 @@ ctest --verbose
 3. 値に異常がない
 
 **完了条件**:
-- [ ] シミュレーション成功
-- [ ] ログ確認完了
+- [x] シミュレーション成功
+- [x] ログ確認完了
 
 ---
 

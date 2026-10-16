@@ -29,13 +29,19 @@ SDVらしさ（v1）は次を指す。
 - [x] 4. 統合（縦→横→Pose）
   - Engine / Brake / Steering / VehicleDynamics の最小統合は実装済み
   - x, y, yaw, wheel_omega の更新が一貫して動作する
-- [~] 5. SDV v1（一部実装）
-  - [x] SafetySupervisor: SWC別ハートビート監視（Watchdog）を実装済み。1つ途絶 → Degraded、2つ以上 → EStop（ラッチ）
+- [x] 5. SDV v1（Rust 実装で達成。C++ は参照実装として 1 プロセス構成のまま）
+  - [x] SafetySupervisor: SWC別ハートビート監視（Watchdog）。1つ途絶 → Degraded、2つ以上 → EStop（ラッチ）
     - 単体テスト: test_safety_logic.cpp / test_safety_swc.cpp / test_watchdog_integration.cpp
     - 故障注入: `sdv_sim --stall <swc>:<t_s>`
-  - [ ] Config/NVM 更新とロールバック
-  - [ ] UI / シナリオ入力の外部化（現状は内蔵シナリオ）
-  - [ ] 統合テスト・再現性確認
+  - [x] ECU 分割（VCU / Engine / Brake / Steering ECU + Plant、仮想バス、バス障害の注入、ECU の受信側フェイルセーフ）— [ADR-0002](../adr/ADR-0002-ecu-partitioning.md)、[07_ecu_architecture.md](07_ecu_architecture.md)
+  - [x] Config/NVM 更新とロールバック（JSON・検証・A/B 2面 + CRC・破損時のフォールバック）— [ADR-0003](../adr/ADR-0003-config-nvm.md)
+  - [x] UI / シナリオ入力の外部化（ブラウザ GUI、シナリオ JSON）
+  - [x] 統合テスト・再現性確認（C++ の基準ログ 4 本を Rust が全行再現、同じシナリオなら同じログ、CI の `golden-log`）
+- [ ] 6. 今後
+  - [ ] 更新直後に Degraded / EStop になったら自動でロールバック（試験適用、ADR-0003 の後続）
+  - [ ] ログへ Config の世代・適用時刻を記録
+  - [ ] ECU 構成を設定で切り替える（案B・案C を試す）
+  - [ ] C++ の VehicleDynamics を Model 層へ分離（`StepLateral`）
 
 ## 非ゴール（v1ではやらない）
 

@@ -96,7 +96,7 @@ else:
 4. `estop=true` → `decel=4.0` (最大制動)
 5. `brake > 1.0` → `decel=4.0` (clamp)
 
-**ステータス**: ❌ **未実装**
+**ステータス**: ✅ **実装済み**（`tests/test_brake_model.cpp`）
 
 ### 5.2 SWC層テスト（test_brake_swc.cpp）
 

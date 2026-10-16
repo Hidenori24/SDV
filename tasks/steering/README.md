@@ -60,8 +60,8 @@ inline float StepSteeringDynamics(
 ```
 
 **完了条件**:
-- [ ] ファイルが作成される
-- [ ] コンパイルエラーなし
+- [x] ファイルが作成される
+- [x] コンパイルエラーなし
 
 ---
 
@@ -79,8 +79,8 @@ inline float StepSteeringDynamics(
 5. `dt=0` → 変化なし
 
 **完了条件**:
-- [ ] コンパイルエラーなし
-- [ ] 5つ以上のテストケースが実装される
+- [x] コンパイルエラーなし
+- [x] 5つ以上のテストケースが実装される
 
 ---
 
@@ -94,8 +94,8 @@ ctest --verbose
 ```
 
 **完了条件**:
-- [ ] `test_steering_model` PASS
-- [ ] ビルドエラーなし
+- [x] `test_steering_model` PASS
+- [x] ビルドエラーなし
 
 ---
 
@@ -139,7 +139,7 @@ void Main10ms(double dt) {
 ```
 
 **完了条件**:
-- [ ] コンパイルエラーなし
+- [x] コンパイルエラーなし
 
 ---
 
@@ -156,8 +156,8 @@ void Main10ms(double dt) {
 4. 状態遷移の正確性確認
 
 **完了条件**:
-- [ ] コンパイルエラーなし
-- [ ] 4つ以上のテストケースが実装される
+- [x] コンパイルエラーなし
+- [x] 4つ以上のテストケースが実装される
 
 ---
 
@@ -169,8 +169,8 @@ ctest --verbose
 ```
 
 **チェックリスト**:
-- [ ] `test_steering_model` PASS
-- [ ] `test_steering_swc` PASS
+- [x] `test_steering_model` PASS
+- [x] `test_steering_swc` PASS
 
 ---
 
@@ -182,8 +182,8 @@ ctest --verbose
 3. 舵角の時間推移が合理的（一次遅れ挙動）
 
 **完了条件**:
-- [ ] シミュレーション成功
-- [ ] ログ確認完了
+- [x] シミュレーション成功
+- [x] ログ確認完了
 
 ---
 

@@ -1,5 +1,11 @@
 # Task: VehicleDynamics SWC 実装タスク一覧
 
+> **現状（未完了）**: 縦方向の `Model::StepLongitudinal` とそのテスト（`test_vehicle_dynamics_model.cpp`）は実装済み。
+> 横方向（キネマティック・バイシクルモデル）は動作しているが、`vehicledynamics_swc.cpp` に直接書かれていて、
+> **Model 層への分離（`StepLateral`）と SWC 層テスト（`test_vehicledynamics_swc.cpp`）が残っている**。
+> SWC が使うパラメータ（`linear_drag = 0.15` など）は `vehicledynamics_model.h` の既定値（`linear_drag = 0`）と異なる点にも注意。
+> Rust 実装（`rust/sdv-core`）では、縦・横とも `model.rs` の `step_vehicle` に分離済みで、C++ の基準ログとの一致をテストしている。
+
 ## フェーズ分け
 
 ```

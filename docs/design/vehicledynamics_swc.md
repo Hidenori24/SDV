@@ -123,9 +123,9 @@ VehicleState StepLateral(
 - ✅ ブレーキで速度が減らない
 - ✅ E-Stop で追加減速
 
-**StepLateral（未実装）**：
+**StepLateral（未実装。現状は SWC に直接書かれている。Rust 版 `model.rs` では `step_vehicle` に分離済み）**：
 - [ ] steer_angle_cmd=0 → yaw は変わらない
-- [ ] steer_angle_cmd > 0 → yaw_rate > 0（右旋回）
+- [ ] steer_angle_cmd > 0 → yaw_rate > 0（**左旋回** = 反時計回り。`steer` 正 = 左の規約）
 - [ ] v=0 のとき yaw_rate = 0（静止時は旋回なし）
 - [ ] 位置が更新される（x, y）
 
