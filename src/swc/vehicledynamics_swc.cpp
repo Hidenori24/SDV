@@ -2,6 +2,7 @@
 #include "rte/rte.h"
 #include <algorithm>
 #include <cmath>
+#include "bsw/diag.h"
 
 namespace Swc::VehicleDynamics {
 
@@ -54,6 +55,7 @@ void Step10ms(double dt_s)
     st.t = st.t + dt;
 
     Rte::Rte_Write_VehicleState(st);
+    Bsw::Diag::ReportAlive(Bsw::Diag::Component::VehicleDynamics);
 }
 
 } // namespace Swc::VehicleDynamics

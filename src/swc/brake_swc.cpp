@@ -1,6 +1,7 @@
 #include "swc/brake_swc.h"
 #include "rte/rte.h"
 #include "model/brake_model.h"
+#include "bsw/diag.h"
 
 namespace Swc::Brake {
 
@@ -20,6 +21,7 @@ void Main10ms(double /*dt_s*/)
     cmd.brake_decel_cmd = Model::ComputeBrakeDecel(in.brake, estop, g_params);
 
     Rte::Rte_Write_ActuatorCmd(cmd);
+    Bsw::Diag::ReportAlive(Bsw::Diag::Component::Brake);
 }
 
 } // namespace Swc::Brake

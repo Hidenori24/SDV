@@ -1,6 +1,7 @@
 #include "swc/steering_swc.h"
 #include "rte/rte.h"
 #include "model/steering_model.h"
+#include "bsw/diag.h"
 
 namespace Swc::Steering {
 
@@ -22,6 +23,7 @@ void Main10ms(double dt_s)
     auto cmd = Rte::Rte_Read_ActuatorCmd();
     cmd.steer_angle_cmd = g_steer_angle;
     Rte::Rte_Write_ActuatorCmd(cmd);
+    Bsw::Diag::ReportAlive(Bsw::Diag::Component::Steering);
 }
 
 } // namespace Swc::Steering

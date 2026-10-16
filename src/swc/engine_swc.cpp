@@ -3,6 +3,7 @@
 #include <algorithm>
 
 #include "model/engine_model.h"
+#include "bsw/diag.h"
 
 namespace Swc::Engine {
 
@@ -24,6 +25,7 @@ void Main10ms(double /*dt_s*/)
     cmd.drive_accel_cmd = Model::ComputeDriveAccel(in.throttle, estop, g_params);
 
     Rte::Rte_Write_ActuatorCmd(cmd);
+    Bsw::Diag::ReportAlive(Bsw::Diag::Component::Engine);
 }
 
 } // namespace Swc::Engine
