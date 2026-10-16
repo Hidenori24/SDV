@@ -22,7 +22,7 @@ SDVらしさ（v1）は次を指す。
   - 単体テスト: test_engine_model.cpp / test_engine_swc.cpp
 - [x] 2. Steeringのみ
   - steer → steer_angle_cmd（飽和＋一次遅れ）→ yaw の更新が動作する
-  - 単体テスト: test_steering_swc.cpp
+  - 単体テスト: test_steering_model.cpp / test_steering_swc.cpp
 - [x] 3. Brakeのみ
   - brake → brake_decel_cmd → v >= 0 を維持する
   - 単体テスト: test_brake_model.cpp / test_brake_swc.cpp
@@ -30,7 +30,8 @@ SDVらしさ（v1）は次を指す。
   - Engine / Brake / Steering / VehicleDynamics の最小統合は実装済み
   - x, y, yaw, wheel_omega の更新が一貫して動作する
 - [~] 5. SDV v1（一部実装）
-  - [x] SafetySupervisor: Watchdog タイムアウト → EStop を実装済み
+  - [~] SafetySupervisor: estop → system_state=EStop の反映とシステムハートビート更新のみ実装済み（単体テスト: test_safety_swc.cpp）
+  - [ ] SafetySupervisor: SWC別ハートビート監視（Watchdog タイムアウト → EStop）は未実装
   - [ ] Config/NVM 更新とロールバック
   - [ ] UI / シナリオ入力の外部化（現状は内蔵シナリオ）
   - [ ] 統合テスト・再現性確認
