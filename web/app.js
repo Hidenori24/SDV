@@ -11,8 +11,10 @@ const SAFETY = [
 const HISTORY_S = 10;
 const SILENT0 = 15;            // 出力バッファ: SWCごとの無応答時間[ms] (engine, brake, steering, vehicledynamics)
 const TIMEOUT_MS = 1000;       // ウォッチドッグのタイムアウト（Rust側の既定値と同じ）
-const SWCS = ["Engine", "Brake", "Steering", "VehicleDynamics"];
+const FS0 = 19;                // 出力バッファ: ECU(engine, brake, steering)ごとのフェイルセーフ（bit0: 入力途絶, bit1: Safety途絶）
 const stalled = [false, false, false, false];
+let vcuStalled = false;
+const bus = { delayTicks: 0, loss: 0, down: false };
 
 let wasm, mem;
 const trail = [];           // {x,y} (視点側の短い軌跡、最大6000点)
@@ -34,31 +36,69 @@ function applyInput() {
 
 function resetSim() {
   wasm.sdv_reset();
-  stalled.fill(false);
+  stalled.fill(false); vcuStalled = false;
+  bus.delayTicks = 0; bus.loss = 0; bus.down = false;
+  $("bdelay").value = 0; $("bloss").value = 0; syncBusUi();
   wasm.sdv_use_scenario(scenario ? 1 : 0);
   trail.length = 0; hist.length = 0; clearPath();
   applyInput();
   wasm.sdv_step(1);
 }
 
-// SWC故障注入ボタン（Rust側の sdv_set_stall に対応）
-const swcEls = SWCS.map((name, i) => {
+// ECU構成図（Rust側の sdv_set_stall / sdv_set_vcu_stall / sdv_set_bus に対応）
+// index: 0 engine, 1 brake, 2 steering, 3 plant(vehicledynamics)。VCUは別枠。
+function makeNode(parent, name, sub, onClick) {
   const b = document.createElement("button");
   b.className = "swc"; b.setAttribute("aria-pressed", "false");
   b.innerHTML = `<span class="nm">${name}</span><span class="st">正常</span><span class="bar"><i></i></span>`;
-  b.addEventListener("click", () => { stalled[i] = !stalled[i]; wasm.sdv_set_stall(i, stalled[i] ? 1 : 0); });
-  $("swcs").appendChild(b);
+  b.title = sub; b.addEventListener("click", onClick);
+  parent.appendChild(b);
   return b;
+}
+const vcuEl = makeNode($("n_vcu"), "VCU（DriverInput · Safety）", "車両制御ユニット / ゲートウェイ", () => {
+  vcuStalled = !vcuStalled; wasm.sdv_set_vcu_stall(vcuStalled ? 1 : 0);
 });
+const NODE_DEFS = [["Engine ECU", 0, "Engine"], ["Brake ECU", 1, "Brake"], ["Steering ECU", 2, "Steering"]];
+const ecuEls = NODE_DEFS.map(([name, i, sub]) => makeNode($("ecus"), name, sub, () => {
+  stalled[i] = !stalled[i]; wasm.sdv_set_stall(i, stalled[i] ? 1 : 0);
+}));
+const plantEl = makeNode($("n_plant"), "Plant（VehicleDynamics）", "制御対象。ECUではない", () => {
+  stalled[3] = !stalled[3]; wasm.sdv_set_stall(3, stalled[3] ? 1 : 0);
+});
+function applyBus() { wasm.sdv_set_bus(bus.delayTicks, bus.loss * 10, bus.down ? 1 : 0); }
+function syncBusUi() {
+  $("bdelayO").value = bus.delayTicks * 10 + " ms"; $("blossO").value = bus.loss + " %";
+  $("bdown").classList.toggle("on", bus.down); $("bdown").setAttribute("aria-pressed", bus.down);
+  const bl = $("busline");
+  bl.className = "busline" + (bus.down ? " down" : (bus.delayTicks || bus.loss) ? " degraded" : "");
+  $("busLbl").textContent = bus.down ? "車載バス 断" : (bus.delayTicks || bus.loss)
+    ? `車載バス 遅延 ${bus.delayTicks * 10} ms / 欠損 ${bus.loss} %` : "車載バス 正常";
+}
+$("bdelay").addEventListener("input", () => { bus.delayTicks = +$("bdelay").value; syncBusUi(); applyBus(); });
+$("bloss").addEventListener("input", () => { bus.loss = +$("bloss").value; syncBusUi(); applyBus(); });
+$("bdown").addEventListener("click", () => { bus.down = !bus.down; syncBusUi(); applyBus(); });
+
+function setNode(b, { stalledNow, ms, text, warn }) {
+  const dead = ms > TIMEOUT_MS;
+  b.classList.toggle("stalled", stalledNow); b.classList.toggle("dead", dead || !!warn);
+  b.setAttribute("aria-pressed", stalledNow);
+  b.querySelector(".st").textContent = text;
+  b.querySelector(".bar i").style.width = Math.min(100, (ms / TIMEOUT_MS) * 100) + "%";
+}
 function updateSwcs(o) {
-  swcEls.forEach((b, i) => {
-    const ms = o[SILENT0 + i], dead = ms > TIMEOUT_MS;
-    b.classList.toggle("stalled", stalled[i]); b.classList.toggle("dead", dead);
-    b.setAttribute("aria-pressed", stalled[i]);
-    b.querySelector(".st").textContent = dead ? `応答なし（${(ms / 1000).toFixed(1)}s）`
-      : stalled[i] ? `停止中（無応答 ${(ms / 1000).toFixed(1)}s）` : "正常";
-    b.querySelector(".bar i").style.width = Math.min(100, (ms / TIMEOUT_MS) * 100) + "%";
+  const sec = (ms) => (ms / 1000).toFixed(1);
+  // ECU: ウォッチドッグ(VCU)の無応答判定 + ECU自身のフェイルセーフ
+  ecuEls.forEach((b, k) => {
+    const i = NODE_DEFS[k][1], ms = o[SILENT0 + i], fs = o[FS0 + k] | 0;
+    let text = ms > TIMEOUT_MS ? `応答なし ${sec(ms)}s` : stalled[i] ? `停止中 ${sec(ms)}s` : "正常";
+    if (fs & 2) text += "\n⚠ 自律EStop"; else if (fs & 1) text += "\n⚠ 入力0扱い";
+    setNode(b, { stalledNow: stalled[i], ms, text, warn: fs });
   });
+  const pms = o[SILENT0 + 3];
+  setNode(plantEl, { stalledNow: stalled[3], ms: pms,
+    text: pms > TIMEOUT_MS ? `応答なし ${sec(pms)}s` : stalled[3] ? `停止中 ${sec(pms)}s` : "正常" });
+  setNode(vcuEl, { stalledNow: vcuStalled, ms: 0, text: vcuStalled ? "停止中（Safety/入力を送信しない）" : "正常",
+    warn: vcuStalled && (o[FS0] | 0) & 2 });
 }
 
 function clearPath() { path.length = 0; pathDist = 0; trail.length = 0; }
