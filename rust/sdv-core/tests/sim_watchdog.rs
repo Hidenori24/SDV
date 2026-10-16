@@ -6,11 +6,11 @@ use sdv_core::sim::{Component, Row, Sim, SystemState};
 /// Mirrors C++ `main.cpp`: a SWC is stalled once the *current* simulated time reaches `from_s`.
 fn run_with_stalls(stalls: &[(Component, f32)], ticks: usize) -> Vec<Row> {
     let mut sim = Sim::new();
-    sim.use_scenario = true;
+    sim.set_use_scenario(true);
     let mut rows = Vec::new();
     for _ in 0..ticks {
         for &(c, from) in stalls {
-            if sim.state.t >= from {
+            if sim.state().t >= from {
                 sim.set_stall(c, true);
             }
         }
@@ -55,11 +55,11 @@ fn stalled_vehicledynamics_freezes_time_like_cpp() {
 #[test]
 fn healthy_sim_never_leaves_normal() {
     let mut sim = Sim::new();
-    sim.input.throttle = 0.5;
+    sim.input_mut().throttle = 0.5;
     for _ in 0..6000 {
         sim.step_10ms();
-        assert_eq!(sim.safety.system_state, SystemState::Normal);
-        assert!(!sim.safety.estop);
+        assert_eq!(sim.safety().system_state, SystemState::Normal);
+        assert!(!sim.safety().estop);
     }
 }
 
@@ -68,46 +68,46 @@ fn degraded_recovers_when_swc_resumes() {
     let mut sim = Sim::new();
     sim.set_stall(Component::Steering, true);
     for _ in 0..150 { sim.step_10ms(); }
-    assert_eq!(sim.safety.system_state, SystemState::Degraded);
+    assert_eq!(sim.safety().system_state, SystemState::Degraded);
     sim.set_stall(Component::Steering, false);
     for _ in 0..30 { sim.step_10ms(); }
-    assert_eq!(sim.safety.system_state, SystemState::Normal);
+    assert_eq!(sim.safety().system_state, SystemState::Normal);
 }
 
 #[test]
 fn watchdog_estop_latches_until_reset() {
     let mut sim = Sim::new();
-    sim.input.throttle = 1.0;
+    sim.input_mut().throttle = 1.0;
     sim.set_stall(Component::Engine, true);
     sim.set_stall(Component::Brake, true);
     for _ in 0..200 { sim.step_10ms(); }
-    assert!(sim.safety.estop);
-    assert_eq!(sim.safety.system_state, SystemState::EStop);
+    assert!(sim.safety().estop);
+    assert_eq!(sim.safety().system_state, SystemState::EStop);
 
     sim.set_stall(Component::Engine, false);
     sim.set_stall(Component::Brake, false);
     sim.set_estop_request(false);
     for _ in 0..100 { sim.step_10ms(); }
-    assert_eq!(sim.safety.system_state, SystemState::EStop, "latched");
+    assert_eq!(sim.safety().system_state, SystemState::EStop, "latched");
 
     sim.reset();
     for _ in 0..30 { sim.step_10ms(); }
-    assert_eq!(sim.safety.system_state, SystemState::Normal);
-    assert!(!sim.safety.estop);
+    assert_eq!(sim.safety().system_state, SystemState::Normal);
+    assert!(!sim.safety().estop);
 }
 
 #[test]
 fn external_estop_request_still_works_and_releases() {
     let mut sim = Sim::new();
-    sim.input.throttle = 1.0;
+    sim.input_mut().throttle = 1.0;
     for _ in 0..300 { sim.step_10ms(); }
     sim.set_estop_request(true);
     for _ in 0..200 { sim.step_10ms(); }
-    assert_eq!(sim.state.v, 0.0);
-    assert_eq!(sim.safety.system_state, SystemState::EStop);
+    assert_eq!(sim.state().v, 0.0);
+    assert_eq!(sim.safety().system_state, SystemState::EStop);
     sim.set_estop_request(false);
     for _ in 0..30 { sim.step_10ms(); }
-    assert_eq!(sim.safety.system_state, SystemState::Normal);
+    assert_eq!(sim.safety().system_state, SystemState::Normal);
 }
 
 #[test]

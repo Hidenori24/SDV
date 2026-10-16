@@ -15,7 +15,7 @@ fn rust_matches_cpp_reference_log() {
     assert_eq!(header, sdv_core::sim::Row::CSV_HEADER);
 
     let mut sim = Sim::new();
-    sim.use_scenario = true;
+    sim.set_use_scenario(true);
 
     let mut rows = 0;
     for line in lines {
@@ -35,21 +35,21 @@ fn rust_matches_cpp_reference_log() {
 #[test]
 fn estop_stops_the_vehicle() {
     let mut sim = Sim::new();
-    sim.input.throttle = 1.0;
+    sim.input_mut().throttle = 1.0;
     for _ in 0..300 { sim.step_10ms(); }
-    assert!(sim.state.v > 0.5);
-    sim.safety.estop = true;
+    assert!(sim.state().v > 0.5);
+    sim.set_estop_request(true);
     for _ in 0..200 { sim.step_10ms(); }
-    assert_eq!(sim.state.v, 0.0);
-    assert_eq!(sim.safety.system_state, sdv_core::sim::SystemState::EStop);
+    assert_eq!(sim.state().v, 0.0);
+    assert_eq!(sim.safety().system_state, sdv_core::sim::SystemState::EStop);
 }
 
 #[test]
 fn speed_is_capped_and_never_negative() {
     let mut sim = Sim::new();
-    sim.input.throttle = 1.0;
-    for _ in 0..3000 { sim.step_10ms(); assert!(sim.state.v >= 0.0 && sim.state.v <= 3.0); }
-    sim.input.throttle = 0.0;
-    sim.input.brake = 1.0;
-    for _ in 0..1000 { sim.step_10ms(); assert!(sim.state.v >= 0.0); }
+    sim.input_mut().throttle = 1.0;
+    for _ in 0..3000 { sim.step_10ms(); assert!(sim.state().v >= 0.0 && sim.state().v <= 3.0); }
+    sim.input_mut().throttle = 0.0;
+    sim.input_mut().brake = 1.0;
+    for _ in 0..1000 { sim.step_10ms(); assert!(sim.state().v >= 0.0); }
 }
