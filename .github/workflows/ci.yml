@@ -15,9 +15,9 @@ permissions:
 jobs:
   cpp-tests:
     name: cpp-tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
       - name: Build
@@ -28,19 +28,19 @@ jobs:
         run: |
           mkdir -p logs
           ./build/sdv_sim
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: cpp-sim-log
           path: logs/latest.csv
 
   rust-tests:
     name: rust-tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: rust/sdv-core
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -52,10 +52,10 @@ jobs:
   golden-log:
     name: golden-log
     needs: cpp-tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
         with:
           name: cpp-sim-log
           path: out
@@ -69,7 +69,7 @@ jobs:
     name: ci-ok
     if: always()
     needs: [cpp-tests, rust-tests, golden-log]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: All required jobs succeeded
         run: |
