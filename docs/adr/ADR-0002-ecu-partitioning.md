@@ -1,7 +1,7 @@
 # ADR-0002: 疑似ECU分割の方針
 
 ## Status
-Proposed（議論用。決定したら Accepted に更新する）
+Accepted（案Aで進める。詳細は「決定事項」）
 
 ## Context
 現状は全SWCが1つのプロセス・1つのグローバルRTEを共有している。実車では機能ごとに別ECUに載り、
@@ -103,9 +103,9 @@ ADR-0001 の「ECU分割に強い」という前提を、実際に試せる形�
 - 悪い点: 実装・テストが増える。Watchdog の監視対象が SWC から ECU に変わる（Plant は対象外）。C++ には反映しない（Rust のみ）
 - 要確認事項（下記）が決まるまでは実装しない
 
-## 相談したい点
-1. 案A（4ECU）で始めてよいか。B（3ECU）の方が好みか
-2. Brake は独立ECU（A）か、Powertrain と同居（B）か
-3. VCU停止時の動作は上表（各ECUが自律してEStop）でよいか
-4. バスのイメージは CAN 風（固定周期フレーム）でよいか。Ethernet 風（サービス指向）まで広げたいか
-5. VehicleState（センサ）は VCU だけでよいか。各ECUにも配るか
+## 決定事項（2026-10-16）
+1. 案A（VCU / Engine / Brake / Steering の4ECU）で始める
+2. Brake は独立ECU
+3. VCU 停止時は、各ECUが Safety 信号の途絶を検出して自律的に EStop 相当の動作に入る
+4. バスは CAN 風（固定周期フレーム、最新値 + 経過時間 + 生存カウンタ）。Ethernet風（サービス指向）は将来の拡張
+5. VehicleState（センサ）は VCU だけに配る（各ECUが必要になったら別途検討）
