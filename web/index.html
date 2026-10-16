@@ -35,8 +35,14 @@ canvas{display:block;width:100%;border-radius:6px}
 button{font:inherit;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:6px 12px;cursor:pointer}
 button:hover{border-color:var(--accent)}
 button.on{background:var(--accent);border-color:var(--accent);color:#fff}
-button.estop{background:var(--danger);border-color:var(--danger);color:#fff;font-weight:700;flex:1}
-button.estop.on{outline:3px solid color-mix(in srgb,var(--danger) 40%,transparent)}
+button.estop{background:var(--danger);border-color:var(--danger);color:#fff;font-weight:800;flex:1 1 100%;font-size:16px;padding:12px 8px;letter-spacing:.04em}
+button.estop.on{background:#fff;color:var(--danger);outline:4px solid var(--danger);animation:blink 1s steps(2,jump-none) infinite}
+@keyframes blink{50%{background:var(--danger);color:#fff}}
+@media (prefers-reduced-motion:reduce){button.estop.on{animation:none}}
+.viewwrap{position:relative}
+.viewwrap.estop #view{outline:4px solid var(--danger);outline-offset:-4px}
+#estopBanner{display:none;position:absolute;top:10px;left:50%;transform:translateX(-50%);padding:6px 18px;border-radius:99px;background:var(--danger);color:#fff;font-weight:800;font-size:16px;letter-spacing:.08em;box-shadow:0 2px 8px #0005}
+.viewwrap.estop #estopBanner{display:block}
 .stats{display:grid;grid-template-columns:1fr 1fr;gap:6px 12px;margin:0}
 .stats div{display:flex;justify-content:space-between;border-bottom:1px dashed var(--line);padding:2px 0}
 .stats dt{color:var(--sub)}.stats dd{margin:0;font-variant-numeric:tabular-nums}
@@ -52,7 +58,7 @@ h2{font-size:13px;margin:0 0 4px;color:var(--sub);font-weight:600}
 <div id="err"></div>
 <main>
   <section class="card">
-    <canvas id="view"></canvas>
+    <div class="viewwrap" id="viewwrap"><canvas id="view"></canvas><div id="estopBanner" role="alert">■ E-STOP 作動中</div></div>
     <canvas id="chart"></canvas>
     <p class="hint">キー操作: ↑/W=アクセル ↓/S=ブレーキ ←→/A,D=ステア Space=E-Stop。キー入力はスライダーに反映されます。</p>
   </section>
@@ -64,7 +70,7 @@ h2{font-size:13px;margin:0 0 4px;color:var(--sub);font-weight:600}
     <div class="row"><label for="brk">Brake</label><input id="brk" type="range" min="0" max="1" step="0.01" value="0"><output id="brkO">0.00</output></div>
     <div class="row"><label for="str">Steer</label><input id="str" type="range" min="-1" max="1" step="0.01" value="0"><output id="strO">0.00</output></div>
     <div class="btns">
-      <button id="estop" class="estop">E-STOP</button>
+      <button id="estop" class="estop" aria-pressed="false">E-STOP（Space）</button>
       <button id="scn">デモシナリオ</button>
       <button id="reset">リセット</button>
       <button id="pause">一時停止</button>
