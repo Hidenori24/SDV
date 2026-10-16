@@ -55,6 +55,16 @@ button.estop.on{background:#fff;color:var(--danger);outline:4px solid var(--dang
 .safety .sub{font-size:12px;opacity:.9}
 .safety.degraded{background:var(--warn);color:#1d2330}
 .safety.estop{background:var(--danger)}
+.swcs{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.swc{display:block;text-align:left;padding:6px 8px;line-height:1.3}
+.swc .nm{font-weight:700}
+.swc .st{display:block;font-size:12px;color:var(--sub)}
+.swc .bar{display:block;height:4px;border-radius:2px;background:var(--line);margin-top:4px;overflow:hidden}
+.swc .bar i{display:block;height:100%;width:0;background:var(--warn)}
+.swc.stalled{border-color:var(--warn)}
+.swc.dead{border-color:var(--danger);background:color-mix(in srgb,var(--danger) 12%,var(--panel))}
+.swc.dead .st{color:var(--danger);font-weight:700}
+.swc.dead .bar i{background:var(--danger)}
 h2{font-size:13px;margin:0 0 4px;color:var(--sub);font-weight:600}
 .hint{color:var(--sub);font-size:12px;margin-top:8px}
 #err{display:none;color:var(--danger);padding:0 16px}
@@ -87,6 +97,9 @@ h2{font-size:13px;margin:0 0 4px;color:var(--sub);font-weight:600}
     <div class="row"><label for="spd">再生速度</label><input id="spd" type="range" min="0.25" max="4" step="0.25" value="1"><output id="spdO">1.0x</output></div>
     <h2 style="margin-top:12px">Safety状態</h2>
     <div id="safety" class="safety" role="status" aria-live="polite"><span class="ico" id="safetyIco">●</span><div><div class="lbl" id="safetyLbl">NORMAL</div><div class="sub" id="safetySub">正常</div></div></div>
+    <h2>SWC監視（故障注入）</h2>
+    <div id="swcs" class="swcs"></div>
+    <p class="hint" style="margin-top:4px">SWCを止めると、1.0秒を超えて応答がない時点で検出されます。1つ → DEGRADED、2つ以上 → E-STOP（ラッチ。リセットで解除）。</p>
     <h2>状態量</h2>
     <dl class="stats">
       <div><dt>t</dt><dd id="s_t">0</dd></div><div><dt>v [m/s]</dt><dd id="s_v">0</dd></div>
