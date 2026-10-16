@@ -11,7 +11,9 @@ const SAFETY = [
 const HISTORY_S = 10;
 
 let wasm, mem;
-const trail = [];           // {x,y}
+const trail = [];           // {x,y} (視点側の短い軌跡、最大6000点)
+const path = [];            // 全体マップ用の間引き済み軌跡 {x,y}
+let pathDist = 0;
 const hist = [];            // {t,v,steer}
 let paused = false, scenario = false, estop = false, speed = 1;
 let last = null, acc = 0;
@@ -27,9 +29,18 @@ function applyInput() {
 function resetSim() {
   wasm.sdv_reset();
   wasm.sdv_use_scenario(scenario ? 1 : 0);
-  trail.length = 0; hist.length = 0;
+  trail.length = 0; hist.length = 0; clearPath();
   applyInput();
   wasm.sdv_step(1);
+}
+
+function clearPath() { path.length = 0; pathDist = 0; trail.length = 0; }
+$("clearTrail").addEventListener("click", clearPath);
+// 5cm以上動いたときだけ点を追加（長時間でも点数が増えすぎない）
+function addPath(x, y) {
+  const p = path[path.length - 1];
+  if (p) { const d = Math.hypot(x - p.x, y - p.y); if (d < 0.05) return; pathDist += d; }
+  path.push({ x, y });
 }
 
 function setSlider(id, v) { $(id).value = v; $(id + "O").value = (+v).toFixed(2); }
@@ -138,6 +149,30 @@ function drawWheel(o) {
   g.fillText(`${(rot * 180 / Math.PI).toFixed(0)}°`, W / 2, H - 4 * d); g.textAlign = "start";
 }
 
+// 軌跡全体を枠に収めて描く（全体を自動フィット、等縮尺）。現在位置は丸で表示
+function drawMap(o) {
+  const c = $("map"), d = fit(c), g = c.getContext("2d");
+  const W = c.width, H = c.height, pad = 16 * d;
+  g.fillStyle = css("--bg"); g.fillRect(0, 0, W, H);
+  g.strokeStyle = css("--line"); g.lineWidth = d; g.strokeRect(0.5, 0.5, W - 1, H - 1);
+  const cur = { x: o[IDX.x], y: o[IDX.y] }, pts = path.concat([cur, { x: 0, y: 0 }]);
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+  for (const p of pts) { x0 = Math.min(x0, p.x); x1 = Math.max(x1, p.x); y0 = Math.min(y0, p.y); y1 = Math.max(y1, p.y); }
+  const span = Math.max(x1 - x0, y1 - y0, 0.5); // 最小0.5m幅
+  const S = Math.min((W - 2 * pad) / span, (H - 2 * pad) / span);
+  const ox = W / 2 - ((x0 + x1) / 2) * S, oy = H / 2 + ((y0 + y1) / 2) * S;
+  const X = (x) => ox + x * S, Y = (y) => oy - y * S;
+  g.fillStyle = css("--sub"); g.beginPath(); g.arc(X(0), Y(0), 4 * d, 0, 7); g.fill(); // スタート地点
+  g.strokeStyle = css("--accent"); g.lineWidth = 2.5 * d; g.lineJoin = "round"; g.beginPath();
+  path.forEach((p, i) => (i ? g.lineTo(X(p.x), Y(p.y)) : g.moveTo(X(p.x), Y(p.y))));
+  g.lineTo(X(cur.x), Y(cur.y)); g.stroke();
+  g.fillStyle = estop || o[IDX.state] === 2 ? css("--danger") : css("--car");
+  g.beginPath(); g.arc(X(cur.x), Y(cur.y), 5 * d, 0, 7); g.fill();
+  g.fillStyle = css("--sub"); g.font = `${11 * d}px system-ui`;
+  g.fillText(`表示幅 ${span.toFixed(1)} m`, 8 * d, H - 8 * d);
+  $("dist").textContent = pathDist.toFixed(2) + " m";
+}
+
 function drawChart() {
   const c = $("chart"), d = fit(c), g = c.getContext("2d");
   const W = c.width, H = c.height;
@@ -189,14 +224,14 @@ function frame(ts) {
     while (n-- > 0) {
       wasm.sdv_step(1);
       const o = out();
-      trail.push({ x: o[IDX.x], y: o[IDX.y] });
+      trail.push({ x: o[IDX.x], y: o[IDX.y] }); addPath(o[IDX.x], o[IDX.y]);
       hist.push({ t: o[IDX.t], v: o[IDX.v], steer: o[IDX.steerCmd] });
     }
     if (trail.length > 6000) trail.splice(0, trail.length - 6000);
     while (hist.length && hist[0].t < hist[hist.length - 1].t - HISTORY_S - 1) hist.shift();
   }
   const o = out();
-  drawView(o); drawWheel(o); drawChart(); updateHud(o);
+  drawView(o); drawWheel(o); drawChart(); drawMap(o); updateHud(o);
 }
 
 (async () => {
