@@ -13,6 +13,7 @@ cd web && python3 -m http.server 8000   # http://localhost:8000
 - スライダー or キー: ↑/W アクセル、↓/S ブレーキ、←→/A,D ステア、Space E-Stop
 - 「デモシナリオ」: C++ 版と同じ内蔵シナリオを再生
 - 再生速度 0.25x〜4x、一時停止、リセット
+- SWC監視（故障注入）: Engine / Brake / Steering / VehicleDynamics のボタンでSWCを停止/再開。無応答が1.0秒を超えると検出され、1つ → DEGRADED、2つ以上 → E-STOP（ラッチ、リセットで解除）。ウォッチドッグ由来のE-STOPでも走行ビューに赤枠とバナーを表示
 - 走行軌跡（全体）: 軌跡全体を自動フィットして表示。「軌跡クリア」またはリセットで消去
 
 ## GitHub Pages

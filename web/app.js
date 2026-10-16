@@ -9,6 +9,10 @@ const SAFETY = [
   { cls: "estop",    ico: "■", lbl: "E-STOP",   sub: "非常停止" },
 ];
 const HISTORY_S = 10;
+const SILENT0 = 15;            // 出力バッファ: SWCごとの無応答時間[ms] (engine, brake, steering, vehicledynamics)
+const TIMEOUT_MS = 1000;       // ウォッチドッグのタイムアウト（Rust側の既定値と同じ）
+const SWCS = ["Engine", "Brake", "Steering", "VehicleDynamics"];
+const stalled = [false, false, false, false];
 
 let wasm, mem;
 const trail = [];           // {x,y} (視点側の短い軌跡、最大6000点)
@@ -28,10 +32,31 @@ function applyInput() {
 
 function resetSim() {
   wasm.sdv_reset();
+  stalled.fill(false);
   wasm.sdv_use_scenario(scenario ? 1 : 0);
   trail.length = 0; hist.length = 0; clearPath();
   applyInput();
   wasm.sdv_step(1);
+}
+
+// SWC故障注入ボタン（Rust側の sdv_set_stall に対応）
+const swcEls = SWCS.map((name, i) => {
+  const b = document.createElement("button");
+  b.className = "swc"; b.setAttribute("aria-pressed", "false");
+  b.innerHTML = `<span class="nm">${name}</span><span class="st">正常</span><span class="bar"><i></i></span>`;
+  b.addEventListener("click", () => { stalled[i] = !stalled[i]; wasm.sdv_set_stall(i, stalled[i] ? 1 : 0); });
+  $("swcs").appendChild(b);
+  return b;
+});
+function updateSwcs(o) {
+  swcEls.forEach((b, i) => {
+    const ms = o[SILENT0 + i], dead = ms > TIMEOUT_MS;
+    b.classList.toggle("stalled", stalled[i]); b.classList.toggle("dead", dead);
+    b.setAttribute("aria-pressed", stalled[i]);
+    b.querySelector(".st").textContent = dead ? `応答なし（${(ms / 1000).toFixed(1)}s）`
+      : stalled[i] ? `停止中（無応答 ${(ms / 1000).toFixed(1)}s）` : "正常";
+    b.querySelector(".bar i").style.width = Math.min(100, (ms / TIMEOUT_MS) * 100) + "%";
+  });
 }
 
 function clearPath() { path.length = 0; pathDist = 0; trail.length = 0; }
@@ -51,7 +76,6 @@ function setEstop(on) {
   estop = on;
   $("estop").classList.toggle("on", on); $("estop").setAttribute("aria-pressed", on);
   $("estop").textContent = on ? "E-STOP 作動中（再押下で解除）" : "E-STOP（Space）";
-  $("viewwrap").classList.toggle("estop", on);
 }
 $("estop").addEventListener("click", () => setEstop(!estop));
 $("scn").addEventListener("click", () => {
@@ -207,6 +231,10 @@ function updateHud(o) {
   $("s_dc").textContent = o[IDX.dec].toFixed(2);
   const sf = SAFETY[o[IDX.state]] || { cls: "degraded", ico: "?", lbl: "UNKNOWN", sub: "不明" };
   $("safety").className = "safety " + sf.cls;
+  // 手動E-STOPでもウォッチドッグ由来のEStopでも、走行ビューに赤枠とバナーを出す
+  const sysEstop = o[IDX.state] === 2;
+  $("viewwrap").classList.toggle("estop", sysEstop || estop);
+  $("estopBanner").textContent = estop ? "■ E-STOP 作動中" : "■ E-STOP（ウォッチドッグ検出）";
   $("safetyIco").textContent = sf.ico; $("safetyLbl").textContent = sf.lbl; $("safetySub").textContent = sf.sub;
   if (scenario) { setSlider("thr", o[IDX.thr]); setSlider("brk", o[IDX.brk]); setSlider("str", o[IDX.str]); }
 }
@@ -231,7 +259,7 @@ function frame(ts) {
     while (hist.length && hist[0].t < hist[hist.length - 1].t - HISTORY_S - 1) hist.shift();
   }
   const o = out();
-  drawView(o); drawWheel(o); drawChart(); drawMap(o); updateHud(o);
+  drawView(o); drawWheel(o); drawChart(); drawMap(o); updateHud(o); updateSwcs(o);
 }
 
 (async () => {
