@@ -126,3 +126,77 @@ pub fn step_vehicle(
     o.t += dt;
     o
 }
+
+// ---- Safety logic (mirrors `src/model/safety_logic.h`) ----
+
+/// Safety state (values match the system_state signal).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[repr(u8)]
+pub enum SafetyState {
+    #[default]
+    Normal = 0,
+    Degraded = 1,
+    EStop = 2,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SafetyParams {
+    /// A monitored SWC is "dead" when silent for longer than this.
+    pub heartbeat_timeout_ms: u32,
+}
+impl Default for SafetyParams {
+    fn default() -> Self {
+        Self { heartbeat_timeout_ms: 1000 }
+    }
+}
+
+/// Per-SWC liveness verdict (true = alive).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HeartbeatStatus {
+    pub engine_ok: bool,
+    pub brake_ok: bool,
+    pub steering_ok: bool,
+    pub vehicledynamics_ok: bool,
+}
+impl Default for HeartbeatStatus {
+    fn default() -> Self {
+        Self { engine_ok: true, brake_ok: true, steering_ok: true, vehicledynamics_ok: true }
+    }
+}
+
+/// Watchdog state for one monitored SWC.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HeartbeatMonitor {
+    /// Alive counter observed at the previous check.
+    pub last_count: u64,
+    /// Time during which the counter did not advance.
+    pub silent_ms: u32,
+}
+
+/// The counter advancing resets the silence timer; otherwise silence grows by `dt_ms`.
+/// Returns true while the SWC is considered alive (`silent_ms <= timeout`).
+pub fn update_heartbeat(m: &mut HeartbeatMonitor, alive_count: u64, dt_ms: u32, p: &SafetyParams) -> bool {
+    if alive_count != m.last_count {
+        m.last_count = alive_count;
+        m.silent_ms = 0;
+    } else {
+        m.silent_ms += dt_ms;
+    }
+    m.silent_ms <= p.heartbeat_timeout_ms
+}
+
+pub fn count_failed(hb: &HeartbeatStatus) -> u32 {
+    [hb.engine_ok, hb.brake_ok, hb.steering_ok, hb.vehicledynamics_ok]
+        .iter()
+        .filter(|ok| !**ok)
+        .count() as u32
+}
+
+/// 0 dead -> Normal, 1 dead -> Degraded, 2 or more dead -> EStop.
+pub fn compute_safety_state(hb: &HeartbeatStatus) -> SafetyState {
+    match count_failed(hb) {
+        0 => SafetyState::Normal,
+        1 => SafetyState::Degraded,
+        _ => SafetyState::EStop,
+    }
+}
