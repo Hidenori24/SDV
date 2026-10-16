@@ -26,7 +26,15 @@ cargo build --release --target wasm32-unknown-unknown # -> target/wasm32-unknown
 - `Sim::with_config(cfg)` で起動、`Sim::set_config(cfg)` で入れ替え（再起動扱い）、`Sim::reset()` は同じ Config で再起動
 - フェイルセーフのタイムアウトは ms で指定し、10msティックに切り上げて使う
 - `tests/config.rs`: 形式・検証・境界値と、Config が挙動（加速・最高速度・旋回・Watchdog検出時間・フェイルセーフ反応時間）を実際に変えること
-- NVM（A/B・CRC・ロールバック）は次のPR
+
+## NVM（疑似不揮発メモリ）
+`nvm.rs`: Config を A/B 2面（Active / Backup）+ 世代番号 + CRC32 で保存する（[ADR-0003](../docs/adr/ADR-0003-config-nvm.md)）。
+- `commit(json)`: 検証に通ったものだけ保存（`Backup ← Active`、`Active ← 新Config`。保存するのは既定値を補った完全な形）。落ちたら何も変えず、全エラーを返す
+- `load()`: Active が正常なら採用、壊れていれば Backup、両方だめなら既定値。どの面から読んだか・各面の状態（空 / 正常 / 破損）も返す
+- `rollback()`: `Active ← Backup`、Backup は空にする（連続では戻れない）。世代番号は常に増える
+- 記憶装置は `NvmStorage` で抽象化（テスト・WASM はメモリ、ブラウザは localStorage に保存する予定）
+- `tests/nvm.rs`: CRC の標準値、コミット/ロールバック/フォールバック、破損・切り詰め・他形式のデータ、起動への利用
+- 次のPR: WASM API と GUI
 
 ## Safety（ウォッチドッグ）
 C++ の `src/model/safety_logic.h` と `Swc::Safety`（`safety_swc.cpp`）を移植済みです。

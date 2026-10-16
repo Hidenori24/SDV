@@ -5,6 +5,7 @@ pub mod bus;
 pub mod config;
 pub mod failsafe;
 pub mod model;
+pub mod nvm;
 pub mod rte;
 pub mod safety;
 pub mod sim;
