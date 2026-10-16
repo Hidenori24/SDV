@@ -8,7 +8,10 @@
 - 監視手法:
   - 各部品がheartbeat_counterを増やす
   - Safetyが100msごとに前回値から進んでいるか確認
-  - タイムアウト（例：300ms）でE-Stopへ遷移
+  - タイムアウト（`safety.heartbeat_timeout_ms`、既定 1000 ms）を超えたら「応答なし」。1つ → Degraded、2つ以上 → E-Stop（ラッチ）
+
+実装状況: **実装済み**（C++ / Rust）。Rust では、バス上の Alive フレームを監視し、受信側の各 ECU にもフェイルセーフがある
+（DriverInput 途絶 → 入力 0、Safety 途絶 → 自律的に E-Stop 相当）。詳細は [safety_swc.md](safety_swc.md)、[07_ecu_architecture.md](07_ecu_architecture.md)。
 
 E-Stop時の挙動:
 - drive_accel_cmd=0
@@ -18,6 +21,9 @@ E-Stop時の挙動:
 ## Logging（v1）
 
 ログは最初から必須。
+
+再現性: 同じ Config + 同じシナリオ（JSON）なら、毎回同じログになる。C++ の基準ログ 4 本（通常 + 故障注入 3 パターン）を
+Rust がシナリオ JSON で全行再現することを、テストと CI（`golden-log`）で確認している。
 
 - 目的:
   - 不具合解析（なぜそう動いたか）
@@ -44,9 +50,16 @@ SDV v1として「更新で挙動が変わる」を成立させる。
   4. 適用（次周期から有効）
   5. 失敗時ロールバック（バックアップ復帰）
 
+- 実装（Rust、[ADR-0003](../adr/ADR-0003-config-nvm.md)）:
+  - Config は JSON。未知の項目・範囲外は全体を拒否（項目パス付きの全エラー）
+  - NVM は Active / Backup の 2 面 + 世代番号 + CRC32。更新が通ると `Backup ← Active`、`Active ← 新Config`
+  - 適用は**再起動で有効**（実機のコンフィグ更新に合わせる）。起動時は Active → Backup → 既定値の順に読む
+  - ロールバックは `Active ← Backup`（連続では戻れない）。GUI から更新・ロールバック・破損の注入を試せる
+
 - 期待される成果:
-  - 同一入力でもConfig変更により挙動が変わる
-  - ログに「Config version」「適用時刻」が残る
+  - 同一入力でもConfig変更により挙動が変わる（達成）
+  - ログに「Config version」「適用時刻」が残る（**未実装**）
+  - 更新直後に Degraded / EStop になったら自動でロールバック（試験適用、**未実装**）
 
 ## Update（v1+：SWC差し替え）
 

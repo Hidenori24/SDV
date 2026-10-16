@@ -69,9 +69,9 @@ TEST_CASE("Engine: throttle 0.5 with estop=false") {
 
 ## 完了条件
 
-- [ ] `tests/mock_rte.h` が作成される
-- [ ] コンパイルエラーなし
-- [ ] Test から `#include "mock_rte.h"` が通る
+- [x] `tests/mock_rte.h` が作成される
+- [x] コンパイルエラーなし
+- [x] Test から `#include "mock_rte.h"` が通る
 
 ## 次のステップ
 
