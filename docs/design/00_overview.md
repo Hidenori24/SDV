@@ -27,7 +27,7 @@ SDVらしさ（v1）は次を指す。
   - brake → brake_decel_cmd → v >= 0 を維持する
   - 単体テスト: test_brake_model.cpp / test_brake_swc.cpp
 - [x] 4. 統合（縦→横→Pose）
-  - Engine / Brake / Steering / VehicleDynamics の最小統合は実装済み
+  - Engine / Brake / Steering / VehicleDynamics の最小統合は実装済み（VehicleDynamics は縦・横とも Model 層に分離済み: `StepLongitudinal` / `StepLateral` / `StepVehicle`）
   - x, y, yaw, wheel_omega の更新が一貫して動作する
 - [x] 5. SDV v1（Rust 実装で達成。C++ は参照実装として 1 プロセス構成のまま）
   - [x] SafetySupervisor: SWC別ハートビート監視（Watchdog）。1つ途絶 → Degraded、2つ以上 → EStop（ラッチ）
@@ -41,7 +41,6 @@ SDVらしさ（v1）は次を指す。
   - [ ] 更新直後に Degraded / EStop になったら自動でロールバック（試験適用、ADR-0003 の後続）
   - [ ] ログへ Config の世代・適用時刻を記録
   - [ ] ECU 構成を設定で切り替える（案B・案C を試す）
-  - [ ] C++ の VehicleDynamics を Model 層へ分離（`StepLateral`）
 
 ## 非ゴール（v1ではやらない）
 

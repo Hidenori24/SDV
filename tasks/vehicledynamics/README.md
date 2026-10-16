@@ -1,10 +1,9 @@
 # Task: VehicleDynamics SWC 実装タスク一覧
 
-> **現状（未完了）**: 縦方向の `Model::StepLongitudinal` とそのテスト（`test_vehicle_dynamics_model.cpp`）は実装済み。
-> 横方向（キネマティック・バイシクルモデル）は動作しているが、`vehicledynamics_swc.cpp` に直接書かれていて、
-> **Model 層への分離（`StepLateral`）と SWC 層テスト（`test_vehicledynamics_swc.cpp`）が残っている**。
-> SWC が使うパラメータ（`linear_drag = 0.15` など）は `vehicledynamics_model.h` の既定値（`linear_drag = 0`）と異なる点にも注意。
-> Rust 実装（`rust/sdv-core`）では、縦・横とも `model.rs` の `step_vehicle` に分離済みで、C++ の基準ログとの一致をテストしている。
+> **現状（完了）**: 縦方向 `StepLongitudinal`、横方向 `StepLateral`（キネマティック・バイシクルモデル）、合成 `StepVehicle` を Model 層に実装し、
+> SWC はそれを呼ぶだけの形にした。Model のテスト（`test_vehicle_dynamics_model.cpp`）と SWC のテスト（`test_vehicledynamics_swc.cpp`）を追加し、
+> C++ の出力は基準ログ（通常 + 故障注入 3 パターン）とバイト単位で同一のまま（リグレッションなし）。
+> Model の既定パラメータは SWC の値に揃えた（`linear_drag = 0.15`、`wheelbase_m = 0.20` など）。
 
 ## フェーズ分け
 
@@ -29,7 +28,7 @@ Phase 3: 統合確認
 
 ### Task-1: StepLateral() を Model層に追加実装
 
-**ドキュメント参照**: [docs/design/vehicledynamics_swc.md#3.2](../../docs/design/vehicledynamics_swc.md#32-steplateral-関数仕様未実装)
+**ドキュメント参照**: [docs/design/vehicledynamics_swc.md#3.2](../../docs/design/vehicledynamics_swc.md#32-steplateral-関数仕様)
 
 **ファイル**: `src/model/vehicledynamics_model.h`
 
@@ -63,8 +62,8 @@ inline VehicleState StepLateral(
 ```
 
 **完了条件**:
-- [ ] ファイルが修正される
-- [ ] コンパイルエラーなし
+- [x] ファイルが修正される
+- [x] コンパイルエラーなし
 
 ---
 
@@ -82,8 +81,8 @@ inline VehicleState StepLateral(
 5. `steer_angle_cmd < 0` → yaw_rate < 0（左旋回）
 
 **完了条件**:
-- [ ] コンパイルエラーなし
-- [ ] 5つ以上のテストケースが実装される
+- [x] コンパイルエラーなし
+- [x] 5つ以上のテストケースが実装される
 
 ---
 
@@ -97,8 +96,8 @@ ctest --verbose
 ```
 
 **完了条件**:
-- [ ] `test_vehicle_dynamics_model` PASS
-- [ ] ビルドエラーなし
+- [x] `test_vehicle_dynamics_model` PASS
+- [x] ビルドエラーなし
 
 ---
 
@@ -121,7 +120,7 @@ next_state = Model::StepLateral(next_state, dt, steer_angle_cmd, params);
 ```
 
 **完了条件**:
-- [ ] コンパイルエラーなし
+- [x] コンパイルエラーなし
 
 ---
 
@@ -139,8 +138,8 @@ next_state = Model::StepLateral(next_state, dt, steer_angle_cmd, params);
 5. 位置（x, y）が更新される
 
 **完了条件**:
-- [ ] コンパイルエラーなし
-- [ ] 5つ以上のテストケースが実装される
+- [x] コンパイルエラーなし
+- [x] 5つ以上のテストケースが実装される
 
 ---
 
@@ -152,8 +151,8 @@ ctest --verbose
 ```
 
 **チェックリスト**:
-- [ ] `test_vehicle_dynamics_model` PASS
-- [ ] `test_vehicledynamics_swc` PASS
+- [x] `test_vehicle_dynamics_model` PASS
+- [x] `test_vehicledynamics_swc` PASS
 
 ---
 
@@ -165,8 +164,8 @@ ctest --verbose
 3. 値に異常がない（物理的に合理的な軌跡）
 
 **完了条件**:
-- [ ] シミュレーション成功
-- [ ] ログ確認完了
+- [x] シミュレーション成功
+- [x] ログ確認完了
 
 ---
 
@@ -174,10 +173,10 @@ ctest --verbose
 
 | Task | Status | 開始日 | 完了日 |
 |------|--------|--------|--------|
-| Task-1 | ⏳ 未開始 | - | - |
-| Task-2 | ⏳ 未開始 | - | - |
-| Task-3 | ⏳ 未開始 | - | - |
-| Task-4 | ⏳ 未開始 | - | - |
-| Task-5 | ⏳ 未開始 | - | - |
-| Task-6 | ⏳ 未開始 | - | - |
-| Task-7 | ⏳ 未開始 | - | - |
+| Task-1 | ✅ 完了 | - | 2026-10-16 |
+| Task-2 | ✅ 完了 | - | 2026-10-16 |
+| Task-3 | ✅ 完了 | - | 2026-10-16 |
+| Task-4 | ✅ 完了 | - | 2026-10-16 |
+| Task-5 | ✅ 完了 | - | 2026-10-16 |
+| Task-6 | ✅ 完了 | - | 2026-10-16 |
+| Task-7 | ✅ 完了 | - | 2026-10-16 |
