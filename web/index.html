@@ -111,7 +111,7 @@ h2{font-size:13px;margin:0 0 4px;color:var(--sub);font-weight:600}
     <canvas id="chart"></canvas>
     <div class="maphead"><h2>走行軌跡（全体）</h2><span><span id="dist" class="hint">0.00 m</span> <button id="clearTrail">軌跡クリア</button></span></div>
     <canvas id="map"></canvas>
-    <p class="hint">キー操作: ↑/W=アクセル ↓/S=ブレーキ ←→/A,D=ステア Space=E-Stop。キー入力はスライダーに反映されます。</p>
+    <p class="hint">キー操作: ↑/W=アクセル ↓/S=ブレーキ ←→/A,D=ステア Space=E-Stop。キー入力はスライダーに反映されます。ステアはアシスト（チェックボックス）でゆっくり切れ、離すと戻り、速いほど切れ角が制限されます（スライダーは制限なし）。</p>
   </section>
   <aside class="card">
     <h2>ステアリング</h2>
@@ -120,6 +120,7 @@ h2{font-size:13px;margin:0 0 4px;color:var(--sub);font-weight:600}
     <div class="row"><label for="thr">Throttle</label><input id="thr" type="range" min="0" max="1" step="0.01" value="0"><output id="thrO">0.00</output></div>
     <div class="row"><label for="brk">Brake</label><input id="brk" type="range" min="0" max="1" step="0.01" value="0"><output id="brkO">0.00</output></div>
     <div class="row"><label for="str">Steer(右+)</label><input id="str" type="range" min="-1" max="1" step="0.01" value="0"><output id="strO">0.00</output></div>
+    <div class="row" style="margin:0"><label style="width:auto;font-size:12px"><input id="assist" type="checkbox" checked> キーのステアアシスト（ゆっくり切る・離すと戻る・速いほど切れ角を制限）</label></div>
     <div class="btns">
       <button id="estop" class="estop" aria-pressed="false">E-STOP（Space）</button>
       <button id="scn">シナリオ再生</button>
