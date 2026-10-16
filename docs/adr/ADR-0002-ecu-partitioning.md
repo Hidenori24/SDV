@@ -78,8 +78,8 @@ ADR-0001 の「ECU分割に強い」という前提を、実際に試せる形�
 | フレーム | 送信 | 受信 | 周期 | 内容 |
 |---|---|---|---|---|
 | DriverInput | VCU | Engine / Brake / Steering | 20 ms | throttle, brake, steer |
-| Safety | VCU | Engine / Brake / Steering | 10 ms | estop, system_state |
-| Alive_Engine / Alive_Brake / Alive_Steering | 各ECU | VCU | 10 ms | 生存カウンタ |
+| Safety | VCU | Engine / Brake / Steering / Plant | 10 ms | estop, system_state（Plant は E-Stop 時の強制減速モデルのために受信） |
+| Alive（Engine / Brake / Steering / Plant） | 各ECU・Plant | VCU | 10 ms | 生存カウンタ |
 | VehicleState | Plant | VCU | 10 ms | t, x, y, yaw, v, yaw_rate, wheel_omega（センサ） |
 | ActuatorCmd | Engine / Brake / Steering | Plant | 10 ms | 加速度・減速度・舵角（アクチュエータ指令。Plant との直結インターフェース） |
 
@@ -89,7 +89,7 @@ ADR-0001 の「ECU分割に強い」という前提を、実際に試せる形�
 | DriverInput が途絶（> 200 ms 案） | 各ECUは入力を 0（スロットル0・ブレーキ0・舵角0）として扱う |
 | Safety が途絶（> 100 ms 案） | 各ECUはローカルに EStop と同じ動作に入る（VCU停止時にも止まる） |
 | 各ECUの Alive が途絶（> 1000 ms） | VCU の Watchdog が判定: 1ECU → Degraded、2ECU以上 → EStop（ラッチ）。現状と同じ |
-| VehicleDynamics（Plant） | ECU ではないため Watchdog の監視対象から外す |
+| VehicleDynamics（Plant） | ECU ではないが、C++ 実装との互換のため生存カウンタ（Alive）を送らせ、Watchdog の監視対象に残す（シミュレータ自身の健全性監視に相当） |
 
 ## 実装の進め方（小さなPRで）
 1. 本ADR（議論・決定）
@@ -100,7 +100,7 @@ ADR-0001 の「ECU分割に強い」という前提を、実際に試せる形�
 
 ## Consequences
 - 良い点: 通信途絶・ECU故障を検証できる。構成変更（載せ替え）を設定で試せる
-- 悪い点: 実装・テストが増える。Watchdog の監視対象が SWC から ECU に変わる（Plant は対象外）。C++ には反映しない（Rust のみ）
+- 悪い点: 実装・テストが増える。Watchdog の監視対象が SWC から ECU（+ Plant）に変わる。C++ には反映しない（Rust のみ）
 - 要確認事項（下記）が決まるまでは実装しない
 
 ## 決定事項（2026-10-16）
