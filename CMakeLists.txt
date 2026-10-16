@@ -47,8 +47,13 @@ add_executable(unit_tests
   tests/test_engine_swc.cpp
   tests/test_brake_model.cpp
   tests/test_brake_swc.cpp
+  tests/test_steering_model.cpp
+  tests/test_steering_swc.cpp
+  tests/test_safety_swc.cpp
   src/swc/engine_swc.cpp
   src/swc/brake_swc.cpp
+  src/swc/steering_swc.cpp
+  src/swc/safety_swc.cpp
   src/rte/rte.cpp
   src/bsw/timebase.cpp
   src/bsw/logging.cpp

@@ -133,7 +133,7 @@ void Main10ms(double dt) {
 3. `target > max_angle` → clamp確認
 4. 一次遅れの時定数確認（dt = τ時に63%到達）
 
-**ステータス**: ❌ **未実装**
+**ステータス**: ✅ **実装済み**
 
 ### 5.2 SWC層テスト（test_steering_swc.cpp）
 
@@ -143,14 +143,14 @@ void Main10ms(double dt) {
 3. `estop=true` → 目標舵角が 0 に強制される
 4. 複数ステップで「遅れ挙動」を確認
 
-**ステータス**: ❌ **未実装**
+**ステータス**: ✅ **実装済み**
 
 ---
 
 ## 6. 完了条件
 
-- [ ] Model層（steering_model.h）実装・テスト完了
-- [ ] SWC層 (steering_swc.cpp) Model呼び出しに置き換え
-- [ ] SWC層テスト実装
-- [ ] 全テスト PASS
-- [ ] リグレッション確認
+- [x] Model層（steering_model.h）実装・テスト完了
+- [x] SWC層 (steering_swc.cpp) Model呼び出しに置き換え
+- [x] SWC層テスト実装
+- [x] 全テスト PASS
+- [x] リグレッション確認
