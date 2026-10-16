@@ -59,3 +59,6 @@ make/**
 # Rust
 rust/**/target/
 web/sdv_core.wasm
+
+# simulator output (generated on every run)
+logs/
