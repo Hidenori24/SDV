@@ -22,6 +22,10 @@ impl SafetySupervisor {
         Self { params: SafetyParams::default(), monitors: [HeartbeatMonitor::default(); 4], latched_estop: false }
     }
 
+    pub fn with_params(params: SafetyParams) -> Self {
+        Self { params, monitors: [HeartbeatMonitor::default(); 4], latched_estop: false }
+    }
+
     pub fn reset(&mut self) {
         *self = Self::new();
     }
