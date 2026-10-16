@@ -27,6 +27,9 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:12px;padding:0 1
 canvas{display:block;width:100%;border-radius:6px}
 #view{height:360px;background:var(--bg)}
 #chart{height:120px;margin-top:8px}
+#map{height:220px;margin-top:8px;background:var(--bg)}
+.maphead{display:flex;align-items:center;justify-content:space-between;margin-top:8px}
+.maphead button{padding:2px 10px;font-size:12px}
 .row{display:flex;align-items:center;gap:8px;margin:8px 0}
 .row label{width:76px;color:var(--sub)}
 .row input[type=range]{flex:1}
@@ -54,6 +57,8 @@ h2{font-size:13px;margin:0 0 4px;color:var(--sub);font-weight:600}
   <section class="card">
     <canvas id="view"></canvas>
     <canvas id="chart"></canvas>
+    <div class="maphead"><h2>走行軌跡（全体）</h2><span><span id="dist" class="hint">0.00 m</span> <button id="clearTrail">軌跡クリア</button></span></div>
+    <canvas id="map"></canvas>
     <p class="hint">キー操作: ↑/W=アクセル ↓/S=ブレーキ ←→/A,D=ステア Space=E-Stop。キー入力はスライダーに反映されます。</p>
   </section>
   <aside class="card">
