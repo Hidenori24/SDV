@@ -2,6 +2,7 @@
 //! the browser (WebAssembly, plain C ABI - no wasm-bindgen required).
 
 pub mod bus;
+pub mod config;
 pub mod failsafe;
 pub mod model;
 pub mod rte;

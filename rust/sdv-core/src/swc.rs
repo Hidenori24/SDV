@@ -10,6 +10,9 @@ pub struct EngineSwc {
     pub params: EngineParams,
 }
 impl EngineSwc {
+    pub fn new(params: EngineParams) -> Self {
+        Self { params }
+    }
     pub fn main_10ms(&self, rte: &mut Rte) {
         let estop = rte.estop_active();
         rte.cmd.drive_accel_cmd = compute_drive_accel(rte.input.throttle, estop, &self.params);
@@ -21,6 +24,9 @@ pub struct BrakeSwc {
     pub params: BrakeParams,
 }
 impl BrakeSwc {
+    pub fn new(params: BrakeParams) -> Self {
+        Self { params }
+    }
     pub fn main_10ms(&self, rte: &mut Rte) {
         let estop = rte.estop_active();
         rte.cmd.brake_decel_cmd = compute_brake_decel(rte.input.brake, estop, &self.params);
@@ -33,6 +39,9 @@ pub struct SteeringSwc {
     angle: f32,
 }
 impl SteeringSwc {
+    pub fn new(params: SteeringParams) -> Self {
+        Self { params, angle: 0.0 }
+    }
     pub fn main_10ms(&mut self, rte: &mut Rte, dt_s: f32) {
         let target = compute_steer_target(rte.input.steer, rte.estop_active(), &self.params);
         self.angle = step_steering_dynamics(self.angle, target, dt_s, &self.params);
@@ -46,6 +55,9 @@ pub struct VehicleDynamicsSwc {
     pub params: VehicleParams,
 }
 impl VehicleDynamicsSwc {
+    pub fn new(params: VehicleParams) -> Self {
+        Self { params }
+    }
     pub fn step_10ms(&self, rte: &mut Rte, dt_s: f32) {
         rte.state = step_vehicle(
             &rte.state, dt_s,
@@ -86,6 +98,9 @@ pub struct SafetySwc {
     pub supervisor: SafetySupervisor,
 }
 impl SafetySwc {
+    pub fn new(params: SafetyParams) -> Self {
+        Self { supervisor: SafetySupervisor::with_params(params) }
+    }
     /// 100 ms task. `rte.safety.estop` holds the external request; the watchdog latch is OR-ed in.
     pub fn main_100ms(&mut self, rte: &mut Rte, dt_ms: u32) {
         let (estop, state) = self.supervisor.main_100ms(rte.alive_rx, dt_ms, rte.safety.estop);

@@ -3,6 +3,7 @@
 //! then 20 ms: DriverInput, 100 ms: Safety.
 
 use crate::bus::{Bus, Frame, Node};
+use crate::config::Config;
 use crate::failsafe::{self, FailsafeParams, FailsafeStatus};
 use crate::model::*;
 use crate::rte::Rte;
@@ -56,9 +57,9 @@ struct Ecu<S> {
     stalled: bool,
 }
 
-impl<S: Default> Ecu<S> {
-    fn new() -> Self {
-        Self { rte: Rte::default(), swc: S::default(), alive: 0, stalled: false }
+impl<S> Ecu<S> {
+    fn with_swc(swc: S) -> Self {
+        Self { rte: Rte::default(), swc, alive: 0, stalled: false }
     }
 }
 
@@ -72,6 +73,7 @@ struct Vcu {
 /// Fixed ECU layout of ADR-0002 plan A:
 /// VCU, Engine ECU, Brake ECU, Steering ECU, and the Plant (VehicleDynamics), joined by a virtual bus.
 pub struct Sim {
+    config: Config,
     vcu: Vcu,
     engine: Ecu<EngineSwc>,
     brake: Ecu<BrakeSwc>,
@@ -87,17 +89,33 @@ pub struct Sim {
 
 impl Sim {
     pub fn new() -> Self {
+        Self::with_config(Config::default())
+    }
+
+    /// Boot with a given (already validated) config.
+    pub fn with_config(config: Config) -> Self {
         Self {
-            vcu: Vcu { rte: Rte::default(), safety_swc: SafetySwc::default(), stalled: false },
-            engine: Ecu::new(),
-            brake: Ecu::new(),
-            steering: Ecu::new(),
-            plant: Ecu::new(),
+            vcu: Vcu { rte: Rte::default(), safety_swc: SafetySwc::new(config.safety), stalled: false },
+            engine: Ecu::with_swc(EngineSwc::new(config.engine)),
+            brake: Ecu::with_swc(BrakeSwc::new(config.brake)),
+            steering: Ecu::with_swc(SteeringSwc::new(config.steering)),
+            plant: Ecu::with_swc(VehicleDynamicsSwc::new(config.vehicle)),
             bus: Bus::new(0),
-            failsafe: FailsafeParams::default(),
+            failsafe: config.failsafe_params(),
+            config,
             use_scenario: false,
             tick: 0,
         }
+    }
+
+    pub fn config(&self) -> &Config { &self.config }
+
+    /// Install a new config and restart (a config update takes effect on reboot, like on a real ECU).
+    /// The demo-scenario flag is kept; injected faults are cleared.
+    pub fn set_config(&mut self, config: Config) {
+        let use_scenario = self.use_scenario;
+        *self = Self::with_config(config);
+        self.use_scenario = use_scenario;
     }
 
     // ---- signal access (the GUI / tests see the system through these) ----
@@ -172,9 +190,8 @@ impl Sim {
 
     /// Reset everything (this releases a latched watchdog EStop and clears injected stalls).
     pub fn reset(&mut self) {
-        let use_scenario = self.use_scenario;
-        *self = Self::new();
-        self.use_scenario = use_scenario;
+        let config = self.config.clone();
+        self.set_config(config);
     }
 
     fn deliver(&mut self) {

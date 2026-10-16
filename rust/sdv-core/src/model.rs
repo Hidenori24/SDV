@@ -1,6 +1,7 @@
 //! Pure-function Model layer. Mirrors `src/model/*.h` of the C++ implementation.
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct EngineParams {
     pub max_accel_mps2: f32,
 }
@@ -17,7 +18,8 @@ pub fn compute_drive_accel(throttle_0_1: f32, estop: bool, p: &EngineParams) -> 
     throttle_0_1.clamp(0.0, 1.0) * p.max_accel_mps2
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct BrakeParams {
     pub max_decel_mps2: f32,
     pub estop_max_decel_mps2: f32,
@@ -35,7 +37,8 @@ pub fn compute_brake_decel(brake_0_1: f32, estop: bool, p: &BrakeParams) -> f32 
     brake_0_1.clamp(0.0, 1.0) * p.max_decel_mps2
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct SteeringParams {
     pub max_steer_angle_rad: f32,
     pub time_constant_s: f32,
@@ -65,7 +68,8 @@ pub fn step_steering_dynamics(current: f32, target: f32, dt_s: f32, p: &Steering
     current + alpha * (target - current)
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct VehicleParams {
     pub wheel_radius_m: f32,
     pub wheelbase_m: f32,
@@ -139,7 +143,8 @@ pub enum SafetyState {
     EStop = 2,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct SafetyParams {
     /// A monitored SWC is "dead" when silent for longer than this.
     pub heartbeat_timeout_ms: u32,

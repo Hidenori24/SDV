@@ -20,6 +20,14 @@ cargo build --release --target wasm32-unknown-unknown # -> target/wasm32-unknown
 - `tests/ecu_bus.rs` / `tests/bus.rs`: ECUごとのRTE、バスの配送・遅延・バスマトリクス
 - `tests/swc_rte.rs`: SWC単体と、RTEが独立していること
 
+## Config（調整パラメータ・JSON）
+[ADR-0003](../docs/adr/ADR-0003-config-nvm.md) の Config を実装済み（`config.rs`）。
+- `config::parse(json)`: 欠けた項目は既定値（現状の定数と同一）、未知の項目は拒否、範囲外が1つでもあれば全体を拒否し、`項目パス: 理由` を**すべて**返す。`config::to_json` で書き出し
+- `Sim::with_config(cfg)` で起動、`Sim::set_config(cfg)` で入れ替え（再起動扱い）、`Sim::reset()` は同じ Config で再起動
+- フェイルセーフのタイムアウトは ms で指定し、10msティックに切り上げて使う
+- `tests/config.rs`: 形式・検証・境界値と、Config が挙動（加速・最高速度・旋回・Watchdog検出時間・フェイルセーフ反応時間）を実際に変えること
+- NVM（A/B・CRC・ロールバック）は次のPR
+
 ## Safety（ウォッチドッグ）
 C++ の `src/model/safety_logic.h` と `Swc::Safety`（`safety_swc.cpp`）を移植済みです。
 - `model.rs`: `update_heartbeat` / `count_failed` / `compute_safety_state`（生存カウンタの停止検出と Normal/Degraded/EStop 判定）
