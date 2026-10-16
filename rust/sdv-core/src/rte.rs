@@ -34,6 +34,9 @@ pub struct Rte {
     pub cmd: ActuatorCmd,
     pub state: VehicleState,
     pub safety: Safety,
+    /// Alive counters received over the bus: [engine, brake, steering, vehicledynamics].
+    /// Only the node that supervises them (VCU) uses this.
+    pub alive_rx: [u64; 4],
 }
 
 impl Rte {

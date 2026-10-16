@@ -12,7 +12,9 @@ cargo build --release --target wasm32-unknown-unknown # -> target/wasm32-unknown
 ## 構成（RTE / SWC / Sim）
 - `rte.rs`: 信号の入れ物 `Rte`（DriverInput / ActuatorCmd / VehicleState / Safety）。**ECUごとに1インスタンス**持つ想定（[ADR-0002](../docs/adr/ADR-0002-ecu-partitioning.md)）
 - `swc.rs`: Engine / Brake / Steering / VehicleDynamics / DriverInput / Safety の各SWC。渡された `Rte` だけを読み書きする
-- `sim.rs`: 10ms固定ステップのスケジューラ。現状は1つの `Rte` を全SWCで共有（ECU分割は次のPRで導入）
+- `bus.rs`: 仮想バス（CAN風。フレームは周期送信、受信側は最新値を保持、遅延ティック数を指定可）。バスマトリクスは ADR-0002
+- `sim.rs`: ECU構成（ADR-0002 案A）。VCU（DriverInput + Safety）/ Engine ECU / Brake ECU / Steering ECU / Plant（VehicleDynamics）がそれぞれ自分の `Rte` を持ち、バスで信号をやり取りする。10ms固定ステップの順序: VCU送信 → 各ECU実行 → Plant実行 → VCUタスク（各段の間でバス配送）。遅延0・欠損0では1プロセス版と同じログになる（C++ golden と一致）
+- `tests/ecu_bus.rs` / `tests/bus.rs`: ECUごとのRTE、バスの配送・遅延・バスマトリクス
 - `tests/swc_rte.rs`: SWC単体と、RTEが独立していること
 
 ## Safety（ウォッチドッグ）
