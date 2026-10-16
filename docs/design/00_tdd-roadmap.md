@@ -156,7 +156,7 @@ src/model/
   ├─ brake_model.h               ❌ 未実装
   ├─ steering_model.h            ❌ 未実装
   ├─ vehicledynamics_model.h     ✅ 部分実装（StepLongitudinal のみ）
-  └─ safety_logic.h              ❌ 未実装
+  └─ safety_logic.h              ✅ 完了
 ```
 
 ### SWC層（src/swc/）
