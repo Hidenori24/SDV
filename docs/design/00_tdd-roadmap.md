@@ -35,7 +35,7 @@ tasks/
   ├─ brake/           ← 完了
   ├─ steering/        ← 完了
   ├─ safety/          ← 完了（Watchdog）
-  └─ vehicledynamics/ ← 一部（縦方向の Model とテストは完了。横方向の Model 層への分離が残り）
+  └─ vehicledynamics/ ← 完了
 ```
 
 ---
@@ -47,7 +47,7 @@ tasks/
 | 1 | Engine SWC（Mock RTE の設計、SWC 層テストのパターン確立） | ✅ 完了 |
 | 2 | Brake SWC | ✅ 完了 |
 | 3 | Steering SWC（一次遅れ。Model 層 + 実 RTE でのテスト） | ✅ 完了 |
-| 4 | VehicleDynamics SWC | ⚠️ 縦方向の Model とテストは完了。横方向（バイシクルモデル）は SWC に直書きで、Model 層への分離（`StepLateral`）と SWC テストが残り |
+| 4 | VehicleDynamics SWC（縦: `StepLongitudinal`、横: `StepLateral`、合成: `StepVehicle`） | ✅ 完了 |
 | 5 | Safety SWC（Watchdog：生存カウンタの監視 → Degraded / EStop ラッチ） | ✅ 完了 |
 
 ## 実装フェーズ（Rust 実装）
@@ -91,7 +91,7 @@ src/model/
   ├─ engine_model.h              ✅
   ├─ brake_model.h               ✅
   ├─ steering_model.h            ✅
-  ├─ vehicledynamics_model.h     ⚠️ 縦方向のみ（StepLongitudinal）
+  ├─ vehicledynamics_model.h     ✅ 縦・横（StepLongitudinal / StepLateral / StepVehicle）
   └─ safety_logic.h              ✅
 ```
 
@@ -102,7 +102,7 @@ src/swc/
   ├─ engine_swc.cpp              ✅ Model 呼び出し
   ├─ brake_swc.cpp               ✅ Model 呼び出し
   ├─ steering_swc.cpp            ✅ Model 呼び出し
-  ├─ vehicledynamics_swc.cpp     ⚠️ バイシクルモデルを直書き（Model 層へ未分離）
+  ├─ vehicledynamics_swc.cpp     ✅ Model 呼び出し（StepVehicle）
   ├─ driverinput_swc.cpp         ✅ 内蔵シナリオ
   └─ safety_swc.cpp              ✅ Watchdog
 ```
@@ -115,8 +115,8 @@ tests/
   ├─ test_engine_model.cpp / test_engine_swc.cpp                 ✅
   ├─ test_brake_model.cpp / test_brake_swc.cpp                   ✅
   ├─ test_steering_model.cpp / test_steering_swc.cpp             ✅
-  ├─ test_vehicle_dynamics_model.cpp                             ✅ 縦方向
-  ├─ test_vehicledynamics_swc.cpp                                ❌ 未実装
+  ├─ test_vehicle_dynamics_model.cpp                             ✅ 縦・横
+  ├─ test_vehicledynamics_swc.cpp                                ✅
   ├─ test_safety_logic.cpp / test_safety_swc.cpp                 ✅
   └─ test_watchdog_integration.cpp                               ✅
 ```
@@ -128,7 +128,6 @@ tests/
 1. 更新直後に Degraded / EStop になったら自動でロールバックする試験適用（ADR-0003 の後続）
 2. ログへ Config の世代・適用時刻を記録
 3. ECU 構成を設定で切り替える（ADR-0002 の案B・案C）
-4. C++ の VehicleDynamics を Model 層へ分離（`StepLateral`）と SWC テスト（`tasks/vehicledynamics/`）
 
 ## 参考資料
 
