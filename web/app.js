@@ -10,7 +10,8 @@ const SAFETY = [
 ];
 const HISTORY_S = 10;
 const SILENT0 = 15;            // 出力バッファ: SWCごとの無応答時間[ms] (engine, brake, steering, vehicledynamics)
-const TIMEOUT_MS = 1000;       // ウォッチドッグのタイムアウト（Rust側の既定値と同じ）
+let TIMEOUT_MS = 1000;         // ウォッチドッグのタイムアウト（Configの safety.heartbeat_timeout_ms に追従）
+let vMax = 3.0, steerMax = 0.4; // グラフ・ハンドル表示のスケール（Configの車速上限・最大舵角に追従）
 const FS0 = 19;                // 出力バッファ: ECU(engine, brake, steering)ごとのフェイルセーフ（bit0: 入力途絶, bit1: Safety途絶）
 const stalled = [false, false, false, false];
 let vcuStalled = false;
@@ -202,7 +203,7 @@ function drawWheel(o) {
   const c = $("wheel"), d = fit(c), g = c.getContext("2d");
   const W = c.width, H = c.height, r = Math.min(W, H) * 0.38;
   // steerCmd > 0 は左旋回 → ハンドルは反時計回り（canvasのrotateは時計回りが正なので符号反転）。表示角は右回り=+
-  const steer = o[IDX.steerCmd], rot = -(steer / 0.4) * (450 * Math.PI / 180);
+  const steer = o[IDX.steerCmd], rot = -(steer / steerMax) * (450 * Math.PI / 180);
   g.clearRect(0, 0, W, H);
   g.save(); g.translate(W / 2, H / 2 - 6 * d); g.rotate(rot);
   g.strokeStyle = css("--ink"); g.fillStyle = css("--ink"); g.lineCap = "round";
@@ -253,11 +254,11 @@ function drawChart() {
     hist.forEach((p, i) => { const y = H - ((p[key] - lo) / (hi - lo)) * (H - 8 * d) - 4 * d; i ? g.lineTo(X(p.t), y) : g.moveTo(X(p.t), y); });
     g.stroke();
   };
-  line("v", css("--accent"), 0, 3.2);
-  line("steer", css("--ok"), -0.45, 0.45);
+  line("v", css("--accent"), 0, vMax * 1.07);
+  line("steer", css("--ok"), -steerMax * 1.12, steerMax * 1.12);
   g.font = `${11 * d}px system-ui`;
-  g.fillStyle = css("--accent"); g.fillText("v (0–3 m/s)", 8 * d, 14 * d);
-  g.fillStyle = css("--ok"); g.fillText("steer cmd (±0.4 rad, +=左)", 90 * d, 14 * d);
+  g.fillStyle = css("--accent"); g.fillText(`v (0–${vMax} m/s)`, 8 * d, 14 * d);
+  g.fillStyle = css("--ok"); g.fillText(`steer cmd (±${steerMax} rad, +=左)`, 110 * d, 14 * d);
 }
 
 function updateHud(o) {
@@ -305,12 +306,108 @@ function frame(ts) {
   drawView(o); drawWheel(o); drawChart(); drawMap(o); updateHud(o); updateSwcs(o);
 }
 
+// ---------- Config / NVM（Rust側の sdv_nvm_* / sdv_boot に対応）----------
+const PRESETS = {
+  sport: { engine: { max_accel_mps2: 4.0 }, vehicle: { max_speed_mps: 5.0 } },
+  strict: { safety: { heartbeat_timeout_ms: 300 }, failsafe: { safety_timeout_ms: 50, driver_timeout_ms: 100 } },
+  bad: { engine: { max_accel_mps2: 99 }, steering: { max_steer_angle_rad: 1.2 }, safety: { heartbeat_timeout_ms: 50 } },
+};
+const SRC_NAMES = ["Active（現行の設定）", "Backup（Activeが壊れていたため）", "既定値（NVMが空か両方破損）"];
+let bootSource = 2;
+
+function putText(str) {
+  const bytes = new TextEncoder().encode(str);
+  const p = wasm.sdv_alloc(bytes.length);
+  new Uint8Array(mem.buffer, p, bytes.length).set(bytes);
+  return [p, bytes.length];
+}
+function readBuf() { return new Uint8Array(mem.buffer, wasm.sdv_buf_ptr(), wasm.sdv_buf_len()).slice(); }
+function bufText() { return new TextDecoder().decode(readBuf()); }
+
+// ブラウザのlocalStorageを疑似NVMの記憶媒体にする（使えない環境ではメモリ上のみ）
+const LS_KEY = (slot) => "sdv.nvm." + slot;
+function persistNvm() {
+  try {
+    for (const slot of [0, 1]) {
+      if (wasm.sdv_nvm_read(slot)) localStorage.setItem(LS_KEY(slot), btoa(String.fromCharCode(...readBuf())));
+      else localStorage.removeItem(LS_KEY(slot));
+    }
+  } catch (_) { /* localStorage unavailable */ }
+}
+function restoreNvm() {
+  try {
+    for (const slot of [0, 1]) {
+      const b64 = localStorage.getItem(LS_KEY(slot));
+      if (!b64) continue;
+      const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+      const p = wasm.sdv_alloc(bytes.length);
+      new Uint8Array(mem.buffer, p, bytes.length).set(bytes);
+      wasm.sdv_nvm_write(slot, p, bytes.length); wasm.sdv_free(p, bytes.length);
+    }
+  } catch (_) { /* ignore */ }
+}
+
+function showMsg(text, ok) { const m = $("cfgMsg"); m.textContent = text; m.className = "msg " + (ok ? "ok" : "err"); }
+function slotText(name, st) { return `${name}: ` + (st === -1 ? "空" : st === -2 ? "破損" : `正常 (seq ${st})`); }
+function refreshNvm() {
+  const box = $("nvmStatus"); box.textContent = "";
+  for (const [name, slot] of [["Active", 0], ["Backup", 1]]) {
+    const st = wasm.sdv_nvm_slot_status(slot), sp = document.createElement("span");
+    sp.textContent = slotText(name, st); if (st === -2) sp.className = "bad"; box.appendChild(sp);
+  }
+  const src = document.createElement("span"); src.className = "src"; src.textContent = "起動時の読み込み元: " + SRC_NAMES[bootSource]; box.appendChild(src);
+}
+// 実行中のConfigをUI（テキスト・グラフのスケール・ウォッチドッグの表示）へ反映
+function applyConfigToUi() {
+  wasm.sdv_config_json();
+  const text = bufText(), cfg = JSON.parse(text);
+  $("cfgText").value = text;
+  TIMEOUT_MS = cfg.safety.heartbeat_timeout_ms;
+  vMax = +cfg.vehicle.max_speed_mps.toFixed(1); steerMax = +cfg.steering.max_steer_angle_rad.toFixed(2);
+}
+function bootFromNvm() {
+  bootSource = wasm.sdv_boot();
+  applyConfigToUi(); setEstop(false); resetSim(); refreshNvm();
+}
+
+$("cfgSave").addEventListener("click", () => {
+  const [p, n] = putText($("cfgText").value);
+  const r = wasm.sdv_nvm_commit(p, n); wasm.sdv_free(p, n);
+  if (r === 0) { persistNvm(); bootFromNvm(); showMsg("検証に通ったので保存し、再起動して適用しました。", true); }
+  else if (r === 1) showMsg("拒否しました（何も保存していません）:\n" + bufText(), false);
+  else showMsg("文字コードが不正です。", false);
+});
+$("cfgRollback").addEventListener("click", () => {
+  if (wasm.sdv_nvm_rollback() === 0) { persistNvm(); bootFromNvm(); showMsg("ひとつ前のConfigに戻して再起動しました。", true); }
+  else showMsg("戻せるバックアップがありません。", false);
+});
+$("nvmReboot").addEventListener("click", () => { bootFromNvm(); showMsg("NVMから読み込んで再起動しました。", true); });
+for (const [id, slot, name] of [["corruptA", 0, "Active"], ["corruptB", 1, "Backup"]]) {
+  $(id).addEventListener("click", () => {
+    wasm.sdv_nvm_corrupt(slot); persistNvm(); refreshNvm();
+    showMsg(`${name}を破損させました（データがあれば1バイト反転）。「再起動」で復旧動作を確認できます。`, true);
+  });
+}
+$("nvmWipe").addEventListener("click", () => {
+  wasm.sdv_nvm_erase(0); wasm.sdv_nvm_erase(1); persistNvm(); refreshNvm();
+  showMsg("NVMを消去しました。次の再起動は既定値で起動します。", true);
+});
+for (const b of document.querySelectorAll(".preset")) {
+  b.addEventListener("click", () => {
+    const k = b.dataset.p;
+    if (k === "default") { wasm.sdv_default_config_json(); $("cfgText").value = bufText(); }
+    else $("cfgText").value = JSON.stringify(PRESETS[k], null, 2);
+    showMsg("テキストを入れ替えました。「検証して保存」で反映します。", true);
+  });
+}
+
 (async () => {
   try {
     const res = await fetch("sdv_core.wasm");
     const { instance } = await WebAssembly.instantiate(await res.arrayBuffer(), {});
     wasm = instance.exports; mem = wasm.memory;
-    resetSim();
+    restoreNvm();
+    bootFromNvm();
     requestAnimationFrame(frame);
   } catch (e) {
     const el = $("err"); el.style.display = "block";

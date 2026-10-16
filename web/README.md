@@ -16,6 +16,7 @@ cd web && python3 -m http.server 8000   # http://localhost:8000
 - 再生速度 0.25x〜4x、一時停止、リセット
 - ECU構成（故障注入）: VCU / Engine ECU / Brake ECU / Steering ECU / Plant の構成図。ノードをクリックで停止/再開。「バス遅延」「バス欠損」「バス断」で車載バスの障害を注入（ECU→Plantのアクチュエータ線は直結で影響なし）。バスが途切れると各ECUは自律的にフェイルセーフ（入力0扱い / 自律EStop）に入り、戻れば自動復帰する。VCUのWatchdogは生存カウンタが1.0秒を超えて止まったノードを検出する
 - Watchdog由来のE-STOP（1ノード停止 → DEGRADED、2つ以上 → E-STOP ラッチ、リセットで解除）でも、走行ビューに赤枠とバナーを表示
+- 設定（Config / NVM）: 右パネルの「設定」を開き、Config の JSON を編集して「検証して保存 → 再起動」。範囲外・未知の項目は理由つきで拒否され、何も保存されない。「ロールバック」でひとつ前に戻せる。保存先はブラウザの localStorage（疑似NVM: Active / Backup の2面 + CRC）。例ボタン（既定 / 高出力 / 厳しい監視 / 不正な例）、故障注入ボタン（Active破損 / Backup破損 / NVM消去）で「壊れたら Backup、両方だめなら既定値で起動」を確認できる。Config の値でグラフの縦軸・Watchdog 表示も変わる
 - 走行軌跡（全体）: 軌跡全体を自動フィットして表示。「軌跡クリア」またはリセットで消去
 
 ## GitHub Pages
