@@ -22,7 +22,7 @@ Phase 3: ドキュメント完成
 
 ### ✅ Task-1: Model層テスト確認
 
-**ドキュメント参照**: [engine_swc.md#5.1](../design/engine_swc.md#51-model層テスト)
+**ドキュメント参照**: [engine_swc.md#5.1](../../docs/design/engine_swc.md#51-model層テスト)
 
 **内容**:
 ```bash
@@ -30,7 +30,7 @@ cd /Users/matsumoto/work/SDV/build
 ctest --verbose
 ```
 
-- [ ] `test_engine_model` が **4 test cases, 8 assertions** すべて PASS
+- [x] `test_engine_model` が **4 test cases, 8 assertions** すべて PASS
 
 **完了条件**: ctest 出力に "All tests passed" が表示される
 
@@ -38,7 +38,7 @@ ctest --verbose
 
 ### Task-2: Mock RTE を作成
 
-**ドキュメント参照**: [engine_swc.md#5.2](../design/engine_swc.md#52-swc層テスト)
+**ドキュメント参照**: [engine_swc.md#5.2](../../docs/design/engine_swc.md#52-swc層テスト)
 
 **ファイル**: `tests/mock_rte.h`
 
@@ -66,7 +66,7 @@ REQUIRE(Mock_Rte_Written_ActuatorCmd().drive_accel_cmd == Approx(1.0f));
 
 ### Task-3: SWC層テスト を作成
 
-**ドキュメント参照**: [engine_swc.md#5.2](../design/engine_swc.md#52-swc層テスト)
+**ドキュメント参照**: [engine_swc.md#5.2](../../docs/design/engine_swc.md#52-swc層テスト)
 
 **ファイル**: `tests/test_engine_swc.cpp`
 
@@ -96,7 +96,7 @@ REQUIRE(Mock_Rte_Written_ActuatorCmd().drive_accel_cmd == Approx(1.0f));
 
 ### Task-4: 全テスト PASS確認
 
-**ドキュメント参照**: [engine_swc.md#5](../design/engine_swc.md#5-テスト戦略)
+**ドキュメント参照**: [engine_swc.md#5](../../docs/design/engine_swc.md#5-テスト戦略)
 
 **内容**:
 ```bash
@@ -106,10 +106,10 @@ ctest --verbose
 ```
 
 **チェックリスト**:
-- [ ] `test_engine_model` PASS
-- [ ] `test_engine_swc` PASS
-- [ ] ビルドエラーなし
-- [ ] ビルド警告なし（望ましい）
+- [x] `test_engine_model` PASS
+- [x] `test_engine_swc` PASS
+- [x] ビルドエラーなし
+- [x] ビルド警告なし（望ましい）
 
 **完了条件**: すべてのテストが緑色
 
@@ -117,7 +117,7 @@ ctest --verbose
 
 ### Task-5: リグレッション確認
 
-**ドキュメント参照**: [engine_swc.md#6.1](../design/engine_swc.md#61-リグレッションテスト)
+**ドキュメント参照**: [engine_swc.md#6.1](../../docs/design/engine_swc.md#61-リグレッションテスト)
 
 **内容**:
 1. 既存シミュレーションを実行
@@ -150,7 +150,7 @@ ctest --verbose
 
 ### Task-6: ドキュメント更新（完了後）
 
-**ドキュメント参照**: [engine_swc.md](../design/engine_swc.md)
+**ドキュメント参照**: [engine_swc.md](../../docs/design/engine_swc.md)
 
 **内容**:
 - 実装完了日を記録

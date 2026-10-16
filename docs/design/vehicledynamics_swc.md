@@ -81,7 +81,7 @@ VehicleState StepLongitudinal(
 
 **ステータス**: ✅ **既実装・テスト完了**
 
-### 3.2 StepLateral() 関数仕様（未実装）
+### 3.2 StepLateral() 関数仕様
 
 ```cpp
 VehicleState StepLateral(
@@ -123,11 +123,11 @@ VehicleState StepLateral(
 - ✅ ブレーキで速度が減らない
 - ✅ E-Stop で追加減速
 
-**StepLateral（未実装）**：
-- [ ] steer_angle_cmd=0 → yaw は変わらない
-- [ ] steer_angle_cmd > 0 → yaw_rate > 0（右旋回）
-- [ ] v=0 のとき yaw_rate = 0（静止時は旋回なし）
-- [ ] 位置が更新される（x, y）
+**StepLateral（実装済み）**：
+- [x] steer_angle_cmd=0 → yaw は変わらない
+- [x] steer_angle_cmd > 0 → yaw_rate > 0（**左旋回** = 反時計回り。`steer` 正 = 左の規約）
+- [x] v=0 のとき yaw_rate = 0（静止時は旋回なし）
+- [x] 位置が更新される（x, y）
 
 ### 5.2 SWC層テスト（test_vehicledynamics_swc.cpp）
 
@@ -137,7 +137,7 @@ VehicleState StepLateral(
 3. ハンドル切ると、yaw が変わる
 4. E-Stop で強制的に減速
 
-**ステータス**: ❌ **未実装**
+**ステータス**: ✅ **実装済み**（`tests/test_vehicledynamics_swc.cpp`。実 SWC を実 RTE 経由で検証）
 
 ---
 
@@ -161,11 +161,14 @@ VehicleState StepLateral(
 
 ---
 
+`StepVehicle()`（縦 → 横の順に呼ぶ）を SWC が 10 ms ごとに呼ぶ。Model の既定パラメータは SWC が使う値と同じ
+（wheel_radius 0.03 m、wheelbase 0.20 m、linear_drag 0.15、max_speed 3.0 m/s、estop_decel 6.0 m/s²）。
+
 ## 7. 完了条件
 
 - [x] Model層 StepLongitudinal 実装・テスト完了
-- [ ] Model層 StepLateral 実装・テスト追加
-- [ ] SWC層 Model呼び出しに置き換え
-- [ ] SWC層テスト実装
-- [ ] 全テスト PASS
-- [ ] リグレッション確認
+- [x] Model層 StepLateral 実装・テスト追加
+- [x] SWC層 Model呼び出しに置き換え
+- [x] SWC層テスト実装
+- [x] 全テスト PASS
+- [x] リグレッション確認

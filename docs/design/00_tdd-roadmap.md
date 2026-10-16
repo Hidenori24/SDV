@@ -2,9 +2,13 @@
 
 ## 概要
 
-このドキュメントは、SDV（Sensor-based Driving Vehicle）プロジェクトの TDD（Test-Driven Development）実装ロードマップを示しています。
+SDV（Software-Defined Vehicle）の自作プロジェクトを、TDD（Test-Driven Development）で進めてきた記録と現状。
+進め方・テストの実行方法・PR の OK 条件は [CONTRIBUTING.md](../../CONTRIBUTING.md) を参照。
 
-**目標**: Model層（純粋関数）と SWC層（RTE依存）を明確に分離し、各層を独立してテストできる構造を確立する。
+**方針**: Model 層（純粋関数）と SWC 層（RTE 依存）を明確に分け、各層を独立してテストする。
+C++ を参照実装として固め、Rust 実装（`rust/sdv-core`）が C++ の基準ログと全行一致することを確認しながら、ECU 分割・Config/NVM・シナリオへ広げた。
+
+全体の進捗は [00_overview.md](00_overview.md)、現行の構成は [07_ecu_architecture.md](07_ecu_architecture.md)。
 
 ---
 
@@ -14,211 +18,119 @@
 
 ```
 docs/design/
-  ├─ engine_swc.md           ← Engine 制御の設計書
-  ├─ brake_swc.md            ← Brake 制御の設計書
-  ├─ steering_swc.md         ← Steering 制御の設計書
-  ├─ vehicledynamics_swc.md  ← 物理シミュレーションの設計書
-  └─ safety_swc.md           ← 安全機能の設計書
+  ├─ 00_overview.md ～ 07_ecu_architecture.md   ← 全体設計・進捗・ECU 構成
+  ├─ engine_swc.md / brake_swc.md / steering_swc.md
+  │  vehicledynamics_swc.md / safety_swc.md      ← SWC ごとの設計書
+docs/adr/
+  ├─ ADR-0001 AUTOSAR-like を採用
+  ├─ ADR-0002 疑似 ECU 分割
+  └─ ADR-0003 Config / NVM
 ```
 
 ### タスク管理体系
 
 ```
 tasks/
-  ├─ engine/
-  │  ├─ README.md                      ← Engine SWC タスク一覧
-  │  ├─ task-2-mock-rte.md            ← Task-2: Mock RTE 実装
-  │  └─ task-3-test-engine-swc.md     ← Task-3: SWC テスト実装
-  ├─ brake/
-  │  └─ README.md                      ← Brake SWC タスク一覧（7 tasks）
-  ├─ steering/
-  │  └─ README.md                      ← Steering SWC タスク一覧（7 tasks）
-  ├─ vehicledynamics/
-  │  └─ README.md                      ← VehicleDynamics タスク一覧（7 tasks）
-  └─ safety/
-     └─ README.md                      ← Safety SWC タスク一覧（7 tasks、優先度低）
+  ├─ engine/          ← 完了
+  ├─ brake/           ← 完了
+  ├─ steering/        ← 完了
+  ├─ safety/          ← 完了（Watchdog）
+  └─ vehicledynamics/ ← 完了
 ```
 
 ---
 
-## 実装フェーズ
+## 実装フェーズ（C++ 参照実装）
 
-### Phase 1: Engine SWC（進行中）
+| Phase | 内容 | 状態 |
+|---|---|---|
+| 1 | Engine SWC（Mock RTE の設計、SWC 層テストのパターン確立） | ✅ 完了 |
+| 2 | Brake SWC | ✅ 完了 |
+| 3 | Steering SWC（一次遅れ。Model 層 + 実 RTE でのテスト） | ✅ 完了 |
+| 4 | VehicleDynamics SWC（縦: `StepLongitudinal`、横: `StepLateral`、合成: `StepVehicle`） | ✅ 完了 |
+| 5 | Safety SWC（Watchdog：生存カウンタの監視 → Degraded / EStop ラッチ） | ✅ 完了 |
 
-**ステータス**: ✅ Model層実装完了、SWC層修正中
+## 実装フェーズ（Rust 実装）
 
-**目的**:
-- Model層の純粋関数化を確認
-- Mock RTE の設計を確立
-- SWC層テストのパターンを確立
-
-**タスク**:
-- [x] Task-1: Model層テスト確認（既に PASS）
-- [ ] Task-2: Mock RTE 作成
-- [ ] Task-3: SWC層テスト作成
-- [ ] Task-4~6: テスト PASS確認
-
-**期待值**: 全テスト GREEN になると、Brake / Steering / VehicleDynamics も同じパターンで進める
-
----
-
-### Phase 2: Brake SWC（後続）
-
-**目的**: Engine SWC と同じパターンで Brake 制御を実装
-
-**タスク**: 7 tasks （Task-1 ～ Task-7）
-
-**期待値**: Engine SWC の成功パターンをそのまま適用
-
----
-
-### Phase 3: Steering SWC（後続）
-
-**目的**: 一次遅れダイナミクスを含む制御ロジックのテスト
-
-**タスク**: 7 tasks （Task-1 ～ Task-7）
-
-**特徴**:
-- Model層：`StepSteeringDynamics()` 純粋関数
-- SWC層：状態変数を保有し、毎ステップ更新
-
----
-
-### Phase 4: VehicleDynamics SWC（後続）
-
-**目的**: 物理シミュレーションの完全実装
-
-**タスク**: 7 tasks （Task-1 ～ Task-7）
-
-**特徴**:
-- Model層：`StepLongitudinal()` 既実装 + `StepLateral()` 追加
-- SWC層：両関数を組み合わせて状態を更新
-
----
-
-### Phase 5: Safety SWC（後続・優先度低）
-
-**目的**: ハートビート監視と E-Stop 制御の実装
-
-**タスク**: 7 tasks （Task-1 ～ Task-7、優先度低）
-
-**特徴**:
-- Engine / Brake / Steering / VehicleDynamics 完了後に着手推奨
+| Step | 内容 | 状態 |
+|---|---|---|
+| 1 | Model 層・シミュレーションループの移植（C++ の基準ログと全行一致） | ✅ |
+| 2 | Safety の Watchdog を移植し、故障注入に対応 | ✅ |
+| 3 | RTE と SWC の分離（ECU ごとに別の RTE を持てる構造） | ✅ |
+| 4 | 仮想バスと ECU 分割（ADR-0002 案A） | ✅ |
+| 5 | バス障害（遅延・欠損・断）、VCU 停止、ECU のフェイルセーフ | ✅ |
+| 6 | Config（JSON・検証）と疑似 NVM（A/B・CRC・ロールバック）（ADR-0003） | ✅ |
+| 7 | シナリオ（入力と時刻指定イベントの JSON）、再現性 | ✅ |
+| 8 | ブラウザ GUI（WASM）、GitHub Pages | ✅ |
+| 9 | 更新後の自動ロールバック（試験適用） | ⏳ 未着手 |
 
 ---
 
 ## テスト戦略
 
-### Model層テスト
+### Model 層テスト
+計算ロジックが正しいか（純粋関数の入出力）。Catch2（C++）/ `cargo test`（Rust）。
 
-**責務**: 計算ロジックが正しいか確認
+### SWC 層テスト
+RTE の入出力と Model 呼び出しが正しいか。C++ の Engine / Brake は Mock RTE（`tests/mock_rte.h`）、
+Steering / Safety は実際の RTE を使って検証する。Rust は渡された `Rte` を直接読み書きして検証する。
 
-**フレームワーク**: Catch2（既に統合）
-
-**例**:
-```cpp
-TEST_CASE("EngineModel: throttle scaling") {
-    Model::EngineParams p{.max_accel_mps2 = 2.0f};
-    REQUIRE(Model::ComputeDriveAccel(0.5f, false, p) == Approx(1.0f));
-}
-```
-
-### SWC層テスト
-
-**責務**: RTE I/O と Model呼び出しが正しいか確認
-
-**フレームワーク**: Catch2 + Mock RTE
-
-**例**:
-```cpp
-TEST_CASE("EngineSWC: RTE I/O") {
-    Mock_Rte_SetDriverInput({{throttle=0.5f, ...}});
-    EngineSWC::Main10ms(0.01);
-    REQUIRE(Mock_Rte_Written_ActuatorCmd().drive_accel_cmd == Approx(1.0f));
-}
-```
-
-### 統合テスト（リグレッション）
-
-**責務**: 既存動作が変わらないか確認
-
-**方法**: 既存シミュレーション実行 → ログ出力比較
+### 統合・再現性
+- `test_watchdog_integration.cpp`: 実 SWC + 実 RTE + 実 Safety（誤検出なし・Degraded・EStop で停車）
+- C++ の基準ログ（`rust/sdv-core/tests/golden/*.csv`、通常 + 故障注入 3 パターン）を CI で生成し、Rust が全行再現する
+- 同じ Config + 同じシナリオなら同じログ（Rust の `tests/scenario.rs`）
 
 ---
 
-## ファイル・フォルダ構造
+## ファイル・フォルダ構造（C++）
 
-### Model層（src/model/）
+### Model 層（`src/model/`）
 
 ```
 src/model/
-  ├─ engine_model.h              ✅ 実装完了
-  ├─ brake_model.h               ❌ 未実装
-  ├─ steering_model.h            ❌ 未実装
-  ├─ vehicledynamics_model.h     ✅ 部分実装（StepLongitudinal のみ）
-  └─ safety_logic.h              ✅ 完了
+  ├─ engine_model.h              ✅
+  ├─ brake_model.h               ✅
+  ├─ steering_model.h            ✅
+  ├─ vehicledynamics_model.h     ✅ 縦・横（StepLongitudinal / StepLateral / StepVehicle）
+  └─ safety_logic.h              ✅
 ```
 
-### SWC層（src/swc/）
+### SWC 層（`src/swc/`）
 
 ```
 src/swc/
-  ├─ engine_swc.cpp              🔄 修正中（Model呼び出し化）
-  ├─ brake_swc.cpp               ❌ 未修正
-  ├─ steering_swc.cpp            ✅ 完了
-  ├─ vehicledynamics_swc.cpp     ⚠️ 部分修正（StepLateral 追加待ち）
-  ├─ driverinput_swc.cpp         ✅ 変更不要
-  └─ safety_swc.cpp              ✅ 完了（Watchdog）
+  ├─ engine_swc.cpp              ✅ Model 呼び出し
+  ├─ brake_swc.cpp               ✅ Model 呼び出し
+  ├─ steering_swc.cpp            ✅ Model 呼び出し
+  ├─ vehicledynamics_swc.cpp     ✅ Model 呼び出し（StepVehicle）
+  ├─ driverinput_swc.cpp         ✅ 内蔵シナリオ
+  └─ safety_swc.cpp              ✅ Watchdog
 ```
 
-### テスト層（tests/）
+### テスト層（`tests/`）
 
 ```
 tests/
-  ├─ test_engine_model.cpp                   ✅ 4 tests PASS
-  ├─ test_vehicle_dynamics_model.cpp         ✅ 2 tests PASS
-  ├─ mock_rte.h                              ❌ 未実装
-  ├─ test_engine_swc.cpp                     ❌ 未実装
-  ├─ test_brake_model.cpp                    ❌ 未実装
-  ├─ test_brake_swc.cpp                      ❌ 未実装
-  ├─ test_steering_model.cpp                 ✅ 完了
-  ├─ test_steering_swc.cpp                   ✅ 完了
-  ├─ test_vehicledynamics_swc.cpp            ❌ 未実装
-  ├─ test_safety_logic.cpp                   ✅ 完了
-  └─ test_safety_swc.cpp                     ✅ 完了
+  ├─ mock_rte.h                              ✅
+  ├─ test_engine_model.cpp / test_engine_swc.cpp                 ✅
+  ├─ test_brake_model.cpp / test_brake_swc.cpp                   ✅
+  ├─ test_steering_model.cpp / test_steering_swc.cpp             ✅
+  ├─ test_vehicle_dynamics_model.cpp                             ✅ 縦・横
+  ├─ test_vehicledynamics_swc.cpp                                ✅
+  ├─ test_safety_logic.cpp / test_safety_swc.cpp                 ✅
+  └─ test_watchdog_integration.cpp                               ✅
 ```
-
----
-
-## 現在のステータス
-
-| コンポーネント | Model層 | SWC層 | テスト | リグレッション |
-|---|---|---|---|---|
-| **Engine** | ✅ 完了 | 🔄 修正中 | ⏳ 実装待ち | ⏳ 確認待ち |
-| **Brake** | ❌ 未実装 | ❌ 未修正 | ❌ 未実装 | ❌ 未確認 |
-| **Steering** | ❌ 未実装 | ❌ 未修正 | ❌ 未実装 | ❌ 未確認 |
-| **VehicleDynamics** | ⚠️ 部分完 | ⚠️ 部分修正 | ⚠️ 部分完 | ⏳ 確認待ち |
-| **Safety** | ❌ 未実装 | ❌ 未修正 | ❌ 未実装 | ❌ 未確認 |
 
 ---
 
 ## 次のステップ
 
-### 即座に実装すべき（Phase 1: Engine）
-
-1. **[tasks/engine/task-2-mock-rte.md](../tasks/engine/task-2-mock-rte.md)** を読む
-2. `tests/mock_rte.h` を実装
-3. `tests/test_engine_swc.cpp` を実装
-4. ビルド・テスト実行
-
-### その後（Phase 2: Brake）
-
-各タスクファイルに沿って実装を進める
-
----
+1. 更新直後に Degraded / EStop になったら自動でロールバックする試験適用（ADR-0003 の後続）
+2. ログへ Config の世代・適用時刻を記録
+3. ECU 構成を設定で切り替える（ADR-0002 の案B・案C）
 
 ## 参考資料
 
-- [docs/design/](./design/) - 各コンポーネントの設計書
-- [tasks/](../tasks/) - タスク管理・進捗管理
-- CMakeLists.txt - Catch2 統合設定
+- [docs/design/](./) - 各コンポーネントの設計書
+- [tasks/](../../tasks/) - タスク管理・進捗管理
+- [CONTRIBUTING.md](../../CONTRIBUTING.md) - TDD の進め方、テスト、CI

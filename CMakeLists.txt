@@ -50,6 +50,7 @@ add_executable(unit_tests
   tests/test_steering_model.cpp
   tests/test_steering_swc.cpp
   tests/test_safety_swc.cpp
+  tests/test_vehicledynamics_swc.cpp
   tests/test_safety_logic.cpp
   tests/test_watchdog_integration.cpp
   src/swc/engine_swc.cpp
