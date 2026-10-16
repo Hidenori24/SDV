@@ -1,6 +1,7 @@
 //! SDV core: Model layer + fixed-step simulation, usable natively and from
 //! the browser (WebAssembly, plain C ABI - no wasm-bindgen required).
 
+pub mod bus;
 pub mod model;
 pub mod rte;
 pub mod safety;

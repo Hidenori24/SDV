@@ -2,6 +2,7 @@
 //! 10 ms: Engine -> Brake -> Steering -> VehicleDynamics -> log,
 //! then 20 ms: DriverInput, 100 ms: Safety.
 
+use crate::bus::{Bus, Frame, Node};
 use crate::model::*;
 use crate::rte::Rte;
 use crate::safety::SwcStatus;
@@ -46,60 +47,105 @@ pub enum Component {
 pub const DT_10MS: f32 = 0.010;
 pub const DT_100MS_MS: u32 = 100;
 
-pub struct Sim {
+/// An ECU = its own RTE + the SWCs allocated to it + alive counter + fault-injection flag.
+struct Ecu<S> {
     rte: Rte,
+    swc: S,
+    alive: u64,
+    stalled: bool,
+}
+
+impl<S: Default> Ecu<S> {
+    fn new() -> Self {
+        Self { rte: Rte::default(), swc: S::default(), alive: 0, stalled: false }
+    }
+}
+
+/// VCU / gateway ECU: DriverInput + Safety (watchdog).
+struct Vcu {
+    rte: Rte,
+    safety_swc: SafetySwc,
+}
+
+/// Fixed ECU layout of ADR-0002 plan A:
+/// VCU, Engine ECU, Brake ECU, Steering ECU, and the Plant (VehicleDynamics), joined by a virtual bus.
+pub struct Sim {
+    vcu: Vcu,
+    engine: Ecu<EngineSwc>,
+    brake: Ecu<BrakeSwc>,
+    steering: Ecu<SteeringSwc>,
+    plant: Ecu<VehicleDynamicsSwc>,
+    bus: Bus,
     /// true: DriverInput follows the built-in demo scenario (like the C++ app);
     /// false: the input is controlled from outside (GUI).
     use_scenario: bool,
-    engine: EngineSwc,
-    brake: BrakeSwc,
-    steering: SteeringSwc,
-    vehicle: VehicleDynamicsSwc,
-    safety_swc: SafetySwc,
     tick: u64,
-    /// Alive counters (bumped by each SWC when it runs), like `Bsw::Diag::ReportAlive`.
-    alive: [u64; 4],
-    /// Fault injection: a stalled SWC is not executed (and therefore stops reporting alive).
-    stalled: [bool; 4],
 }
 
 impl Sim {
     pub fn new() -> Self {
         Self {
-            rte: Rte::default(),
+            vcu: Vcu { rte: Rte::default(), safety_swc: SafetySwc::default() },
+            engine: Ecu::new(),
+            brake: Ecu::new(),
+            steering: Ecu::new(),
+            plant: Ecu::new(),
+            bus: Bus::new(0),
             use_scenario: false,
-            engine: EngineSwc::default(),
-            brake: BrakeSwc::default(),
-            steering: SteeringSwc::default(),
-            vehicle: VehicleDynamicsSwc::default(),
-            safety_swc: SafetySwc::default(),
             tick: 0,
-            alive: [0; 4],
-            stalled: [false; 4],
         }
     }
 
     // ---- signal access (the GUI / tests see the system through these) ----
-    pub fn input(&self) -> DriverInput { self.rte.input }
-    pub fn input_mut(&mut self) -> &mut DriverInput { &mut self.rte.input }
-    pub fn cmd(&self) -> ActuatorCmd { self.rte.cmd }
-    pub fn state(&self) -> VehicleState { self.rte.state }
-    pub fn safety(&self) -> Safety { self.rte.safety }
+    pub fn input(&self) -> DriverInput { self.vcu.rte.input }
+    /// The driver's request lives on the VCU; it reaches the ECUs through the bus.
+    pub fn input_mut(&mut self) -> &mut DriverInput { &mut self.vcu.rte.input }
+    /// Actuator commands as received by the plant.
+    pub fn cmd(&self) -> ActuatorCmd { self.plant.rte.cmd }
+    pub fn state(&self) -> VehicleState { self.plant.rte.state }
+    pub fn safety(&self) -> Safety { self.vcu.rte.safety }
     pub fn set_use_scenario(&mut self, on: bool) { self.use_scenario = on; }
 
-    /// Fault injection (like `sdv_sim --stall`): stop (`true`) or resume (`false`) executing a SWC.
+    /// RTE of a node (for inspection).
+    pub fn rte(&self, node: Node) -> &Rte {
+        match node {
+            Node::Vcu => &self.vcu.rte,
+            Node::Engine => &self.engine.rte,
+            Node::Brake => &self.brake.rte,
+            Node::Steering => &self.steering.rte,
+            Node::Plant => &self.plant.rte,
+        }
+    }
+
+    fn rte_mut(&mut self, node: Node) -> &mut Rte {
+        match node {
+            Node::Vcu => &mut self.vcu.rte,
+            Node::Engine => &mut self.engine.rte,
+            Node::Brake => &mut self.brake.rte,
+            Node::Steering => &mut self.steering.rte,
+            Node::Plant => &mut self.plant.rte,
+        }
+    }
+
+    /// Fault injection (like `sdv_sim --stall`): stop (`true`) or resume (`false`) a node.
+    /// A stalled node runs nothing and sends no frames (so its alive counter stops too).
     pub fn set_stall(&mut self, c: Component, stalled: bool) {
-        self.stalled[c as usize] = stalled;
+        match c {
+            Component::Engine => self.engine.stalled = stalled,
+            Component::Brake => self.brake.stalled = stalled,
+            Component::Steering => self.steering.stalled = stalled,
+            Component::VehicleDynamics => self.plant.stalled = stalled,
+        }
     }
 
-    /// External E-Stop request (UI / hardware); read directly by the SWCs like the RTE `estop` flag.
+    /// External E-Stop request (UI / hardware); enters on the VCU and reaches the ECUs via the Safety frame.
     pub fn set_estop_request(&mut self, on: bool) {
-        self.rte.safety.estop = on;
+        self.vcu.rte.safety.estop = on;
     }
 
-    /// Watchdog view of each SWC: [engine, brake, steering, vehicledynamics].
+    /// Watchdog view of each supervised node: [engine, brake, steering, vehicledynamics].
     pub fn swc_status(&self) -> [SwcStatus; 4] {
-        self.safety_swc.supervisor.status()
+        self.vcu.safety_swc.supervisor.status()
     }
 
     /// Reset everything (this releases a latched watchdog EStop and clears injected stalls).
@@ -109,42 +155,71 @@ impl Sim {
         self.use_scenario = use_scenario;
     }
 
+    fn deliver(&mut self) {
+        for (to, frame) in self.bus.deliver(self.tick) {
+            frame.apply(self.rte_mut(to));
+        }
+    }
+
     /// Advance one 10 ms tick and return the log row.
+    ///
+    /// Order: VCU transmits -> ECUs run and transmit -> plant runs and transmits -> VCU tasks.
+    /// The bus delivers between the phases, so with zero delay every value is seen in the same
+    /// tick as in the single-process version.
     pub fn step_10ms(&mut self) -> Row {
         let i = self.tick;
         let dt = DT_10MS;
 
-        // A stalled SWC neither updates its outputs nor reports alive.
-        if !self.stalled[Component::Engine as usize] {
-            self.engine.main_10ms(&mut self.rte);
-            self.alive[Component::Engine as usize] += 1;
+        // Phase 0: VCU transmits (Safety every 10 ms, DriverInput every 20 ms)
+        self.bus.send(i, Frame::Safety(self.vcu.rte.safety));
+        if i % 2 == 1 {
+            self.bus.send(i, Frame::DriverInput(self.vcu.rte.input));
         }
-        if !self.stalled[Component::Brake as usize] {
-            self.brake.main_10ms(&mut self.rte);
-            self.alive[Component::Brake as usize] += 1;
+        self.deliver();
+
+        // Phase 1: ECUs
+        if !self.engine.stalled {
+            self.engine.swc.main_10ms(&mut self.engine.rte);
+            self.engine.alive += 1;
+            self.bus.send(i, Frame::CmdDrive(self.engine.rte.cmd.drive_accel_cmd));
+            self.bus.send(i, Frame::Alive { index: Component::Engine as usize, counter: self.engine.alive });
         }
-        if !self.stalled[Component::Steering as usize] {
-            self.steering.main_10ms(&mut self.rte, dt);
-            self.alive[Component::Steering as usize] += 1;
+        if !self.brake.stalled {
+            self.brake.swc.main_10ms(&mut self.brake.rte);
+            self.brake.alive += 1;
+            self.bus.send(i, Frame::CmdBrake(self.brake.rte.cmd.brake_decel_cmd));
+            self.bus.send(i, Frame::Alive { index: Component::Brake as usize, counter: self.brake.alive });
         }
-        // A stalled plant also freezes simulated time, as in C++.
-        if !self.stalled[Component::VehicleDynamics as usize] {
-            self.vehicle.step_10ms(&mut self.rte, dt);
-            self.alive[Component::VehicleDynamics as usize] += 1;
+        if !self.steering.stalled {
+            self.steering.swc.main_10ms(&mut self.steering.rte, dt);
+            self.steering.alive += 1;
+            self.bus.send(i, Frame::CmdSteer(self.steering.rte.cmd.steer_angle_cmd));
+            self.bus.send(i, Frame::Alive { index: Component::Steering as usize, counter: self.steering.alive });
+        }
+        self.deliver();
+
+        // Phase 2: plant (a stalled plant also freezes simulated time, as in C++)
+        if !self.plant.stalled {
+            self.plant.swc.step_10ms(&mut self.plant.rte, dt);
+            self.plant.alive += 1;
+            self.bus.send(i, Frame::VehicleState(self.plant.rte.state));
+            self.bus.send(i, Frame::Alive { index: Component::VehicleDynamics as usize, counter: self.plant.alive });
         }
 
         let row = Row {
-            input: self.rte.input,
-            cmd: self.rte.cmd,
-            state: self.rte.state,
-            safety: self.rte.safety,
+            input: self.vcu.rte.input,
+            cmd: self.plant.rte.cmd,
+            state: self.plant.rte.state,
+            safety: self.vcu.rte.safety,
         };
+        self.deliver();
 
+        // Phase 3: VCU tasks (see the sensor values and alive counters of this tick)
         if i % 2 == 0 && self.use_scenario {
-            DriverInputSwc::main_20ms_scenario(&mut self.rte);
+            DriverInputSwc::main_20ms_scenario(&mut self.vcu.rte);
         }
         if i % 10 == 0 {
-            self.safety_swc.main_100ms(&mut self.rte, self.alive, DT_100MS_MS);
+            self.vcu.safety_swc.main_100ms(&mut self.vcu.rte, DT_100MS_MS);
         }
         self.tick += 1;
         row

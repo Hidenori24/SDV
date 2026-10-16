@@ -87,8 +87,8 @@ pub struct SafetySwc {
 }
 impl SafetySwc {
     /// 100 ms task. `rte.safety.estop` holds the external request; the watchdog latch is OR-ed in.
-    pub fn main_100ms(&mut self, rte: &mut Rte, alive: [u64; 4], dt_ms: u32) {
-        let (estop, state) = self.supervisor.main_100ms(alive, dt_ms, rte.safety.estop);
+    pub fn main_100ms(&mut self, rte: &mut Rte, dt_ms: u32) {
+        let (estop, state) = self.supervisor.main_100ms(rte.alive_rx, dt_ms, rte.safety.estop);
         rte.safety.estop = estop;
         rte.safety.system_state = state;
     }
