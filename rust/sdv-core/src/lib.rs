@@ -2,6 +2,7 @@
 //! the browser (WebAssembly, plain C ABI - no wasm-bindgen required).
 
 pub mod model;
+pub mod safety;
 pub mod sim;
 
 use sim::{Row, Sim};

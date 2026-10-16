@@ -18,14 +18,8 @@ pub struct ActuatorCmd {
     pub steer_angle_cmd: f32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-#[repr(u8)]
-pub enum SystemState {
-    #[default]
-    Normal = 0,
-    Degraded = 1,
-    EStop = 2,
-}
+/// Same values as `model::SafetyState`.
+pub use crate::model::SafetyState as SystemState;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Safety {

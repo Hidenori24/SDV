@@ -9,6 +9,13 @@ cargo test                                            # C++の参照ログとの
 cargo build --release --target wasm32-unknown-unknown # -> target/wasm32-unknown-unknown/release/sdv_core.wasm
 ```
 
+## Safety（ウォッチドッグ）
+C++ の `src/model/safety_logic.h` と `Swc::Safety`（`safety_swc.cpp`）を移植済みです。
+- `model.rs`: `update_heartbeat` / `count_failed` / `compute_safety_state`（生存カウンタの停止検出と Normal/Degraded/EStop 判定）
+- `safety.rs`: `SafetySupervisor::main_100ms`（外部E-Stop要求とウォッチドッグのラッチを統合。ラッチは `reset()` でのみ解除）
+- `tests/safety_cpp.rs`: C++ の `test_safety_logic.cpp` と `test_safety_swc.cpp`（Watchdog部）を同じ期待値で移植
+- 未対応: `Sim` への組み込み（SWC停止の注入）。次のPRで対応予定
+
 ## C++ との一致確認
 `tests/golden/cpp_latest.csv` は `build/sdv_sim` が出力したログ（10秒・1000行）です。`tests/golden_cpp.rs` が同じデモシナリオを Rust で実行し、全行・全列の一致（浮動小数点の誤差内）を確認します。
 C++ 側の挙動を変えた場合は、`sdv_sim` を再実行して golden を更新してください。
