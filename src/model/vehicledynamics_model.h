@@ -15,6 +15,8 @@ struct VehicleParams {
   float linear_drag = 0.15f;       ///< simple resistance coefficient (1/s)
   float max_speed_mps = 3.0f;      ///< speed cap
   float estop_decel_mps2 = 6.0f;   ///< extra forced deceleration while E-Stop
+  float tire_friction_mu = 0.6f;   ///< tyre-road friction coefficient (limits lateral acceleration to mu * g)
+  float gravity_mps2 = 9.81f;      ///< g
 };
 
 /**
@@ -65,10 +67,15 @@ inline VehicleState StepLongitudinal(
 }
 
 /**
- * @brief Lateral dynamics: kinematic bicycle model (pure function)
+ * @brief Lateral dynamics: kinematic bicycle model with a grip limit (pure function)
  *
  * yaw_rate = v / L * tan(steer); yaw and position are integrated with the (already updated) v.
  * A positive steer angle turns LEFT. A stationary vehicle neither turns nor moves.
+ *
+ * Grip limit: the lateral acceleration |v * yaw_rate| cannot exceed mu * g. The steering angle that
+ * takes effect is therefore limited to atan(L * mu * g / v^2): the car understeers instead of turning
+ * ever harder as it gets faster. Below the critical speed this has no effect.
+ *
  * Only yaw_rate, yaw, x and y are written.
  */
 inline VehicleState StepLateral(
@@ -80,7 +87,15 @@ inline VehicleState StepLateral(
   VehicleState out = s;
 
   const float L = std::max(p.wheelbase_m, 1e-3f);
-  out.yaw_rate = (out.v / L) * std::tan(steer_angle_cmd);
+
+  float steer = steer_angle_cmd;
+  if (out.v > 0.0f) {
+    const float a_lat_max = std::max(p.tire_friction_mu * p.gravity_mps2, 1e-3f);
+    const float limit = std::atan(L * a_lat_max / (out.v * out.v));
+    steer = std::clamp(steer, -limit, limit);  // yields steer itself while it is within the limit
+  }
+
+  out.yaw_rate = (out.v / L) * std::tan(steer);
   out.yaw = out.yaw + out.yaw_rate * dt;
 
   out.x = out.x + out.v * std::cos(out.yaw) * dt;

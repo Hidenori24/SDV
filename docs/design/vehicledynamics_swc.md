@@ -159,6 +159,22 @@ VehicleState StepLateral(
 - δ: 舵角 (rad)
 - v: 速度 (m/s)
 
+### タイヤの限界（摩擦による旋回の上限）
+
+運動学モデルのままだと、速度が上がるほど旋回が速くなり続け、横加速度に上限がない（3 m/s でフルロックにすると約 1.9 G）。
+実際のタイヤは `μ × g` を超える横加速度を出せない（曲がりきれずにアンダーステアになる）。そこで `StepLateral` は、
+有効な舵角を次のように制限する。
+
+```
+|v × yaw_rate| ≤ μ × g   ⇔   有効な舵角 ≤ atan(L × μ × g / v²)
+```
+
+- 低速（`v ≤ v_crit = sqrt(μ g × R_min)`）では影響なし。既定値（μ = 0.6）では `v_crit` ≈ 1.7 m/s
+- 3 m/s でフルロック: 旋回 363°/s → 約 112°/s、半径 0.47 m → 約 1.5 m
+- 既定の基準ログの走行は横加速度が最大 0.21 G で、この制限に当たらないため結果は変わらない
+- 諸元（`VehicleSpec`）・物理（`Physics`）・導出値（`Derived`）の分け方は [ADR-0003 改訂1](../adr/ADR-0003-config-nvm.md) を参照
+  （`model/vehicle_spec.h`: `Derive`、`MaxSteerAtSpeed`、`YawRateAtFullLock`、`MakeVehicleParams` など）
+
 ---
 
 `StepVehicle()`（縦 → 横の順に呼ぶ）を SWC が 10 ms ごとに呼ぶ。Model の既定パラメータは SWC が使う値と同じ
