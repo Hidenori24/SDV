@@ -47,6 +47,17 @@ fn config_and_nvm_through_the_c_api() {
     let d = buf();
     assert!(d.contains("min_turn_radius_m") && d.contains("max_lateral_accel_mps2") && d.contains("turn_curve"), "{d}");
 
+    // derived values of a config being edited (not stored, not applied)
+    let (p, n) = put(br#"{"physics":{"tire_friction_mu":1.0}}"#);
+    assert_eq!(sdv_derived_json_for(p, n), 0);
+    sdv_free(p, n);
+    assert!(buf().contains("critical_speed_mps"), "{}", buf());
+    let (p, n) = put(br#"{"physics":{"tire_friction_mu":9}}"#);
+    assert_eq!(sdv_derived_json_for(p, n), 1);
+    sdv_free(p, n);
+    assert!(buf().contains("physics.tire_friction_mu"), "{}", buf());
+    assert_eq!(sdv_nvm_slot_status(0), -1, "previewing stores nothing");
+
     // commit a valid config and reboot with it
     assert_eq!(commit(r#"{"engine":{"max_accel_mps2":4.0}}"#), 0);
     assert_eq!(sdv_nvm_slot_status(0), 1, "seq 1");

@@ -78,6 +78,7 @@ C++ 側の挙動を変えた場合は、`sdv_sim` を再実行して golden を�
 | `sdv_set_vcu_stall(on)` | VCU（DriverInput + Safety）の停止/再開 |
 | `sdv_boot()` | NVMから Config を読み込み（Active → Backup → 既定値）、その Config で再起動。戻り値: 0 Active / 1 Backup / 2 既定値 |
 | `sdv_config_json()` / `sdv_default_config_json()` / `sdv_derived_json()` | 実行中 / 既定の Config の JSON、実行中の Config の導出値（最小旋回半径・横加速度の上限・旋回の曲線）をバッファに入れる（`sdv_buf_ptr` / `sdv_buf_len` で読む） |
+| `sdv_derived_json_for(ptr, n)` | 保存前の編集中 Config（JSON）の導出値を計算してバッファに入れる。0 成功 / 1 不正（理由をバッファへ）/ 2 文字コード不正。何も保存・適用しない（GUI の導出値のライブ表示用） |
 | `sdv_nvm_commit(ptr, len)` | JSON を検証して Active に保存。0 成功 / 1 不正（理由は1行1件でバッファ）/ 2 文字コード不正。適用は次の `sdv_boot` |
 | `sdv_nvm_rollback()` | `Active ← Backup`。0 成功 / 1 バックアップなし |
 | `sdv_nvm_slot_status(slot)` | -1 空 / -2 破損 / それ以外は世代番号（slot 0 Active, 1 Backup） |

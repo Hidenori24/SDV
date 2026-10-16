@@ -232,6 +232,26 @@ pub extern "C" fn sdv_derived_json() {
     set_buf(json.into_bytes());
 }
 
+/// Same as `sdv_derived_json`, but for a config JSON being edited (not stored, not applied): lets the host show
+/// the derived values live. 0 ok (report in the buffer), 1 invalid (the problems, one `path: reason` per line,
+/// are in the buffer), 2 not UTF-8.
+#[no_mangle]
+pub extern "C" fn sdv_derived_json_for(ptr: *const u8, n: i32) -> i32 {
+    let Ok(json) = std::str::from_utf8(host_bytes(ptr, n)) else {
+        return 2;
+    };
+    match config::parse(json) {
+        Ok(c) => {
+            set_buf(c.derived_json().into_bytes());
+            0
+        }
+        Err(errors) => {
+            set_buf(errors.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n").into_bytes());
+            1
+        }
+    }
+}
+
 /// Put the JSON of the built-in default config into the buffer.
 #[no_mangle]
 pub extern "C" fn sdv_default_config_json() {
