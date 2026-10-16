@@ -52,8 +52,14 @@ impl Frame {
     /// Write the received value into the receiver's RTE.
     pub fn apply(&self, rte: &mut Rte) {
         match *self {
-            Frame::DriverInput(v) => rte.input = v,
-            Frame::Safety(v) => rte.safety = v,
+            Frame::DriverInput(v) => {
+                rte.input = v;
+                rte.rx_age.driver = 0;
+            }
+            Frame::Safety(v) => {
+                rte.safety = v;
+                rte.rx_age.safety = 0;
+            }
             Frame::Alive { index, counter } => rte.alive_rx[index] = counter,
             Frame::VehicleState(v) => rte.state = v,
             Frame::CmdDrive(v) => rte.cmd.drive_accel_cmd = v,
@@ -70,21 +76,69 @@ struct InFlight {
     frame: Frame,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Bus {
     delay_ticks: u64,
+    loss_permille: u32,
+    down: bool,
+    /// Deterministic generator for frame loss, so a run is reproducible.
+    rng: u32,
     inflight: Vec<InFlight>,
+}
+
+impl Default for Bus {
+    fn default() -> Self {
+        Self::new(0)
+    }
 }
 
 impl Bus {
     pub fn new(delay_ticks: u64) -> Self {
-        Self { delay_ticks, inflight: Vec::new() }
+        Self { delay_ticks, loss_permille: 0, down: false, rng: 0x1234_5678, inflight: Vec::new() }
+    }
+
+    /// Delay of the vehicle bus in ticks (10 ms) for frames sent from now on.
+    pub fn set_delay_ticks(&mut self, ticks: u64) {
+        self.delay_ticks = ticks;
+    }
+
+    /// Probability (per mille) that a frame is lost on the vehicle bus.
+    pub fn set_loss_permille(&mut self, permille: u32) {
+        self.loss_permille = permille.min(1000);
+    }
+
+    /// Bus down: every frame on the vehicle bus is lost.
+    pub fn set_down(&mut self, down: bool) {
+        self.down = down;
+    }
+
+    fn next_rand(&mut self) -> u32 {
+        // xorshift32
+        let mut x = self.rng;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.rng = x;
+        x
     }
 
     /// Queue a frame for all of its receivers.
+    ///
+    /// Links into the plant are direct wiring (actuators, physical E-Stop line): delay, loss and
+    /// bus-down only apply to the vehicle bus (every other receiver).
     pub fn send(&mut self, now_tick: u64, frame: Frame) {
         for &to in frame.receivers() {
-            self.inflight.push(InFlight { due_tick: now_tick + self.delay_ticks, to, frame });
+            let direct = to == Node::Plant;
+            if !direct {
+                if self.down {
+                    continue;
+                }
+                if self.loss_permille > 0 && self.next_rand() % 1000 < self.loss_permille {
+                    continue;
+                }
+            }
+            let delay = if direct { 0 } else { self.delay_ticks };
+            self.inflight.push(InFlight { due_tick: now_tick + delay, to, frame });
         }
     }
 

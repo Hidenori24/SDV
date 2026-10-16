@@ -2,17 +2,19 @@
 //! the browser (WebAssembly, plain C ABI - no wasm-bindgen required).
 
 pub mod bus;
+pub mod failsafe;
 pub mod model;
 pub mod rte;
 pub mod safety;
 pub mod sim;
 pub mod swc;
 
+use bus::Node;
 use sim::{Component, Row, Sim};
 use std::sync::Mutex;
 
 static SIM: Mutex<Option<Sim>> = Mutex::new(None);
-static OUT: Mutex<[f32; 24]> = Mutex::new([0.0; 24]);
+static OUT: Mutex<[f32; 32]> = Mutex::new([0.0; 32]);
 
 fn with_sim<R>(f: impl FnOnce(&mut Sim) -> R) -> R {
     let mut g = SIM.lock().unwrap();
@@ -22,10 +24,11 @@ fn with_sim<R>(f: impl FnOnce(&mut Sim) -> R) -> R {
 /// Layout of the buffer returned by `sdv_out_ptr`:
 /// [t, x, y, yaw, v, yaw_rate, wheel_omega, throttle, brake, steer,
 ///  drive_accel_cmd, brake_decel_cmd, steer_angle_cmd, estop, system_state,
-///  silent_ms[engine, brake, steering, vehicledynamics]]
-pub const OUT_LEN: usize = 19;
+///  silent_ms[engine, brake, steering, vehicledynamics],
+///  failsafe[engine ECU, brake ECU, steering ECU]]  (bit0: DriverInput timeout, bit1: Safety timeout)
+pub const OUT_LEN: usize = 22;
 
-fn publish(row: &Row, status: &[safety::SwcStatus; 4]) {
+fn publish(row: &Row, status: &[safety::SwcStatus; 4], failsafe: &[failsafe::FailsafeStatus; 3]) {
     let mut o = OUT.lock().unwrap();
     o[..15].copy_from_slice(&[
         row.state.t, row.state.x, row.state.y, row.state.yaw, row.state.v,
@@ -36,6 +39,9 @@ fn publish(row: &Row, status: &[safety::SwcStatus; 4]) {
     ]);
     for (i, st) in status.iter().enumerate() {
         o[15 + i] = st.silent_ms as f32;
+    }
+    for (i, f) in failsafe.iter().enumerate() {
+        o[19 + i] = (f.driver_timeout as u8 | (f.safety_timeout as u8) << 1) as f32;
     }
 }
 
@@ -77,6 +83,23 @@ pub extern "C" fn sdv_set_stall(component: i32, on: i32) {
     with_sim(|s| s.set_stall(c, on != 0));
 }
 
+/// Vehicle-bus faults: delay in ticks (10 ms), frame loss in per mille, `down` = 1 loses every frame.
+/// The direct ECU -> plant links are not affected.
+#[no_mangle]
+pub extern "C" fn sdv_set_bus(delay_ticks: i32, loss_permille: i32, down: i32) {
+    with_sim(|s| {
+        s.set_bus_delay_ticks(delay_ticks.max(0) as u64);
+        s.set_bus_loss_permille(loss_permille.max(0) as u32);
+        s.set_bus_down(down != 0);
+    });
+}
+
+/// Stall (1) / resume (0) the VCU (DriverInput + Safety).
+#[no_mangle]
+pub extern "C" fn sdv_set_vcu_stall(on: i32) {
+    with_sim(|s| s.set_vcu_stall(on != 0));
+}
+
 /// Advance `n` 10 ms ticks; the last row is readable via `sdv_out_ptr`.
 #[no_mangle]
 pub extern "C" fn sdv_step(n: i32) {
@@ -85,10 +108,13 @@ pub extern "C" fn sdv_step(n: i32) {
         for _ in 0..n.max(0) {
             last = Some(s.step_10ms());
         }
-        last.map(|row| (row, s.swc_status()))
+        last.map(|row| {
+            let fs = [Node::Engine, Node::Brake, Node::Steering].map(|n| s.ecu_failsafe(n));
+            (row, s.swc_status(), fs)
+        })
     });
-    if let Some((row, status)) = last {
-        publish(&row, &status);
+    if let Some((row, status, fs)) = last {
+        publish(&row, &status, &fs);
     }
 }
 

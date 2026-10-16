@@ -37,6 +37,14 @@ pub struct Rte {
     /// Alive counters received over the bus: [engine, brake, steering, vehicledynamics].
     /// Only the node that supervises them (VCU) uses this.
     pub alive_rx: [u64; 4],
+    /// Ticks (10 ms) since the last DriverInput / Safety frame was received (for the fail-safe).
+    pub rx_age: RxAge,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RxAge {
+    pub driver: u32,
+    pub safety: u32,
 }
 
 impl Rte {

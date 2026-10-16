@@ -14,6 +14,9 @@ cargo build --release --target wasm32-unknown-unknown # -> target/wasm32-unknown
 - `swc.rs`: Engine / Brake / Steering / VehicleDynamics / DriverInput / Safety の各SWC。渡された `Rte` だけを読み書きする
 - `bus.rs`: 仮想バス（CAN風。フレームは周期送信、受信側は最新値を保持、遅延ティック数を指定可）。バスマトリクスは ADR-0002
 - `sim.rs`: ECU構成（ADR-0002 案A）。VCU（DriverInput + Safety）/ Engine ECU / Brake ECU / Steering ECU / Plant（VehicleDynamics）がそれぞれ自分の `Rte` を持ち、バスで信号をやり取りする。10ms固定ステップの順序: VCU送信 → 各ECU実行 → Plant実行 → VCUタスク（各段の間でバス配送）。遅延0・欠損0では1プロセス版と同じログになる（C++ golden と一致）
+- `failsafe.rs`: ECUの受信側フェイルセーフ。DriverInput が200ms超途絶 → 入力を0扱い、Safety が100ms超途絶 → そのECUが自律的に EStop 相当の動作に入る（VCU停止・バス断でも止まる）。フレームが戻れば自動復帰
+- バス障害: `Sim::set_bus_delay_ticks` / `set_bus_loss_permille`（決定的な疑似乱数で再現可能）/ `set_bus_down`、VCU停止: `set_vcu_stall`。**ECU→Plant のアクチュエータ線は直結**で障害の影響を受けない
+- `tests/bus_faults.rs` / `tests/wasm_api.rs`: 遅延・欠損・バス断・VCU停止とフェイルセーフ、C ABI
 - `tests/ecu_bus.rs` / `tests/bus.rs`: ECUごとのRTE、バスの配送・遅延・バスマトリクス
 - `tests/swc_rte.rs`: SWC単体と、RTEが独立していること
 
@@ -41,8 +44,10 @@ C++ 側の挙動を変えた場合は、`sdv_sim` を再実行して golden を�
 | `sdv_use_scenario(on)` | 1: 内蔵デモシナリオ / 0: 外部入力 |
 | `sdv_set_input(throttle, brake, steer)` | ドライバー入力 |
 | `sdv_set_estop(on)` | 外部 E-Stop 要求（ウォッチドッグ由来の EStop はラッチされ、`sdv_reset()` でのみ解除） |
+| `sdv_set_bus(delay_ticks, loss_permille, down)` | 車載バスの遅延(10msティック)・欠損(‰)・断。ECU→Plant の直結線は対象外 |
+| `sdv_set_vcu_stall(on)` | VCU（DriverInput + Safety）の停止/再開 |
 | `sdv_set_stall(component, on)` | SWC の故障注入。component: 0 engine / 1 brake / 2 steering / 3 vehicledynamics |
 | `sdv_step(n)` | 10ms × n 進める |
-| `sdv_out_ptr()` / `sdv_out_len()` | 出力バッファ（f32）: `t,x,y,yaw,v,yaw_rate,wheel_omega,throttle,brake,steer,drive_accel_cmd,brake_decel_cmd,steer_angle_cmd,estop,system_state` に続けて、SWCごとの無応答時間 `silent_ms`（engine, brake, steering, vehicledynamics）。全19要素 |
+| `sdv_out_ptr()` / `sdv_out_len()` | 出力バッファ（f32）: `t,x,y,yaw,v,yaw_rate,wheel_omega,throttle,brake,steer,drive_accel_cmd,brake_decel_cmd,steer_angle_cmd,estop,system_state` に続けて、SWCごとの無応答時間 `silent_ms`（engine, brake, steering, vehicledynamics）。続いて ECU（engine, brake, steering）ごとのフェイルセーフ状態（bit0: DriverInput途絶, bit1: Safety途絶）。全22要素 |
 
 RustもTDDで進めます（先に失敗するテスト→最小実装→整理）。CIとPRのOK条件は [CONTRIBUTING.md](../CONTRIBUTING.md) を参照。

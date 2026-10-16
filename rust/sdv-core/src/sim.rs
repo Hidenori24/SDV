@@ -3,6 +3,7 @@
 //! then 20 ms: DriverInput, 100 ms: Safety.
 
 use crate::bus::{Bus, Frame, Node};
+use crate::failsafe::{self, FailsafeParams, FailsafeStatus};
 use crate::model::*;
 use crate::rte::Rte;
 use crate::safety::SwcStatus;
@@ -65,6 +66,7 @@ impl<S: Default> Ecu<S> {
 struct Vcu {
     rte: Rte,
     safety_swc: SafetySwc,
+    stalled: bool,
 }
 
 /// Fixed ECU layout of ADR-0002 plan A:
@@ -76,6 +78,7 @@ pub struct Sim {
     steering: Ecu<SteeringSwc>,
     plant: Ecu<VehicleDynamicsSwc>,
     bus: Bus,
+    failsafe: FailsafeParams,
     /// true: DriverInput follows the built-in demo scenario (like the C++ app);
     /// false: the input is controlled from outside (GUI).
     use_scenario: bool,
@@ -85,12 +88,13 @@ pub struct Sim {
 impl Sim {
     pub fn new() -> Self {
         Self {
-            vcu: Vcu { rte: Rte::default(), safety_swc: SafetySwc::default() },
+            vcu: Vcu { rte: Rte::default(), safety_swc: SafetySwc::default(), stalled: false },
             engine: Ecu::new(),
             brake: Ecu::new(),
             steering: Ecu::new(),
             plant: Ecu::new(),
             bus: Bus::new(0),
+            failsafe: FailsafeParams::default(),
             use_scenario: false,
             tick: 0,
         }
@@ -138,6 +142,24 @@ impl Sim {
         }
     }
 
+    /// Stall the VCU (DriverInput + Safety): it neither runs nor sends frames.
+    pub fn set_vcu_stall(&mut self, stalled: bool) {
+        self.vcu.stalled = stalled;
+    }
+
+    /// Vehicle-bus faults (they do not affect the direct ECU -> plant links).
+    pub fn set_bus_delay_ticks(&mut self, ticks: u64) { self.bus.set_delay_ticks(ticks); }
+    pub fn set_bus_loss_permille(&mut self, permille: u32) { self.bus.set_loss_permille(permille); }
+    pub fn set_bus_down(&mut self, down: bool) { self.bus.set_down(down); }
+
+    /// Receiving-side fail-safe state of an ECU (always clear for the VCU and the plant).
+    pub fn ecu_failsafe(&self, node: Node) -> FailsafeStatus {
+        match node {
+            Node::Engine | Node::Brake | Node::Steering => failsafe::status(self.rte(node), &self.failsafe),
+            Node::Vcu | Node::Plant => FailsafeStatus::default(),
+        }
+    }
+
     /// External E-Stop request (UI / hardware); enters on the VCU and reaches the ECUs via the Safety frame.
     pub fn set_estop_request(&mut self, on: bool) {
         self.vcu.rte.safety.estop = on;
@@ -171,26 +193,35 @@ impl Sim {
         let dt = DT_10MS;
 
         // Phase 0: VCU transmits (Safety every 10 ms, DriverInput every 20 ms)
-        self.bus.send(i, Frame::Safety(self.vcu.rte.safety));
-        if i % 2 == 1 {
-            self.bus.send(i, Frame::DriverInput(self.vcu.rte.input));
+        for ecu_rte in [&mut self.engine.rte, &mut self.brake.rte, &mut self.steering.rte] {
+            ecu_rte.rx_age.driver = ecu_rte.rx_age.driver.saturating_add(1);
+            ecu_rte.rx_age.safety = ecu_rte.rx_age.safety.saturating_add(1);
+        }
+        if !self.vcu.stalled {
+            self.bus.send(i, Frame::Safety(self.vcu.rte.safety));
+            if i % 2 == 1 {
+                self.bus.send(i, Frame::DriverInput(self.vcu.rte.input));
+            }
         }
         self.deliver();
 
         // Phase 1: ECUs
         if !self.engine.stalled {
+            failsafe::apply(&mut self.engine.rte, &self.failsafe);
             self.engine.swc.main_10ms(&mut self.engine.rte);
             self.engine.alive += 1;
             self.bus.send(i, Frame::CmdDrive(self.engine.rte.cmd.drive_accel_cmd));
             self.bus.send(i, Frame::Alive { index: Component::Engine as usize, counter: self.engine.alive });
         }
         if !self.brake.stalled {
+            failsafe::apply(&mut self.brake.rte, &self.failsafe);
             self.brake.swc.main_10ms(&mut self.brake.rte);
             self.brake.alive += 1;
             self.bus.send(i, Frame::CmdBrake(self.brake.rte.cmd.brake_decel_cmd));
             self.bus.send(i, Frame::Alive { index: Component::Brake as usize, counter: self.brake.alive });
         }
         if !self.steering.stalled {
+            failsafe::apply(&mut self.steering.rte, &self.failsafe);
             self.steering.swc.main_10ms(&mut self.steering.rte, dt);
             self.steering.alive += 1;
             self.bus.send(i, Frame::CmdSteer(self.steering.rte.cmd.steer_angle_cmd));
@@ -215,11 +246,13 @@ impl Sim {
         self.deliver();
 
         // Phase 3: VCU tasks (see the sensor values and alive counters of this tick)
-        if i % 2 == 0 && self.use_scenario {
-            DriverInputSwc::main_20ms_scenario(&mut self.vcu.rte);
-        }
-        if i % 10 == 0 {
-            self.vcu.safety_swc.main_100ms(&mut self.vcu.rte, DT_100MS_MS);
+        if !self.vcu.stalled {
+            if i % 2 == 0 && self.use_scenario {
+                DriverInputSwc::main_20ms_scenario(&mut self.vcu.rte);
+            }
+            if i % 10 == 0 {
+                self.vcu.safety_swc.main_100ms(&mut self.vcu.rte, DT_100MS_MS);
+            }
         }
         self.tick += 1;
         row
