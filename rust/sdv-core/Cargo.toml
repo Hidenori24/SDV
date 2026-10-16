@@ -1,0 +1,13 @@
+[package]
+name = "sdv-core"
+version = "0.1.0"
+edition = "2021"
+description = "Rust port of the SDV Model layer and fixed-step simulation loop (native + WebAssembly)"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[profile.release]
+opt-level = "s"
+lto = true

@@ -1,0 +1,128 @@
+//! Pure-function Model layer. Mirrors `src/model/*.h` of the C++ implementation.
+
+#[derive(Clone, Copy, Debug)]
+pub struct EngineParams {
+    pub max_accel_mps2: f32,
+}
+impl Default for EngineParams {
+    fn default() -> Self {
+        Self { max_accel_mps2: 2.0 }
+    }
+}
+
+pub fn compute_drive_accel(throttle_0_1: f32, estop: bool, p: &EngineParams) -> f32 {
+    if estop {
+        return 0.0;
+    }
+    throttle_0_1.clamp(0.0, 1.0) * p.max_accel_mps2
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct BrakeParams {
+    pub max_decel_mps2: f32,
+    pub estop_max_decel_mps2: f32,
+}
+impl Default for BrakeParams {
+    fn default() -> Self {
+        Self { max_decel_mps2: 4.0, estop_max_decel_mps2: 4.0 }
+    }
+}
+
+pub fn compute_brake_decel(brake_0_1: f32, estop: bool, p: &BrakeParams) -> f32 {
+    if estop {
+        return p.estop_max_decel_mps2;
+    }
+    brake_0_1.clamp(0.0, 1.0) * p.max_decel_mps2
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SteeringParams {
+    pub max_steer_angle_rad: f32,
+    pub time_constant_s: f32,
+}
+impl Default for SteeringParams {
+    fn default() -> Self {
+        Self { max_steer_angle_rad: 0.40, time_constant_s: 0.15 }
+    }
+}
+
+pub fn compute_steer_target(steer_norm: f32, estop: bool, p: &SteeringParams) -> f32 {
+    if estop {
+        return 0.0;
+    }
+    let steer = steer_norm.clamp(-1.0, 1.0);
+    (steer * p.max_steer_angle_rad).clamp(-p.max_steer_angle_rad, p.max_steer_angle_rad)
+}
+
+/// First-order lag, exact discretization (no overshoot for any dt).
+pub fn step_steering_dynamics(current: f32, target: f32, dt_s: f32, p: &SteeringParams) -> f32 {
+    let target = target.clamp(-p.max_steer_angle_rad, p.max_steer_angle_rad);
+    if dt_s <= 0.0 {
+        return current;
+    }
+    let tau = p.time_constant_s.max(1e-3);
+    let alpha = 1.0 - (-dt_s / tau).exp();
+    current + alpha * (target - current)
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct VehicleParams {
+    pub wheel_radius_m: f32,
+    pub wheelbase_m: f32,
+    pub linear_drag: f32,
+    pub max_speed_mps: f32,
+    pub estop_decel_mps2: f32,
+}
+impl Default for VehicleParams {
+    // Matches the parameters actually used by the C++ VehicleDynamicsSWC.
+    fn default() -> Self {
+        Self {
+            wheel_radius_m: 0.03,
+            wheelbase_m: 0.20,
+            linear_drag: 0.15,
+            max_speed_mps: 3.0,
+            estop_decel_mps2: 6.0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct VehicleState {
+    pub t: f32,
+    pub x: f32,
+    pub y: f32,
+    pub yaw: f32,
+    pub v: f32,
+    pub yaw_rate: f32,
+    pub wheel_omega: f32,
+}
+
+/// Longitudinal dynamics + kinematic bicycle model for one step.
+pub fn step_vehicle(
+    s: &VehicleState,
+    dt: f32,
+    drive_accel_cmd: f32,
+    brake_decel_cmd: f32,
+    steer_angle_cmd: f32,
+    estop: bool,
+    p: &VehicleParams,
+) -> VehicleState {
+    let mut o = *s;
+
+    let mut accel = drive_accel_cmd - brake_decel_cmd - p.linear_drag * o.v;
+    if estop {
+        accel -= p.estop_decel_mps2;
+    }
+    o.v = (o.v + accel * dt).clamp(0.0, p.max_speed_mps);
+
+    let l = p.wheelbase_m.max(1e-3);
+    o.yaw_rate = (o.v / l) * steer_angle_cmd.tan();
+    o.yaw += o.yaw_rate * dt;
+
+    o.x += o.v * o.yaw.cos() * dt;
+    o.y += o.v * o.yaw.sin() * dt;
+
+    o.wheel_omega = o.v / p.wheel_radius_m.max(1e-4);
+    o.t += dt;
+    o
+}
