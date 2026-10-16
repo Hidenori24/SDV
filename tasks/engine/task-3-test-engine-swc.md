@@ -125,10 +125,10 @@ using Catch::Matchers::WithinAbs;
 
 ## 完了条件
 
-- [ ] `tests/test_engine_swc.cpp` が作成される
-- [ ] 4つ以上のテストケースが実装される
-- [ ] コンパイルエラーなし
-- [ ] 全テストケースが PASS
+- [x] `tests/test_engine_swc.cpp` が作成される
+- [x] 4つ以上のテストケースが実装される
+- [x] コンパイルエラーなし
+- [x] 全テストケースが PASS
 
 ## 次のステップ
 

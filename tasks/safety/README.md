@@ -16,7 +16,7 @@ Phase 2: SWC層実装
 Phase 3: 統合確認
     → Task-7: リグレッション確認
 
-**優先度**: 低（Engine / Brake / Steering 完了後に実装予定）
+**優先度**: 低（Engine / Brake / Steering 完了後に実装予定）→ **完了**
 
 > 実装済み。Task-1 の `ComputeSafetyState` は設計どおり。ハートビート判定は `UpdateHeartbeat`（生存カウンタ方式）で実装した。詳細は [safety_swc.md](../../docs/design/safety_swc.md)。
 ```
@@ -68,8 +68,8 @@ SafetyState ComputeSafetyState(const HeartbeatStatus& hb) {
 ```
 
 **完了条件**:
-- [ ] ファイルが作成される
-- [ ] コンパイルエラーなし
+- [x] ファイルが作成される
+- [x] コンパイルエラーなし
 
 ---
 
@@ -86,8 +86,8 @@ SafetyState ComputeSafetyState(const HeartbeatStatus& hb) {
 4. 異なる異常パターン（Engine + Brake など）
 
 **完了条件**:
-- [ ] コンパイルエラーなし
-- [ ] 4つ以上のテストケースが実装される
+- [x] コンパイルエラーなし
+- [x] 4つ以上のテストケースが実装される
 
 ---
 
@@ -101,8 +101,8 @@ ctest --verbose
 ```
 
 **完了条件**:
-- [ ] `test_safety_logic` PASS
-- [ ] ビルドエラーなし
+- [x] `test_safety_logic` PASS
+- [x] ビルドエラーなし
 
 ---
 
@@ -121,7 +121,7 @@ ctest --verbose
 4. E-Stop フラグを生成
 
 **完了条件**:
-- [ ] コンパイルエラーなし
+- [x] コンパイルエラーなし
 
 ---
 
@@ -138,8 +138,8 @@ ctest --verbose
 4. 外部 E-Stop 信号で即座に `estop=true`
 
 **完了条件**:
-- [ ] コンパイルエラーなし
-- [ ] 4つ以上のテストケースが実装される
+- [x] コンパイルエラーなし
+- [x] 4つ以上のテストケースが実装される
 
 ---
 
@@ -151,8 +151,8 @@ ctest --verbose
 ```
 
 **チェックリスト**:
-- [ ] `test_safety_logic` PASS
-- [ ] `test_safety_swc` PASS
+- [x] `test_safety_logic` PASS
+- [x] `test_safety_swc` PASS
 
 ---
 
@@ -164,8 +164,8 @@ ctest --verbose
 3. E-Stop フラグが適切に伝播
 
 **完了条件**:
-- [ ] シミュレーション成功
-- [ ] ログ確認完了
+- [x] シミュレーション成功
+- [x] ログ確認完了
 
 ---
 
