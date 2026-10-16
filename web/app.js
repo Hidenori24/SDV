@@ -21,8 +21,10 @@ const keys = new Set();
 
 function out() { return new Float32Array(mem.buffer, wasm.sdv_out_ptr(), wasm.sdv_out_len()); }
 
+// 符号規約: モデル(C++/Rust)の steer は「正 = 左旋回(反時計回り)」。
+// GUIのスライダー/キーは直感どおり「右 = 正」なので、モデルへ渡すときに符号を反転する。
 function applyInput() {
-  wasm.sdv_set_input(+$("thr").value, +$("brk").value, +$("str").value);
+  wasm.sdv_set_input(+$("thr").value, +$("brk").value, -Number($("str").value));
   wasm.sdv_set_estop(estop ? 1 : 0);
 }
 
@@ -135,7 +137,8 @@ function drawView(o) {
 function drawWheel(o) {
   const c = $("wheel"), d = fit(c), g = c.getContext("2d");
   const W = c.width, H = c.height, r = Math.min(W, H) * 0.38;
-  const steer = o[IDX.steerCmd], rot = (steer / 0.4) * (450 * Math.PI / 180);
+  // steerCmd > 0 は左旋回 → ハンドルは反時計回り（canvasのrotateは時計回りが正なので符号反転）。表示角は右回り=+
+  const steer = o[IDX.steerCmd], rot = -(steer / 0.4) * (450 * Math.PI / 180);
   g.clearRect(0, 0, W, H);
   g.save(); g.translate(W / 2, H / 2 - 6 * d); g.rotate(rot);
   g.strokeStyle = css("--ink"); g.fillStyle = css("--ink"); g.lineCap = "round";
@@ -190,7 +193,7 @@ function drawChart() {
   line("steer", css("--ok"), -0.45, 0.45);
   g.font = `${11 * d}px system-ui`;
   g.fillStyle = css("--accent"); g.fillText("v (0–3 m/s)", 8 * d, 14 * d);
-  g.fillStyle = css("--ok"); g.fillText("steer cmd (±0.4 rad)", 90 * d, 14 * d);
+  g.fillStyle = css("--ok"); g.fillText("steer cmd (±0.4 rad, +=左)", 90 * d, 14 * d);
 }
 
 function updateHud(o) {
@@ -208,7 +211,7 @@ function updateHud(o) {
   const sf = SAFETY[o[IDX.state]] || { cls: "degraded", ico: "?", lbl: "UNKNOWN", sub: "不明" };
   $("safety").className = "safety " + sf.cls;
   $("safetyIco").textContent = sf.ico; $("safetyLbl").textContent = sf.lbl; $("safetySub").textContent = sf.sub;
-  if (scenario) { setSlider("thr", o[IDX.thr]); setSlider("brk", o[IDX.brk]); setSlider("str", o[IDX.str]); }
+  if (scenario) { setSlider("thr", o[IDX.thr]); setSlider("brk", o[IDX.brk]); setSlider("str", -o[IDX.str]); }
 }
 
 function frame(ts) {
