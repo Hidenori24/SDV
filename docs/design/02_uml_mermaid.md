@@ -67,12 +67,13 @@ classDiagram
             returns VehicleState
         }
         
-        ComputeDriveAccel --> EngineParams : uses
-        ComputeBrakeDecel --> BrakeParams : uses
-        StepSteeringDynamics --> SteeringParams : uses
-        StepLongitudinal --> VehicleState : updates
-        StepLateral --> VehicleState : updates
     }
+
+    ComputeDriveAccel --> EngineParams : uses
+    ComputeBrakeDecel --> BrakeParams : uses
+    StepSteeringDynamics --> SteeringParams : uses
+    StepLongitudinal --> VehicleState : updates
+    StepLateral --> VehicleState : updates
 ```
 
 ---
@@ -150,11 +151,12 @@ classDiagram
             5. RTE_Write_VehicleState()
         }
         
-        EngineSWC --> EngineParams : uses
-        BrakeSWC --> BrakeParams : uses
-        SteeringSWC --> SteeringParams : uses
-        VehicleDynamicsSWC --> VehicleParams : uses
     }
+
+    EngineSWC --> EngineParams : uses
+    BrakeSWC --> BrakeParams : uses
+    SteeringSWC --> SteeringParams : uses
+    VehicleDynamicsSWC --> VehicleParams : uses
 ```
 
 ---
