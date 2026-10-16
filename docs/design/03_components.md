@@ -21,6 +21,17 @@
 
 - Signal Buffer（各信号の最新値を保持）
 - SWC Runnable の呼び出し（タスク周期）
+- C++ 実装は全 SWC で 1 つの RTE を共有。Rust 実装は **ECU ごとに 1 つの RTE** を持ち、ECU 間は仮想バスで運ぶ（[07_ecu_architecture.md](07_ecu_architecture.md)）
+
+## ECU への割り当て（Rust 実装、ADR-0002 案A）
+
+| ノード | 載せる SWC |
+|---|---|
+| VCU / ゲートウェイ | DriverInputSWC、SafetySupervisorSWC |
+| Engine ECU | EngineSWC |
+| Brake ECU | BrakeSWC |
+| Steering ECU | SteeringSWC |
+| Plant（ECU ではない） | VehicleDynamicsSWC |
 
 ---
 
@@ -136,6 +147,9 @@ Runnable:
 - 監視対象がタイムアウトしたらEStopをTrueにする
 - EStop後は明示解除が必要（v1はリセットで解除でも可）
 
+実装状況: **実装済み**。各ノードの生存カウンタが 1000 ms（Config で変更可）を超えて進まなければ「応答なし」。
+1 つで Degraded、2 つ以上で EStop（ラッチ、リセットで解除）。外部 E-Stop 要求は取り下げで Normal に戻る。詳細は [safety_swc.md](safety_swc.md)。
+
 ---
 
 ## BSW
@@ -145,16 +159,19 @@ Runnable:
 - dt供給（v1は固定dtでも可）
 
 ### Com
-- v1: プロセス内（Pythonはファイル/標準入出力/簡易ソケットで接続しても良い）
-- v1+: UDP Publish/Subscribe へ拡張（後で）
+- C++ 実装: プロセス内（共有 RTE）
+- Rust 実装: **仮想バス**（`bus.rs`）。フレームは周期送信、受信側は最新値を保持。遅延・欠損・断を注入できる。Plant 宛ては直結
+- 将来: UDP Publish/Subscribe へ拡張
 
 ### Nvm(Config)
-- JSONやiniでOK
-- 更新時はバックアップを作りロールバック可能にする（v1のSDV要件）
+- **Rust 実装済み**（`config.rs` / `nvm.rs`）。Config は JSON（欠けた項目は既定値、未知・範囲外は拒否）
+- NVM は Active / Backup の 2 面 + 世代番号 + CRC32。更新は検証に通ったものだけ保存し、再起動で有効。壊れたら Backup、両方だめなら既定値。ロールバック可能
+- 詳細は [ADR-0003](../adr/ADR-0003-config-nvm.md)
 
 ### Diag+Watchdog
-- 生存監視（カウンタ、時刻）
+- 生存監視: 各 SWC（C++）／各ノードの Alive フレーム（Rust）の生存カウンタ
 - system_stateの管理（Normal/Degraded/EStop）
+- Rust 実装では、受信側の ECU もフェイルセーフを持つ（`failsafe.rs`）: DriverInput 途絶 → 入力 0、Safety 途絶 → 自律的に EStop 相当
 
 ### Logging
 - 最小: CSV（t, inputs, cmds, state, estop）

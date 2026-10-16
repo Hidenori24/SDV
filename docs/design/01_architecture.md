@@ -1,5 +1,9 @@
 # SDV システムアーキテクチャ
 
+> **このドキュメントの範囲**: C++ 実装（`src/`、1 プロセス・1 つの RTE）の構成。
+> Rust 実装（`rust/sdv-core`）は ECU ごとに RTE を持ち、仮想バスでつながる構成に進んでいる。現行の全体像は
+> [07_ecu_architecture.md](07_ecu_architecture.md) を参照（経緯は [ADR-0002](../adr/ADR-0002-ecu-partitioning.md)）。
+
 ## 1. 全体構成図
 
 ```mermaid
@@ -283,44 +287,24 @@ TEST_CASE("EngineSWC: reads throttle, writes accel") {
 
 ## 5. 実行フロー
 
-### 周期的実行（10ms）
+### 周期的実行（C++ の `main.cpp` のタスク順序）
 
 ```
-TimeBase (10ms tick)
-  ↓
-  ├─→ DriverInputSWC::Main10ms() ─→ RTE.DriverInput update
-  │
-  ├─→ EngineSWC::Main10ms()
-  │   ├─ RTE_Read_DriverInput()
-  │   ├─ RTE_Read_Safety()
-  │   ├─ Model::ComputeDriveAccel()
-  │   └─ RTE_Write_ActuatorCmd()
-  │
-  ├─→ BrakeSWC::Main10ms()
-  │   ├─ RTE_Read_DriverInput()
-  │   ├─ RTE_Read_Safety()
-  │   ├─ Model::ComputeBrakeDecel()
-  │   └─ RTE_Write_ActuatorCmd()
-  │
-  ├─→ SteeringSWC::Main10ms()
-  │   ├─ RTE_Read_DriverInput()
-  │   ├─ RTE_Read_Safety()
-  │   ├─ Model::StepSteeringDynamics()
-  │   └─ RTE_Write_ActuatorCmd()
-  │
-  ├─→ VehicleDynamicsSWC::Main10ms()
-  │   ├─ RTE_Read_ActuatorCmd()
-  │   ├─ RTE_Read_VehicleState()
-  │   ├─ Model::StepLongitudinal()
-  │   ├─ Model::StepLateral()
-  │   └─ RTE_Write_VehicleState()
-  │
-  ├─→ Logging::Main10ms()
-  │   └─ RTE_Read_* & CSV output
-  │
-  └─→ Diag::Main10ms()
-      └─ Signal sanity check
+TimeBase（10ms ティック）
+  ├─ 10ms タスク（毎ティック）
+  │    1. EngineSWC::Main10ms()          ─ Model::ComputeDriveAccel()
+  │    2. BrakeSWC::Main10ms()           ─ Model::ComputeBrakeDecel()
+  │    3. SteeringSWC::Main10ms()        ─ Model::StepSteeringDynamics()
+  │    4. VehicleDynamicsSWC::Step10ms() ─ 縦・横の更新 → VehicleState
+  │    5. Logging::Tick10ms()            ─ RTE の値を CSV へ
+  ├─ 20ms タスク（偶数ティック）
+  │    DriverInputSWC::Main20ms()        ─ シナリオから DriverInput を更新
+  └─ 100ms タスク（10 ティックごと）
+       SafetySupervisorSWC::Main100ms()  ─ 各 SWC の生存カウンタを監視 → Normal/Degraded/EStop
 ```
+
+各 SWC（Engine / Brake / Steering / VehicleDynamics）は実行の最後に `Bsw::Diag::ReportAlive()` で生存を報告する。
+Safety はその生存カウンタが進んでいるかを 100ms ごとに確認する（詳細は [safety_swc.md](safety_swc.md)）。
 
 ---
 
@@ -461,9 +445,9 @@ flowchart LR
 
 ## 実行形態
 
-- v1: 単一プロセス（シンプルな周期スケジューラでRunnableを呼ぶ）
-- v1+（拡張）: ComをUDP化し、UI/可視化を別プロセスへ分離
-- v2: SWC差し替え（Control系など）をプロセス分離し更新対象へ
+- C++ 実装: 単一プロセス（シンプルな周期スケジューラで Runnable を呼ぶ）
+- Rust 実装: ECU ごとの RTE + 仮想バス（[07_ecu_architecture.md](07_ecu_architecture.md)）。WASM にして GitHub Pages のブラウザ GUI で動かす
+- 将来: Com の UDP 化、SWC 差し替え（Control 系など）のプロセス分離
 
 ## 状態遷移（Safety）
 

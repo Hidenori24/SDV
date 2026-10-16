@@ -1,5 +1,9 @@
 # SDV システムアーキテクチャ (Mermaid版)
 
+> **このドキュメントの範囲**: C++ 実装（`src/`、1 プロセス・1 つの RTE）の構成。
+> Rust 実装（`rust/sdv-core`）は ECU ごとに RTE を持ち、仮想バスでつながる構成に進んでいる。現行の全体像は
+> [07_ecu_architecture.md](07_ecu_architecture.md) を参照（経緯は [ADR-0002](../adr/ADR-0002-ecu-partitioning.md)）。
+
 ## 1. 全体構成図
 
 ```mermaid
