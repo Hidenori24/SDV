@@ -110,3 +110,22 @@ TEST_CASE("VehicleSWC: reports alive every step", "[vehicledynamics_swc]") {
     VehicleSwcFixture::Run(7);
     REQUIRE(Bsw::Diag::GetAliveCount(Bsw::Diag::Component::VehicleDynamics) == 7);
 }
+TEST_CASE("VehicleSWC: full lock at top speed is limited by tyre grip, at low speed it is not", "[vehicledynamics_swc]") {
+    {
+        VehicleSwcFixture f;
+        VehicleSwcFixture::SetCmd(10.0f, 0.0f, 0.4f);
+        auto st = VehicleSwcFixture::Run(1000);  // reaches the 3 m/s top speed
+        REQUIRE_THAT(st.v, WithinAbs(3.0f, 1e-4f));
+        REQUIRE(std::fabs(st.v * st.yaw_rate) <= 0.6f * 9.81f + 1e-2f);
+        REQUIRE(st.yaw_rate < 2.1f);  // without the grip limit full lock would be 6.3 rad/s
+    }
+    {
+        VehicleSwcFixture f;
+        VehicleSwcFixture::SetCmd(0.0f, 0.0f, 0.4f);
+        Rte::VehicleState s{};
+        s.v = 1.0f;
+        Rte::Rte_Write_VehicleState(s);
+        auto st = VehicleSwcFixture::Run(1);
+        REQUIRE(st.yaw_rate > 1.8f);  // 1 m/s: (v/L)*tan(0.4) ~ 2.1 rad/s, unaffected
+    }
+}
