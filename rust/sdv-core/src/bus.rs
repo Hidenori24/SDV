@@ -112,6 +112,10 @@ impl Bus {
         self.down = down;
     }
 
+    pub fn is_down(&self) -> bool {
+        self.down
+    }
+
     fn next_rand(&mut self) -> u32 {
         // xorshift32
         let mut x = self.rng;

@@ -202,6 +202,18 @@ impl Sim {
         }
     }
 
+    pub fn is_stalled(&self, c: Component) -> bool {
+        match c {
+            Component::Engine => self.engine.stalled,
+            Component::Brake => self.brake.stalled,
+            Component::Steering => self.steering.stalled,
+            Component::VehicleDynamics => self.plant.stalled,
+        }
+    }
+
+    pub fn vcu_stalled(&self) -> bool { self.vcu.stalled }
+    pub fn bus_is_down(&self) -> bool { self.bus.is_down() }
+
     /// Stall the VCU (DriverInput + Safety): it neither runs nor sends frames.
     pub fn set_vcu_stall(&mut self, stalled: bool) {
         self.vcu.stalled = stalled;

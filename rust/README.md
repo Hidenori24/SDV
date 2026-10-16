@@ -84,8 +84,9 @@ C++ 側の挙動を変えた場合は、`sdv_sim` を再実行して golden を�
 | `sdv_nvm_read(slot)` / `sdv_nvm_write(slot, ptr, len)` / `sdv_nvm_erase(slot)` | 面の生バイトの取り出し・復元・消去（ブラウザの永続化用） |
 | `sdv_nvm_corrupt(slot)` | 故障注入: 面の中央の1バイトを反転 |
 | `sdv_alloc(n)` / `sdv_free(ptr, n)` | ホストが文字列・バイト列を渡すためのメモリ確保 |
+| `sdv_set_scenario(ptr, len)` / `sdv_scenario_json()` / `sdv_demo_scenario_json()` | シナリオJSONの検証と設定（0 成功 / 1 不正（理由は1行1件でバッファ）/ 2 文字コード不正。不正なら実行中のシナリオは不変）、実行中・内蔵デモのJSON取得。`sdv_use_scenario(1)` で有効、`sdv_reset()` で最初から再生 |
 | `sdv_set_stall(component, on)` | SWC の故障注入。component: 0 engine / 1 brake / 2 steering / 3 vehicledynamics |
 | `sdv_step(n)` | 10ms × n 進める |
-| `sdv_out_ptr()` / `sdv_out_len()` | 出力バッファ（f32）: `t,x,y,yaw,v,yaw_rate,wheel_omega,throttle,brake,steer,drive_accel_cmd,brake_decel_cmd,steer_angle_cmd,estop,system_state` に続けて、SWCごとの無応答時間 `silent_ms`（engine, brake, steering, vehicledynamics）。続いて ECU（engine, brake, steering）ごとのフェイルセーフ状態（bit0: DriverInput途絶, bit1: Safety途絶）。全22要素 |
+| `sdv_out_ptr()` / `sdv_out_len()` | 出力バッファ（f32）: `t,x,y,yaw,v,yaw_rate,wheel_omega,throttle,brake,steer,drive_accel_cmd,brake_decel_cmd,steer_angle_cmd,estop,system_state` に続けて、SWCごとの無応答時間 `silent_ms`（engine, brake, steering, vehicledynamics）。続いて ECU（engine, brake, steering）ごとのフェイルセーフ状態（bit0: DriverInput途絶, bit1: Safety途絶）。続いて注入中の故障（1.0 = 有効）: stalled[engine, brake, steering, plant, vcu], bus_down。全28要素 |
 
 RustもTDDで進めます（先に失敗するテスト→最小実装→整理）。CIとPRのOK条件は [CONTRIBUTING.md](../CONTRIBUTING.md) を参照。

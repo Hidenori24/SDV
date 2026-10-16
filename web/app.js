@@ -79,6 +79,14 @@ $("bdelay").addEventListener("input", () => { bus.delayTicks = +$("bdelay").valu
 $("bloss").addEventListener("input", () => { bus.loss = +$("bloss").value; syncBusUi(); applyBus(); });
 $("bdown").addEventListener("click", () => { bus.down = !bus.down; syncBusUi(); applyBus(); });
 
+// 注入中の故障をRust側の状態から同期する（シナリオのイベントでも停止・バス断が起きるため）。
+// ステップ実行後だけ同期する（クリック直後の古い値で上書きしないため）
+function syncFaults(o) {
+  for (let i = 0; i < 4; i++) stalled[i] = !!o[22 + i];
+  vcuStalled = !!o[26];
+  if (bus.down !== !!o[27]) { bus.down = !!o[27]; syncBusUi(); }
+}
+
 function setNode(b, { stalledNow, ms, text, warn }) {
   const dead = ms > TIMEOUT_MS;
   b.classList.toggle("stalled", stalledNow); b.classList.toggle("dead", dead || !!warn);
@@ -116,14 +124,14 @@ for (const id of ["thr", "brk", "str"]) $(id).addEventListener("input", () => { 
 $("spd").addEventListener("input", () => { speed = +$("spd").value; $("spdO").value = speed.toFixed(1) + "x"; });
 
 function setEstop(on) {
+  if (wasm) wasm.sdv_set_estop(on ? 1 : 0);
   estop = on;
   $("estop").classList.toggle("on", on); $("estop").setAttribute("aria-pressed", on);
   $("estop").textContent = on ? "E-STOP 作動中（再押下で解除）" : "E-STOP（Space）";
 }
 $("estop").addEventListener("click", () => setEstop(!estop));
 $("scn").addEventListener("click", () => {
-  scenario = !scenario; $("scn").classList.toggle("on", scenario);
-  for (const id of ["thr", "brk", "str"]) $(id).disabled = scenario;
+  setScenarioMode(!scenario);
   resetSim();
 });
 $("reset").addEventListener("click", () => { setEstop(false); resetSim(); });
@@ -289,16 +297,18 @@ function frame(ts) {
   last = ts;
   if (!paused) {
     keyboardControl(dt);
-    if (!scenario) applyInput(); else wasm.sdv_set_estop(estop ? 1 : 0);
+    if (!scenario) applyInput(); // シナリオ中は入力もE-Stopもシナリオ（イベント）が決める。E-STOPボタンは押したときだけ反映
     acc += dt * speed;
     let n = Math.min(Math.floor(acc / 0.01), 50);
     acc -= n * 0.01;
+    const stepped = n > 0;
     while (n-- > 0) {
       wasm.sdv_step(1);
       const o = out();
       trail.push({ x: o[IDX.x], y: o[IDX.y] }); addPath(o[IDX.x], o[IDX.y]);
       hist.push({ t: o[IDX.t], v: o[IDX.v], steer: o[IDX.steerCmd] });
     }
+    if (stepped) syncFaults(out());
     if (trail.length > 6000) trail.splice(0, trail.length - 6000);
     while (hist.length && hist[0].t < hist[hist.length - 1].t - HISTORY_S - 1) hist.shift();
   }
@@ -401,6 +411,36 @@ for (const b of document.querySelectorAll(".preset")) {
   });
 }
 
+// ---------- シナリオ（Rust側の sdv_set_scenario に対応）----------
+const SCN_PRESETS = {
+  fault: { name: "ECU2つ停止", steps: [{ until_s: 20, throttle: 0.7, steer: 0.25 }],
+    events: [{ at_s: 3.0, action: "stall", target: "steering" }, { at_s: 4.5, action: "stall", target: "brake" }] },
+  bus: { name: "バス断（2〜3秒）", steps: [{ until_s: 20, throttle: 0.8 }],
+    events: [{ at_s: 3.0, action: "bus_down" }, { at_s: 4.0, action: "bus_up" }] },
+  estop: { name: "E-Stopと解除", steps: [{ until_s: 20, throttle: 1.0 }],
+    events: [{ at_s: 2.5, action: "estop" }, { at_s: 4.5, action: "estop_release" }] },
+  bad: { steps: [{ until_s: 2, throttle: 3 }, { until_s: 1 }], events: [{ at_s: 1, action: "stall" }] },
+};
+function showScnMsg(text, ok) { const m = $("scnMsg"); m.textContent = text; m.className = "msg " + (ok ? "ok" : "err"); }
+function loadScenarioText(demo) { demo ? wasm.sdv_demo_scenario_json() : wasm.sdv_scenario_json(); $("scnText").value = bufText(); }
+function setScenarioMode(on) {
+  scenario = on; $("scn").classList.toggle("on", on);
+  for (const id of ["thr", "brk", "str"]) $(id).disabled = on;
+}
+$("scnPlay").addEventListener("click", () => {
+  const [p, n] = putText($("scnText").value);
+  const r = wasm.sdv_set_scenario(p, n); wasm.sdv_free(p, n);
+  if (r === 0) { setScenarioMode(true); setEstop(false); resetSim(); showScnMsg("検証に通ったので、最初から再生します。", true); }
+  else if (r === 1) showScnMsg("拒否しました（実行中のシナリオはそのままです）:\n" + bufText(), false);
+  else showScnMsg("文字コードが不正です。", false);
+});
+for (const b of document.querySelectorAll(".scnpreset")) {
+  b.addEventListener("click", () => {
+    if (b.dataset.p === "demo") loadScenarioText(true); else $("scnText").value = JSON.stringify(SCN_PRESETS[b.dataset.p], null, 2);
+    showScnMsg("テキストを入れ替えました。「検証して再生」で反映します。", true);
+  });
+}
+
 (async () => {
   try {
     const res = await fetch("sdv_core.wasm");
@@ -408,6 +448,7 @@ for (const b of document.querySelectorAll(".preset")) {
     wasm = instance.exports; mem = wasm.memory;
     restoreNvm();
     bootFromNvm();
+    loadScenarioText(false);
     requestAnimationFrame(frame);
   } catch (e) {
     const el = $("err"); el.style.display = "block";
