@@ -36,7 +36,12 @@ function setSlider(id, v) { $(id).value = v; $(id + "O").value = (+v).toFixed(2)
 for (const id of ["thr", "brk", "str"]) $(id).addEventListener("input", () => { $(id + "O").value = (+$(id).value).toFixed(2); });
 $("spd").addEventListener("input", () => { speed = +$("spd").value; $("spdO").value = speed.toFixed(1) + "x"; });
 
-function setEstop(on) { estop = on; $("estop").classList.toggle("on", on); }
+function setEstop(on) {
+  estop = on;
+  $("estop").classList.toggle("on", on); $("estop").setAttribute("aria-pressed", on);
+  $("estop").textContent = on ? "E-STOP 作動中（再押下で解除）" : "E-STOP（Space）";
+  $("viewwrap").classList.toggle("estop", on);
+}
 $("estop").addEventListener("click", () => setEstop(!estop));
 $("scn").addEventListener("click", () => {
   scenario = !scenario; $("scn").classList.toggle("on", scenario);
