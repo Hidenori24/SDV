@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  cpp-tests:
+    name: cpp-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build -j
+      - name: ctest (C/C++ unit tests)
+        run: ctest --test-dir build --output-on-failure
+      - name: Run simulator and keep log
+        run: |
+          mkdir -p logs
+          ./build/sdv_sim
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cpp-sim-log
+          path: logs/latest.csv
+
+  rust-tests:
+    name: rust-tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust/sdv-core
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: cargo test (includes C++ golden log cross-check)
+        run: cargo test
+      - name: WASM build
+        run: cargo build --release --target wasm32-unknown-unknown
+
+  golden-log:
+    name: golden-log
+    needs: cpp-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: cpp-sim-log
+          path: out
+      - name: C++ log must match committed golden file
+        run: |
+          diff -u rust/sdv-core/tests/golden/cpp_latest.csv out/latest.csv \
+            || { echo "::error::C++ output changed. If intended, regenerate rust/sdv-core/tests/golden/cpp_latest.csv (see CONTRIBUTING.md)."; exit 1; }
+
+  # Single stable check to require in branch protection.
+  ci-ok:
+    name: ci-ok
+    if: always()
+    needs: [cpp-tests, rust-tests, golden-log]
+    runs-on: ubuntu-latest
+    steps:
+      - name: All required jobs succeeded
+        run: |
+          echo '${{ toJSON(needs) }}'
+          test "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}" = "false"
