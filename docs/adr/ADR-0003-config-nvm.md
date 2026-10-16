@@ -1,7 +1,7 @@
 # ADR-0003: Config / NVM（パラメータ更新とロールバック）
 
 ## Status
-Accepted（ユーザー合意済みの進め方に沿って実装する）
+Accepted。**改訂1（schema 2: 諸元・物理・導出値・調整値の分離）を末尾に追記**（2026-10-16）
 
 ## Context
 v1 の完了条件に「パラメータ更新（Config/NVM）で挙動が変化し、ロールバックできる」がある（`docs/design/00_overview.md`）。
@@ -87,3 +87,95 @@ OTA の「更新後ヘルスチェック → 失敗なら戻す」に相当。�
 - 良い点: 挙動をコードを書き換えずに変えられる。壊れた更新・壊れた記憶領域から復旧できる。構成（ECU割り当て等）を Config 化する足場になる
 - 悪い点: 依存クレート（serde）が増え、WASM が大きくなる。C++ には反映しない（Rust のみ）
 - 将来: ECU 構成（SWC→ECU の割り当て）を Config に載せる。署名付き更新・差分更新は非ゴール
+
+---
+
+## 改訂1: schema 2 — 諸元・物理・導出値・調整値に分ける
+
+### 背景
+シミュレータのステアリングが実車に比べて敏感すぎることが分かった。原因の一つは、旋回の速さが速度に比例して増え続け、
+**タイヤの限界（横加速度の上限）がない**こと。3 m/s でフルロックにすると 363°/s（約 1.9 G）で曲がる。
+この上限は手で入れる数値ではなく、**路面の摩擦（`μ × g`）から決まる値**である。
+そこで、設定を「車そのもの」「世界」「そこから計算される値」「ソフトの設定」に分ける。
+
+### 4 つの区分
+| 区分 | 中身 | 誰が使う | 入力元 |
+|---|---|---|---|
+| `vehicle_spec`（諸元） | 車の寸法・性能 | シミュレータの Plant と、実機の ECU ソフト | カタログ・実測 |
+| `physics`（物理） | 世界が決める値（重力、摩擦、走行抵抗） | **シミュレータの Plant だけ**（実機では自然が決める） | 路面の種類で選ぶ |
+| 導出値（`derived`、**読み取り専用**） | 上の 2 つから計算される値 | 画面に表示して実車と比べる。Plant の飽和 | 計算（設定には書かない） |
+| `tuning`（調整） | 制御側の設定（E-Stop 時の減速、Watchdog、フェイルセーフ） | 実機の ECU ソフト | 調整 |
+
+### JSON（schema 2）
+```json
+{
+  "schema": 2,
+  "vehicle_spec": {
+    "wheelbase_m": 0.20, "wheel_radius_m": 0.03,
+    "max_steer_angle_rad": 0.40, "steer_time_constant_s": 0.15,
+    "top_speed_mps": 3.0, "max_accel_mps2": 2.0, "max_decel_mps2": 4.0, "estop_decel_mps2": 6.0
+  },
+  "physics": { "gravity_mps2": 9.81, "tire_friction_mu": 0.6, "drag_coeff": 0.15 },
+  "tuning": {
+    "estop_max_decel_mps2": 4.0,
+    "safety": { "heartbeat_timeout_ms": 1000 },
+    "failsafe": { "driver_timeout_ms": 200, "safety_timeout_ms": 100 }
+  }
+}
+```
+欠けた項目は既定値、未知の項目と範囲外は全体を拒否（全エラーをパス付きで返す）。方針は schema 1 と同じ。
+
+### schema 1 との対応と互換
+| schema 1 | schema 2 |
+|---|---|
+| `engine.max_accel_mps2` | `vehicle_spec.max_accel_mps2` |
+| `brake.max_decel_mps2` | `vehicle_spec.max_decel_mps2` |
+| `brake.estop_max_decel_mps2` | `tuning.estop_max_decel_mps2` |
+| `steering.max_steer_angle_rad` / `time_constant_s` | `vehicle_spec.max_steer_angle_rad` / `steer_time_constant_s` |
+| `vehicle.wheel_radius_m` / `wheelbase_m` | `vehicle_spec.wheel_radius_m` / `wheelbase_m` |
+| `vehicle.max_speed_mps` | `vehicle_spec.top_speed_mps` |
+| `vehicle.estop_decel_mps2` | `vehicle_spec.estop_decel_mps2` |
+| `vehicle.linear_drag` | `physics.drag_coeff` |
+| `safety.*` / `failsafe.*` | `tuning.safety.*` / `tuning.failsafe.*` |
+| （なし） | `physics.gravity_mps2`、`physics.tire_friction_mu`（新規） |
+
+- **schema 1 は自動で schema 2 に変換して読む**。見分け方: `"schema": 1`、または `schema` がなく旧形式のキー（`engine` / `brake` / `steering` / `vehicle` / `safety` / `failsafe`）を含む場合
+- 出力（`to_json`、NVM への保存）は常に schema 2。NVM に残っている schema 1 のデータは、次の保存で schema 2 になる
+- 新規項目（`gravity_mps2`、`tire_friction_mu`）は、schema 1 から変換したときは既定値を使う
+
+### 導出値（`derived`）
+| 値 | 式 |
+|---|---|
+| 最小旋回半径 | `R_min = L / tan(δ_max)` |
+| 横加速度の上限 | `a_lat_max = μ × g` |
+| 摩擦が効き始める速度 | `v_crit = sqrt(a_lat_max × R_min)` |
+| 速度 v でフルロックしたときの有効な最大舵角 | `δ_eff(v) = min(δ_max, atan(L × a_lat_max / v²))` |
+| 速度 v でフルロックしたときの旋回の速さ | `ψ̇(v) = v / L × tan(δ_eff(v))` |
+
+### Plant の摩擦による飽和
+Plant（横方向）は、有効な舵角を `δ_eff(v)` に制限する（`|v × ψ̇| ≤ μ × g`）。式は上の導出値と同じ。
+- 低速では従来と同じ（`v ≤ v_crit` で影響なし）。既定値では `v_crit ≈ 1.67 m/s`、基準ログの走行は最大 2.1 m/s²（0.21 G）なので**基準ログは変わらない**
+- 3 m/s でフルロックにすると、旋回が 363°/s → 約 112°/s、半径が 0.47 m → 1.5 m になる
+- 「制御側で舵角を速度に応じて絞る」機能は別（`tuning`）。物理側の飽和は、絞らなかったときに何が起きるかの模擬、制御側はそれを避ける設計
+
+### 検証範囲（schema 2 で新規・変更するもの）
+| 項目 | 範囲 | 既定 |
+|---|---|---|
+| `vehicle_spec.top_speed_mps` | 0.1 〜 50 | 3.0 |
+| `physics.gravity_mps2` | 1.0 〜 25 | 9.81 |
+| `physics.tire_friction_mu` | 0.05 〜 1.5 | 0.6 |
+| `physics.drag_coeff` | 0 〜 2.0 | 0.15 |
+
+そのほか（`wheelbase_m`、`wheel_radius_m`、`max_steer_angle_rad`、加速度・減速度、タイムアウト）は schema 1 と同じ範囲。
+関係チェック: `tuning.estop_max_decel_mps2 >= vehicle_spec.max_decel_mps2`。
+
+### 置き場所
+- 式（旋回の飽和、導出値）は **C++ の Model 層**に置く（ECU ソフトも使う式の単一のソース）。Rust 側の同じ式は、境界の整理（ADR-0004 予定）が終わるまでの暫定の写し
+- 設定の読み込み・検証・変換は、当面は Rust の `config.rs`（NVM と同様、後で C++ へ移す）
+
+### 実装の進め方（小さなPRで）
+1. 本改訂（ADR）
+2. C++ Model: `VehicleSpec` / `Physics`、導出値、摩擦による飽和（基準ログは変わらない）
+3. Rust: schema 2 の読み込み（schema 1 の自動変換を含む）と飽和。C++ の基準ログと一致
+4. GUI: 「諸元」「物理」「導出値（読み取り専用）」「調整」を分けて表示・編集、路面のプリセット
+5. 実機の候補（PiRacer / PiCar-X）の実測値のプリセット（実測値が揃ってから）、入力側（速度に応じた舵角の制限）の見直し
