@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed（下書き 2026-10-17）。「要確認事項」が決まったら Accepted にして「決定事項」を追記する。
+Accepted（2026-10-17）。下書きの「要確認事項」9 項目を決めた（末尾の「決定事項」）。**署名は段階1に入れ、署名・ハッシュ・MAC は通信の基礎ライブラリ `sdv-sec` として切り出す**（下書きの「署名は段階2」から変更）。
 
 > 番号について: ADR-0003 改訂1 の「置き場所」で ADR-0004 を「C++/Rust の境界の整理」に予約しているため、本ADRは 0005 とした。入れ替える場合はファイル名とリンクを直す。
 
@@ -22,7 +22,7 @@ ADR-0002 で作った「ECU 分割・仮想バス・故障注入・Watchdog」�
 - 記憶装置は ADR-0003 の抽象（`read(slot)` / `write(slot, bytes)`）を再利用する。テストと WASM はメモリ上、ブラウザは localStorage
 - 主役は Rust。C++ には反映しない（ADR-0002 と同じ）
 - バスは CAN 風（固定周期フレーム）。大きなデータの転送には向かない（→ 更新チャネルを分ける）
-- ADR-0003 は「署名付き更新・差分更新は非ゴール」としている。本ADRでもまず署名は扱わない（要確認 3）
+- ADR-0003 は「署名付き更新・差分更新は非ゴール」としていた（Config 更新の話）。**FOTA では署名を必須にする**（決定 3）。差分更新は引き続き扱わない
 
 ### Config 更新との違い
 
@@ -30,7 +30,7 @@ ADR-0002 で作った「ECU 分割・仮想バス・故障注入・Watchdog」�
 | ---- | ----------------------- | ------------- |
 | 対象 | JSON のパラメータ | ECU 上の SWC 実装 |
 | 大きさ | 小さい（1 フレームで足りない程度） | 大きい（分割転送が必要） |
-| 検証 | 構文・範囲 | サイズ・ハッシュ・互換性（信号I/F、Config schema）・ダウングレード |
+| 検証 | 構文・範囲 | **署名**・サイズ・ハッシュ・互換性（信号I/F、Config schema）・ダウングレード |
 | 失敗の影響 | 値が不適切 | 起動しない・止まる |
 | ロールバック | 手動（後続で自動） | **起動失敗・不合格・Commit なしで自動** |
 
@@ -60,17 +60,19 @@ ADR-0002 で作った「ECU 分割・仮想バス・故障注入・Watchdog」�
 - **案X: 制御バスに載せる** … 固定周期フレームの帯域を圧迫し、制御の周期（10 / 20 ms）に影響する
 - **案Y: 更新チャネルを別に持つ**【推奨】 … 実車の診断/リプログラミング用チャネル（UDS over CAN-FD / DoIP）に相当する。帯域・遅延・欠損率を別に設定でき、バスの故障注入（遅延・欠損・断）も同じように効く
 
-## Decision（案）
+## Decision
 
-1. **案A → 案B の順で進める。** 段階1で仕組みを固め、段階2（実 WASM 化、署名）は別ADRで扱う
+1. **案A → 案B の順で進める。** 段階1で仕組みを固め、段階2（実 WASM 化）は別ADRで扱う
 2. **配信経路は案Y（更新チャネル）。** 制御は既存のバスフレームで行い、データ本体は更新チャネルで送る
 3. **更新の単位は「ECU ごとの SWC イメージ」。** 当面の対象は Engine / Brake / Steering の 3 ECU。VCU（Safety 同居）は対象外
 4. **VCU に UpdateManager（更新の司令塔）を置く。** Safety SWC とは独立で、Safety の挙動を変えられない。外部（GUI、将来は Wi-Fi 経由のサーバ）からパッケージを受け取る
 5. **A/B 2面 + ブート制御 + 試験適用。** 確定は「Commit が来たとき」だけ。Commit が来なければ ECU が自分で戻る
 6. **更新は車両停止中に 1 ECU ずつ。** 2 ECU が同時に止まると EStop になるため
-7. **Watchdog は緩めない。** ECU の再起動時間（`reboot_ms`）を `heartbeat_timeout_ms` より短く規定する（要確認 4）
+7. **Watchdog は緩めない。** ECU の再起動時間（`reboot_ms`）を `heartbeat_timeout_ms` より短く規定する
+8. **イメージは署名必須。** SHA-256 でサイズ・破損を、Ed25519 の署名で出所・改ざんを検証する。検証の権威は **ECU 側**（VCU は信用しない）。秘密鍵は車に置かない
+9. **暗号まわりは `sdv-sec` ライブラリにまとめる。** ハッシュ・署名検証・MAC（フレーム認証）を、FOTA とは独立した「通信の基礎」として提供する。暗号アルゴリズムは自作せず、実績のある実装（RustCrypto）を使う
 
-## 仕様案
+## 仕様
 
 ### パッケージと manifest
 
@@ -81,6 +83,7 @@ ADR-0002 で作った「ECU 分割・仮想バス・故障注入・Watchdog」�
     "target_ecu": "steering",
     "swc": "SteeringSWC",
     "version": "1.1.0",
+    "security_version": 3,
     "size_bytes": 12345,
     "sha256": "（16 進 64 文字）"
   },
@@ -96,9 +99,41 @@ ADR-0002 で作った「ECU 分割・仮想バス・故障注入・Watchdog」�
 ```
 
 - 未知の項目は拒否（ADR-0003 と同じ方針）。数値は有限値のみ
+- `security_version`: 巻き戻し防止の単調増加の版。ECU は NVM に「これまでに受け入れた最大値」を持ち、**それ未満は署名が正しくても拒否**（`ROLLBACK_BLOCKED`）。`version` のダウングレード（決定 9）とは別物
 - バージョンは `MAJOR.MINOR.PATCH`。現在より小さい（または同じ）バージョンは `allow_downgrade: false` なら拒否
-- `signal_if_version`: 信号I/F（`02_interfaces_signals.md` とバスマトリクス）の版。**現状は版が無いので、定義する必要がある**（要確認 7）
+- `signal_if_version`: 信号I/F（`02_interfaces_signals.md` とバスマトリクス）の版。**現状は版が無いので、定義する必要がある**（決定 7）
 - `config_schema`: そのイメージが読める Config の schema（現行は 1 と 2）。NVM 内の Config と合わなければ拒否
+
+### パッケージの構造と署名
+
+```
+package = { key_id, signature(64 B), manifest_bytes, payload }
+```
+
+- 署名の対象は **`manifest_bytes`（届いたバイト列そのもの）**。JSON を正規化して署名する方式は取らない（表記ゆれで検証が壊れるため）。**検証してから解析する**（署名 NG のバイト列は解析しない）
+- `manifest` の `sha256` が `payload` を拘束するので、署名は payload 全体の出所・改ざんを保証する（受信後に `sha256` と突き合わせる）
+- 署名方式は **Ed25519**（公開鍵 32 B、署名 64 B）。ハッシュは SHA-256。ECU が持つのは**公開鍵だけ**で、車が盗まれても偽の更新は作れない
+- `key_id` が ECU の持つ信頼する公開鍵（trust anchor。最大 N 個）のどれかに一致しなければ `UNKNOWN_KEY`。鍵の追加・失効（ローテーション）は本ADRの対象外で、`key_id` の仕組みだけ先に用意する
+- 検証は ECU の `Verifying` で行う。VCU も受信時に事前検証して早く失敗させてよいが、**確定判断は ECU が行う**（VCU が侵害されても不正なイメージは入らない）
+- シミュレータの鍵: テスト・デモ用の鍵ペアをリポジトリに置く（**公開されたデモ鍵**で、本番の鍵ではない）。署名ツール（ホスト用 CLI）は秘密鍵を引数で受け取り、WASM / ECU 側のコードには**秘密鍵も署名の機能も入れない**。GUI の「デモ署名」は、デモ鍵でブラウザ上のホスト側コードが署名する（改ざん・別鍵・期限切れの注入で拒否を確認する用途）
+
+### 通信ライブラリ `sdv-sec`
+
+FOTA だけでなく、バスのフレーム認証にも使える土台にする。
+
+| 機能 | 用途 | 備考 |
+| ---- | ---- | ---- |
+| `sha256` | 破損検知、manifest の `sha256` | |
+| `ed25519_verify` | パッケージ・manifest の署名検証 | ECU 側。公開鍵のみ |
+| `ed25519_sign`（ホスト専用の feature） | 署名ツール、テスト | **ECU 向けビルドには含めない** |
+| `hmac_sha256` + 定数時間の比較 | フレーム認証（SecOC 風: データ + 鮮度カウンタ + 短縮 MAC） | 鍵は ECU ごとの NVM 領域 |
+| 鮮度カウンタの検査 | リプレイ防止（受信側が「最後に受け入れた値」より大きいことを確認） | |
+
+- `no_std`・ヒープなし・グローバル状態なし。入出力は**呼び出し側が渡すバッファ**で、時刻・ファイルを使わない（ADR-0004 で決める ECU ソフトの移植ルールと同じ作り）
+- **C ABI を公開する**（`sdv_sec_*`）。Rust のシミュレータと、実機に載る C++ の ECU ソフトの**どちらからも同じ実装を呼べる**ようにして、二重管理を避ける
+- 検証用スパイク（2026-10-17）: `sha2` / `hmac` / `ed25519-dalek`（いずれも `no_std`）の 3 機能を C ABI で出した wasm32 のライブラリが約 61KB でビルドできた（`opt-level = "s"`、`panic = "abort"`）。依存の増加はこの程度
+- 配置: `rust/sdv-sec/`（独立した crate）。`sdv-core` は path 依存で使う
+- 範囲外: 既存の制御フレーム（DriverInput など）への MAC の適用、Config 更新への署名。ライブラリの上に載せられるが、別ADRで扱う
 
 ### ECU 側の状態遷移
 
@@ -108,8 +143,8 @@ stateDiagram-v2
     Idle --> Receiving: Request（前提条件 OK）
     Receiving --> Verifying: 全ブロック受信
     Receiving --> Idle: Abort / タイムアウト / エラー
-    Verifying --> Staged: size・sha256・互換性 OK
-    Verifying --> Idle: 検証 NG（active は不変）
+    Verifying --> Staged: 署名・size・sha256・互換性 OK
+    Verifying --> Idle: 検証 NG（署名・ハッシュ・互換性。active は不変）
     Staged --> Rebooting: Activate
     Rebooting --> Trial: 新イメージで起動
     Rebooting --> RolledBack: 起動失敗（試行回数切れ）
@@ -141,10 +176,10 @@ slot "boot_ctl"        : { seq, crc32, active: A|B, trial: bool, trial_boots_lef
 | `VehicleState.v == 0`（VCU が確認） | 走行中に ECU が止まらないように |
 | Safety が EStop / Degraded でない | 異常時に更新しない |
 | 他の ECU が更新中でない | 2 ECU 同時停止 = EStop を避ける |
-| manifest の検証 OK（上の manifest 参照） | 互換性・ダウングレード |
+| manifest の検証 OK（署名・互換性・ダウングレード・`security_version`） | 出所・互換性 |
 | 更新中、VCU は DriverInput を 0 として扱う（保守状態） | 更新中に動かさない |
 
-NG のときは `error_code` を返す（`NOT_STOPPED` / `BUSY` / `BAD_SIZE` / `HASH_MISMATCH` / `INCOMPATIBLE` / `DOWNGRADE` / `NO_SPACE` / `BOOT_FAILED` / `HEALTH_FAILED` / `TIMEOUT`）。
+NG のときは `error_code` を返す（`NOT_STOPPED` / `BUSY` / `BAD_SIZE` / `HASH_MISMATCH` / `SIGNATURE_INVALID` / `UNKNOWN_KEY` / `ROLLBACK_BLOCKED` / `INCOMPATIBLE` / `DOWNGRADE` / `NO_SPACE` / `BOOT_FAILED` / `HEALTH_FAILED` / `TIMEOUT`）。
 
 ### ヘルスチェックと確定
 
@@ -184,7 +219,7 @@ NG のときは `error_code` を返す（`NOT_STOPPED` / `BUSY` / `BAD_SIZE` / `
 
 **異常系（すべて自動テスト）**
 - 転送途中でバスが断 → 再開できる。Abort すると元のまま
-- ハッシュ不一致 / 互換性 NG / ダウングレード → 拒否（active 不変）
+- ハッシュ不一致 / **署名不正（改ざん・別の鍵）/ 未知の `key_id`** / 互換性 NG / ダウングレード / **`security_version` の巻き戻し** → 拒否（active 不変）
 - 起動できないイメージ → 試行回数切れで前のバージョンに戻る
 - 起動はするが Alive を送らない / EStop を引き起こすイメージ → 不合格で戻る
 - Commit が来ない（VCU 停止）→ ECU が戻る
@@ -194,28 +229,39 @@ NG のときは `error_code` を返す（`NOT_STOPPED` / `BUSY` / `BAD_SIZE` / `
 
 ## 実装の進め方（小さなPRで）
 
-1. 本ADR（議論・決定。要確認事項を決める）
-2. Rust: manifest の型・検証（サイズ、SHA-256、互換性、ダウングレード）と `boot_ctl`（A/B・trial・CRC）。単体テスト。挙動は不変（golden 一致）
-3. Rust: ECU 側の更新ステートマシンと更新チャネル（ブロック転送・ack・再開）。ECU 単体のテスト
-4. Rust: VCU の UpdateManager（前提条件、1 ECU ずつ、保守状態）と Watchdog 連携、故障注入（途中断、壊れたイメージ、起動失敗）
-5. WASM API と GUI: パッケージ選択 → 配信の進捗 → 試験適用 → 確定 / ロールバック、壊れたイメージの注入、イベントログ表示
-6. シナリオ JSON の `update` イベント、イベントログ（別ファイル）、必要なら CSV の `versions` 列
-7. 段階2（別ADR）: 実 WASM モジュール化、署名、キャンペーン（複数 ECU の順次更新）
+1. 本ADR（決定済み）
+2. **`sdv-sec` ライブラリ**: `sha256` / `ed25519_verify` / `hmac_sha256` と C ABI。既知のテストベクタ（RFC 8032 など）で検証。CI に追加（native と wasm32 のビルド・テスト）。他は変えない
+3. Rust: manifest の型・検証（署名・サイズ・SHA-256・互換性・ダウングレード・`security_version`）、署名ツール（ホスト用 CLI、デモ鍵）、`boot_ctl`（A/B・trial・CRC）。単体テスト。挙動は不変（golden 一致）
+4. Rust: ECU 側の更新ステートマシンと更新チャネル（ブロック転送・ack・再開）。ECU 単体のテスト
+5. Rust: VCU の UpdateManager（前提条件、1 ECU ずつ、保守状態）と Watchdog 連携、故障注入（途中断、壊れたイメージ、起動失敗）。UpdateCtrl への MAC の適用（追加の確認事項 A）
+6. WASM API と GUI: パッケージ選択 → 配信の進捗 → 試験適用 → 確定 / ロールバック、壊れた・改ざんしたイメージの注入、イベントログ表示
+7. シナリオ JSON の `update` イベント、イベントログ（別ファイル）、必要なら CSV の `versions` 列
+8. 段階2（別ADR）: 実 WASM モジュール化、鍵のローテーション・失効、キャンペーン（複数 ECU の順次更新）
 
 ## Consequences
 
 - 良い点: 「更新して → 試して → 壊れたら戻る」を、バス故障や ECU 停止と組み合わせて検証できる。ADR-0003 の「試験適用（自動ロールバック）」と同じ考え方を、コードの更新に広げられる。ECU 構成の載せ替え（ADR-0002 の案 B / C）と自然につながる
-- 悪い点: 実装・テストが増える。VCU に UpdateManager、各 ECU に更新ステートマシンが入る。更新チャネルという仕様が増える。`sha2` などの依存が増え、WASM が大きくなる。C++ には反映しない（Rust のみ）
-- 将来: 署名と鍵管理、差分更新、実 WASM モジュール化、複数 ECU のキャンペーン更新、VCU 自身の更新（Safety を含めない分割が前提）
+- 悪い点: 実装・テストが増える。VCU に UpdateManager、各 ECU に更新ステートマシンが入る。更新チャネルという仕様が増える。`sdv-sec` の依存（`sha2` / `hmac` / `ed25519-dalek` / `subtle`）が増え、WASM が数十 KB 大きくなる。FOTA の実装は C++ には反映しない（Rust のみ）。ただし `sdv-sec` は C ABI で C++ からも使える。デモ鍵の扱いを誤ると本番鍵と混同するおそれがあるので、デモ鍵であることをファイル名・ドキュメントに明記する
+- 将来: 鍵のローテーション・失効、差分更新、実 WASM モジュール化、複数 ECU のキャンペーン更新、VCU 自身の更新（Safety を含めない分割が前提）、制御フレームへの MAC の適用、Config 更新への署名
 
-## 要確認事項
+## 決定事項
 
-1. **番号**: 本ADRを 0005 としてよいか（ADR-0004 は C++/Rust 境界で予約済み）
-2. **イメージの実体**: 段階1は論理イメージ（案A）、段階2で実 WASM（案B）でよいか
-3. **署名**: ADR-0003 は署名を非ゴールとした。本ADRは「ハッシュ検証は必須、署名は段階2以降」でよいか。破損検知（ハッシュ）と改ざん検知（署名）は別物として扱う
-4. **Watchdog**: 緩めずに「`reboot_ms` < `heartbeat_timeout_ms`（1000 ms）」と規定してよいか。代替案は、Alive に maintenance フラグを持たせ、更新中の ECU を一時的に監視から外す方式（安全側の判断が増えるので非推奨）
-5. **VCU の更新**: Safety を含む VCU は対象外でよいか（Safety を切り出せるまで）
-6. **更新チャネル**: 制御バスと別にする案Yでよいか。帯域の既定値（例: 1 ブロック 256 B、1 ブロックあたりの遅延）
-7. **`signal_if_version`**: どこで定義するか（`02_interfaces_signals.md` に版を追加し、manifest の `requires` と突き合わせる案）
-8. **ヘルスチェック**: 合格条件と `trial_ms`（既定 5000 ms）、`trial_boots_left` の既定値
-9. **ダウングレード**: デモ用に許可するか。ロールバック（自動で前の版に戻る）とは別の操作として扱う
+下書きの要確認事項 9 項目を、2026-10-17 に次のとおり決めた。
+
+| # | 論点 | 決定 |
+| - | ---- | ---- |
+| 1 | 番号 | 0005 のまま（ADR-0004 は C++/Rust 境界で予約） |
+| 2 | イメージの実体 | 段階1は論理イメージ（案A）、段階2で実 WASM（案B） |
+| 3 | 署名 | **段階1から署名必須**（Ed25519 + SHA-256）。破損検知（ハッシュ）と改ざん検知（署名）は別物として扱う。署名・ハッシュ・MAC は通信の基礎ライブラリ `sdv-sec` にまとめる |
+| 4 | Watchdog | 緩めない。`reboot_ms` < `heartbeat_timeout_ms`（1000 ms）と規定する |
+| 5 | VCU の更新 | 対象外（Safety を切り出せるまで） |
+| 6 | 更新チャネル | 制御バスと別にする（案Y）。既定は 1 ブロック 256 B、遅延は更新チャネル側で設定 |
+| 7 | `signal_if_version` | `02_interfaces_signals.md` に版を定義し、manifest の `requires` と突き合わせる（定義は実装PRで行う） |
+| 8 | ヘルスチェック | 合格条件は本文のとおり、`trial_ms` 既定 5000 ms、`trial_boots_left` 既定 2 |
+| 9 | ダウングレード | デモ用に許可（`allow_downgrade`）。自動ロールバックとは別の操作。ただし `security_version` の巻き戻しは署名が正しくても拒否する |
+
+## 追加の確認事項（実装の途中で決める）
+
+- **A. MAC の適用範囲**: UpdateCtrl（Request / Activate / Commit / Abort）に MAC + 鮮度カウンタを付けて、偽の Commit / Abort を防ぐか。本ADRの案は「付ける（実装の手順 5）」。DriverInput などの既存フレームへの適用は別ADR
+- **B. 鍵の置き場所**: ECU の公開鍵（trust anchor）と MAC 鍵を NVM のどこに置くか（ADR-0003 の A/B スロットとは別の、更新できない領域として扱う案）
+- **C. `sdv-sec` の言語**: Rust（no_std）+ C ABI を案としたが、ADR-0004 で「実機に載るソフトは C++」の境界が決まったとき、`sdv-sec` を Rust のまま C ABI で配るか、C/C++ の実績ある実装（libsodium / Monocypher など）を包むかを再確認する
