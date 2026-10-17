@@ -232,6 +232,13 @@ pub extern "C" fn sdv_derived_json() {
     set_buf(json.into_bytes());
 }
 
+/// Largest steering angle [rad] that takes effect at speed `v` [m/s] on the running config (tyre grip limit).
+/// The host uses it to shape driver input (e.g. keyboard steering) without duplicating the formula.
+#[no_mangle]
+pub extern "C" fn sdv_max_steer_at_speed(v: f32) -> f32 {
+    with_sim(|s| s.config().max_steer_at_speed(v))
+}
+
 /// Same as `sdv_derived_json`, but for a config JSON being edited (not stored, not applied): lets the host show
 /// the derived values live. 0 ok (report in the buffer), 1 invalid (the problems, one `path: reason` per line,
 /// are in the buffer), 2 not UTF-8.

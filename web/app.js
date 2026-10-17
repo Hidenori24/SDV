@@ -25,6 +25,9 @@ const hist = [];            // {t,v,steer}
 let paused = false, scenario = false, estop = false, speed = 1;
 let last = null, acc = 0;
 const keys = new Set();
+// キーのステアアシスト: 全舵を切るのに約0.8秒（実車のハンドルに近づける）、離すと約0.3秒でセンターへ
+const KEY_STEER_RATE = 1.2, KEY_CENTER_RATE = 3.0, KEY_STEER_MIN_FRACTION = 0.1;
+let centering = false;
 
 function out() { return new Float32Array(mem.buffer, wasm.sdv_out_ptr(), wasm.sdv_out_len()); }
 
@@ -120,7 +123,7 @@ function addPath(x, y) {
 }
 
 function setSlider(id, v) { $(id).value = v; $(id + "O").value = (+v).toFixed(2); }
-for (const id of ["thr", "brk", "str"]) $(id).addEventListener("input", () => { $(id + "O").value = (+$(id).value).toFixed(2); });
+for (const id of ["thr", "brk", "str"]) $(id).addEventListener("input", () => { $(id + "O").value = (+$(id).value).toFixed(2); if (id === "str") centering = false; });
 $("spd").addEventListener("input", () => { speed = +$("spd").value; $("spdO").value = speed.toFixed(1) + "x"; });
 
 function setEstop(on) {
@@ -142,7 +145,10 @@ addEventListener("keydown", (e) => {
   keys.add(e.code);
   if (e.code.startsWith("Arrow")) e.preventDefault();
 });
-addEventListener("keyup", (e) => keys.delete(e.code));
+addEventListener("keyup", (e) => {
+  keys.delete(e.code);
+  if (["ArrowLeft", "ArrowRight", "KeyA", "KeyD"].includes(e.code)) centering = true;
+});
 
 function keyboardControl(dt) {
   if (scenario) return;
@@ -151,10 +157,20 @@ function keyboardControl(dt) {
   const left = keys.has("ArrowLeft") || keys.has("KeyA"), right = keys.has("ArrowRight") || keys.has("KeyD");
   thr = Math.min(1, Math.max(0, thr + (up ? 1.5 : -2.5) * dt));
   brk = Math.min(1, Math.max(0, brk + (down ? 2.5 : -3.5) * dt));
-  if (left || right) str = Math.min(1, Math.max(-1, str + (right ? 1 : -1) * 2.5 * dt));
-  else if (up || down) str *= Math.max(0, 1 - 4 * dt); // self-centre while driving
+  if (!$("assist").checked) {
+    if (left || right) str = Math.min(1, Math.max(-1, str + (right ? 1 : -1) * 2.5 * dt));
+    else if (up || down) str *= Math.max(0, 1 - 4 * dt); // self-centre while driving
+  } else {
+    // アシスト: 実車のハンドルのように、ゆっくり切り、離すと戻り、速いほど切れる範囲を絞る
+    if (left || right) { str += (right ? 1 : -1) * KEY_STEER_RATE * dt; centering = false; }
+    else if (centering) { const d = KEY_CENTER_RATE * dt; str = Math.abs(str) <= d ? 0 : str - Math.sign(str) * d; }
+    // 上限は Rust 側(Config)の「その速度で有効な舵角」から。タイヤの限界を超える入力を無駄に切らせない
+    const cap = Math.min(1, Math.max(KEY_STEER_MIN_FRACTION, wasm.sdv_max_steer_at_speed(out()[IDX.v]) / steerMax));
+    str = Math.min(cap, Math.max(-cap, str));
+  }
   // Keys only take over the sliders while a key is held; otherwise manual slider values stay.
   if (keys.size) { setSlider("thr", thr); setSlider("brk", brk); setSlider("str", str); }
+  else if (centering) { setSlider("str", str); if (str === 0) centering = false; } // 矢印キーを離したあと、ハンドルだけ戻す
 }
 
 // ---------- rendering ----------

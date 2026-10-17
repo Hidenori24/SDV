@@ -47,6 +47,12 @@ fn config_and_nvm_through_the_c_api() {
     let d = buf();
     assert!(d.contains("min_turn_radius_m") && d.contains("max_lateral_accel_mps2") && d.contains("turn_curve"), "{d}");
 
+    // steering that takes effect at a given speed (host-side input shaping)
+    assert!((sdv_max_steer_at_speed(0.0) - 0.40).abs() < 1e-6, "standstill: the mechanical limit");
+    assert!((sdv_max_steer_at_speed(1.0) - 0.40).abs() < 1e-6, "below the critical speed (1.67 m/s)");
+    let at3 = sdv_max_steer_at_speed(3.0);
+    assert!(at3 > 0.0 && at3 < 0.15, "grip-limited at 3 m/s, got {at3}");
+
     // derived values of a config being edited (not stored, not applied)
     let (p, n) = put(br#"{"physics":{"tire_friction_mu":1.0}}"#);
     assert_eq!(sdv_derived_json_for(p, n), 0);
