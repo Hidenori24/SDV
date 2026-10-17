@@ -66,6 +66,20 @@ button.estop.on{background:#fff;color:var(--danger);outline:4px solid var(--dang
 .cfg .nvm span{border:1px solid var(--line);border-radius:6px;padding:2px 6px;background:var(--bg)}
 .cfg .nvm span.bad{border-color:var(--danger);color:var(--danger);font-weight:700}
 .cfg .nvm span.src{grid-column:1/-1}
+.cfgform{margin-top:8px}
+.cfgform fieldset{border:1px solid var(--line);border-radius:8px;margin:8px 0;padding:4px 10px 8px}
+.cfgform legend{font-size:12px;font-weight:700;color:var(--sub);padding:0 4px}
+.cfgform .grid{display:grid;grid-template-columns:1fr auto;gap:4px 8px;align-items:center}
+.cfgform .grid label{font-size:12px}
+.cfgform .grid input{width:84px;font:12px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:2px 6px;text-align:right}
+.cfgform .grid input:invalid{border-color:var(--danger)}
+.cfgform .grid small{color:var(--sub)}
+.cfgform .btns button{padding:2px 8px;font-size:12px}
+.derived{border:1px dashed var(--line);border-radius:8px;padding:6px 10px;margin:8px 0;background:var(--bg)}
+.derived dl{display:grid;grid-template-columns:1fr auto;gap:2px 8px;margin:0;font-size:12px}
+.derived dd{margin:0;text-align:right;font-variant-numeric:tabular-nums}
+.derived dt{color:var(--sub)}
+#turnChart{height:110px;margin-top:6px;background:var(--panel)}
 button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
 .msg{margin-top:6px;font-size:12px;white-space:pre-wrap;min-height:1.2em}
 .msg.ok{color:var(--ok)}
@@ -130,7 +144,15 @@ h2{font-size:13px;margin:0 0 4px;color:var(--sub);font-weight:600}
     <details id="cfgbox" class="cfg">
       <summary>設定（Config / NVM）</summary>
       <div class="nvm" id="nvmStatus"></div>
-      <textarea id="cfgText" spellcheck="false" rows="14" aria-label="Config JSON"></textarea>
+      <div class="cfgform" id="cfgForm"></div>
+      <div class="derived" id="derived" aria-live="polite">
+        <strong style="font-size:12px;color:var(--sub)">導出値（編集中の値から自動計算・変更不可）</strong>
+        <dl id="derivedList"></dl>
+        <canvas id="turnChart" aria-label="フルロック時の旋回半径と速度"></canvas>
+        <div class="msg" id="derivedMsg"></div>
+      </div>
+      <details><summary style="font-size:12px">JSONを直接編集（上級者向け）</summary>
+      <textarea id="cfgText" spellcheck="false" rows="14" aria-label="Config JSON"></textarea></details>
       <div class="btns">
         <button id="cfgSave" class="primary">検証して保存 → 再起動</button>
         <button id="cfgRollback">ロールバック</button>

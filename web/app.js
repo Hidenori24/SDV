@@ -318,10 +318,27 @@ function frame(ts) {
 
 // ---------- Config / NVM（Rust側の sdv_nvm_* / sdv_boot に対応）----------
 const PRESETS = {
-  sport: { engine: { max_accel_mps2: 4.0 }, vehicle: { max_speed_mps: 5.0 } },
-  strict: { safety: { heartbeat_timeout_ms: 300 }, failsafe: { safety_timeout_ms: 50, driver_timeout_ms: 100 } },
-  bad: { engine: { max_accel_mps2: 99 }, steering: { max_steer_angle_rad: 1.2 }, safety: { heartbeat_timeout_ms: 50 } },
+  sport: { vehicle_spec: { max_accel_mps2: 4.0, top_speed_mps: 5.0 } },
+  strict: { tuning: { safety: { heartbeat_timeout_ms: 300 }, failsafe: { safety_timeout_ms: 50, driver_timeout_ms: 100 } } },
+  bad: { vehicle_spec: { max_accel_mps2: 99, max_steer_angle_rad: 1.2 }, tuning: { safety: { heartbeat_timeout_ms: 50 } } },
 };
+// 路面のおおよその摩擦係数 mu（ゴムタイヤ。目安であり、実測で置き換える）
+const SURFACES = [["フローリング", 0.6], ["カーペット", 0.8], ["アスファルト(乾)", 0.9], ["濡れた路面", 0.4], ["氷", 0.1]];
+// 編集フォームの項目: [グループ, 見出し, [[JSONのパス, ラベル, 単位, 刻み]...]]
+const FIELDS = [
+  ["vehicle_spec", "車体の諸元（データシート・実測）", [
+    ["wheelbase_m", "ホイールベース", "m", 0.01], ["wheel_radius_m", "タイヤ半径", "m", 0.005],
+    ["max_steer_angle_rad", "最大舵角", "rad", 0.01], ["steer_time_constant_s", "操舵の遅れ(時定数)", "s", 0.01],
+    ["top_speed_mps", "最高速度", "m/s", 0.1], ["max_accel_mps2", "最大加速", "m/s²", 0.1],
+    ["max_decel_mps2", "最大減速", "m/s²", 0.1], ["estop_decel_mps2", "非常停止の減速能力", "m/s²", 0.1]]],
+  ["physics", "物理（世界の値）", [
+    ["gravity_mps2", "重力加速度", "m/s²", 0.01], ["tire_friction_mu", "タイヤの摩擦係数 μ", "", 0.05], ["drag_coeff", "走行抵抗", "1/s", 0.01]]],
+  ["tuning", "調整（ソフトの設定）", [
+    ["estop_max_decel_mps2", "E-Stop時の減速指令", "m/s²", 0.1],
+    ["safety.heartbeat_timeout_ms", "ウォッチドッグ時間", "ms", 50],
+    ["failsafe.driver_timeout_ms", "ECUの運転入力途絶", "ms", 10],
+    ["failsafe.safety_timeout_ms", "ECUのSafety途絶", "ms", 10]]],
+];
 const SRC_NAMES = ["Active（現行の設定）", "Backup（Activeが壊れていたため）", "既定値（NVMが空か両方破損）"];
 let bootSource = 2;
 
@@ -367,13 +384,14 @@ function refreshNvm() {
   }
   const src = document.createElement("span"); src.className = "src"; src.textContent = "起動時の読み込み元: " + SRC_NAMES[bootSource]; box.appendChild(src);
 }
-// 実行中のConfigをUI（テキスト・グラフのスケール・ウォッチドッグの表示）へ反映
+// 実行中のConfigをUI（フォーム・テキスト・グラフのスケール・ウォッチドッグの表示）へ反映
 function applyConfigToUi() {
   wasm.sdv_config_json();
   const text = bufText(), cfg = JSON.parse(text);
   $("cfgText").value = text;
-  TIMEOUT_MS = cfg.safety.heartbeat_timeout_ms;
-  vMax = +cfg.vehicle.max_speed_mps.toFixed(1); steerMax = +cfg.steering.max_steer_angle_rad.toFixed(2);
+  TIMEOUT_MS = cfg.tuning.safety.heartbeat_timeout_ms;
+  vMax = +cfg.vehicle_spec.top_speed_mps.toFixed(1); steerMax = +cfg.vehicle_spec.max_steer_angle_rad.toFixed(2);
+  syncFormFromText();
 }
 function bootFromNvm() {
   bootSource = wasm.sdv_boot();
@@ -407,9 +425,113 @@ for (const b of document.querySelectorAll(".preset")) {
     const k = b.dataset.p;
     if (k === "default") { wasm.sdv_default_config_json(); $("cfgText").value = bufText(); }
     else $("cfgText").value = JSON.stringify(PRESETS[k], null, 2);
+    syncFormFromText();
     showMsg("テキストを入れ替えました。「検証して保存」で反映します。", true);
   });
 }
+
+// ---------- 編集フォーム（諸元 / 物理 / 調整）と導出値 ----------
+// 正本は cfgText のJSON。フォームはその別表示で、入力するとJSONへ書き戻す。導出値は編集中のJSONをWASMに渡して計算する（JSに式を持たない）。
+const getPath = (o, path) => path.split(".").reduce((a, k) => (a == null ? undefined : a[k]), o);
+function setPath(o, path, v) {
+  const ks = path.split("."); let a = o;
+  for (const k of ks.slice(0, -1)) { if (typeof a[k] !== "object" || a[k] === null) a[k] = {}; a = a[k]; }
+  a[ks[ks.length - 1]] = v;
+}
+function defaultConfig() { wasm.sdv_default_config_json(); return JSON.parse(bufText()); }
+function mergeInto(base, part) {
+  for (const [k, v] of Object.entries(part)) {
+    if (v && typeof v === "object" && !Array.isArray(v) && base[k] && typeof base[k] === "object") mergeInto(base[k], v);
+    else base[k] = v;
+  }
+  return base;
+}
+// テキストが新形式(schema 2)として読めるなら、不足項目を既定値で埋めた設定を返す。旧形式・壊れたJSONは null
+function draftFromText() {
+  let o; try { o = JSON.parse($("cfgText").value); } catch (_) { return null; }
+  if (!o || typeof o !== "object" || o.schema === 1 || ["engine", "brake", "steering", "vehicle", "safety", "failsafe"].some((k) => k in o)) return null;
+  return mergeInto(defaultConfig(), o);
+}
+function buildForm() {
+  const box = $("cfgForm"); box.textContent = "";
+  for (const [group, title, items] of FIELDS) {
+    const fs = document.createElement("fieldset"), lg = document.createElement("legend"), grid = document.createElement("div");
+    lg.textContent = title; grid.className = "grid"; fs.append(lg, grid);
+    for (const [path, label, unit, step] of items) {
+      const id = `f_${group}_${path.replace(/\./g, "_")}`, l = document.createElement("label"), inp = document.createElement("input");
+      l.htmlFor = id; l.textContent = label + (unit ? ` [${unit}]` : "");
+      Object.assign(inp, { id, type: "number", step }); inp.dataset.path = `${group}.${path}`;
+      inp.addEventListener("input", onFormInput);
+      grid.append(l, inp);
+    }
+    if (group === "physics") {
+      const row = document.createElement("div"); row.className = "btns"; row.style.gridColumn = "1/-1";
+      const t = document.createElement("small"); t.textContent = "路面の目安:"; row.append(t);
+      for (const [name, mu] of SURFACES) {
+        const b = document.createElement("button"); b.textContent = `${name} ${mu}`;
+        b.addEventListener("click", () => { setFormValue("physics.tire_friction_mu", mu); onFormInput(); });
+        row.append(b);
+      }
+      grid.append(row);
+    }
+    box.append(fs);
+  }
+}
+function setFormValue(path, v) { const el = box_(path); if (el) el.value = v; }
+function box_(path) { return $("cfgForm").querySelector(`input[data-path="${path}"]`); }
+function syncFormFromText() {
+  const d = draftFromText(), form = $("cfgForm");
+  form.style.display = d ? "" : "none";
+  if (d) for (const el of form.querySelectorAll("input")) el.value = +getPath(d, el.dataset.path).toPrecision(7);
+  refreshDerived();
+}
+function onFormInput() {
+  const d = draftFromText() || defaultConfig();
+  for (const el of $("cfgForm").querySelectorAll("input")) {
+    if (el.value !== "" && el.checkValidity()) setPath(d, el.dataset.path, parseFloat(el.value));
+  }
+  $("cfgText").value = JSON.stringify(d, null, 2);
+  refreshDerived();
+}
+$("cfgText").addEventListener("input", syncFormFromText);
+
+function refreshDerived() {
+  const [p, n] = putText($("cfgText").value);
+  const r = wasm.sdv_derived_json_for(p, n); wasm.sdv_free(p, n);
+  const msg = $("derivedMsg"), list = $("derivedList");
+  if (r !== 0) {
+    list.textContent = ""; derivedCurve = null; drawTurnChart();
+    msg.textContent = r === 1 ? "範囲外・不正な項目があります（保存は拒否されます）:\n" + bufText() : "文字コードが不正です。";
+    msg.className = "msg err"; return;
+  }
+  msg.textContent = ""; msg.className = "msg";
+  const rep = JSON.parse(bufText()), dv = rep.derived;
+  const rows = [
+    ["最小旋回半径（フルロック）", dv.min_turn_radius_m.toFixed(2) + " m"],
+    ["横加速度の上限 μ·g", dv.max_lateral_accel_mps2.toFixed(2) + " m/s²"],
+    ["臨界速度（これ以上は舵角が制限される）", dv.critical_speed_mps.toFixed(2) + " m/s"],
+  ];
+  list.textContent = "";
+  for (const [k, v] of rows) { const dt = document.createElement("dt"), dd = document.createElement("dd"); dt.textContent = k; dd.textContent = v; list.append(dt, dd); }
+  derivedCurve = rep; drawTurnChart();
+}
+let derivedCurve = null;
+function drawTurnChart() {
+  const c = $("turnChart"), d = fit(c), g = c.getContext("2d"), W = c.width, H = c.height;
+  g.clearRect(0, 0, W, H); g.strokeStyle = css("--line"); g.lineWidth = d; g.strokeRect(0.5, 0.5, W - 1, H - 1);
+  if (!derivedCurve) return;
+  const pts = derivedCurve.turn_curve, vTop = pts[pts.length - 1].speed_mps;
+  const rMax = Math.max(...pts.map((p) => p.turn_radius_m)) * 1.1, pad = 6 * d;
+  const X = (v) => pad + (v / vTop) * (W - 2 * pad), Y = (r) => H - pad - (r / rMax) * (H - 2 * pad - 12 * d);
+  const vc = derivedCurve.derived.critical_speed_mps;
+  if (vc < vTop) { g.setLineDash([4 * d, 3 * d]); g.strokeStyle = css("--warn"); g.beginPath(); g.moveTo(X(vc), pad); g.lineTo(X(vc), H - pad); g.stroke(); g.setLineDash([]); }
+  g.strokeStyle = css("--accent"); g.lineWidth = 2 * d; g.beginPath();
+  g.moveTo(X(0), Y(derivedCurve.derived.min_turn_radius_m));
+  pts.forEach((p) => g.lineTo(X(p.speed_mps), Y(p.turn_radius_m))); g.stroke();
+  g.font = `${11 * d}px system-ui`; g.fillStyle = css("--sub");
+  g.fillText(`旋回半径 0–${rMax.toFixed(1)} m（縦）× 速度 0–${vTop.toFixed(1)} m/s（横）`, pad + 2 * d, 12 * d);
+}
+buildForm();
 
 // ---------- シナリオ（Rust側の sdv_set_scenario に対応）----------
 const SCN_PRESETS = {
