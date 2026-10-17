@@ -1,0 +1,27 @@
+[package]
+name = "sdv-sec"
+version = "0.1.0"
+edition = "2021"
+description = "SDV communication-security foundation: SHA-256, Ed25519 verify, HMAC-SHA256 frame authentication (no_std, C ABI)"
+license = "MIT"
+
+[dependencies]
+sha2 = { version = "0.10", default-features = false }
+hmac = { version = "0.12", default-features = false }
+ed25519-dalek = { version = "2", default-features = false, features = ["fast"] }
+subtle = { version = "2", default-features = false }
+
+[features]
+default = []
+# Host-only: Ed25519 signing (signing tool, tests). Never enabled in ECU builds.
+sign = []
+# Link std (needed to build a staticlib for the C smoke test; the library itself stays no_std).
+std = []
+
+[lib]
+crate-type = ["rlib"]
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
