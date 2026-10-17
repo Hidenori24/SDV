@@ -95,6 +95,7 @@ tools/      可視化などの補助スクリプト（Python）
 - [docs/adr/ADR-0001-autosar-like-architecture.md](docs/adr/ADR-0001-autosar-like-architecture.md) : AUTOSAR-like を採用
 - [docs/adr/ADR-0002-ecu-partitioning.md](docs/adr/ADR-0002-ecu-partitioning.md) : 疑似 ECU 分割の方針
 - [docs/adr/ADR-0003-config-nvm.md](docs/adr/ADR-0003-config-nvm.md) : Config / NVM（更新とロールバック）
+- [docs/adr/ADR-0005-fota.md](docs/adr/ADR-0005-fota.md) : FOTA（ECU ソフトの更新・試験適用・ロールバック。Proposed）
 - [rust/README.md](rust/README.md) : Rust 実装の構成・WASM API
 - [web/README.md](web/README.md) : ブラウザ GUI の使い方
 - [CONTRIBUTING.md](CONTRIBUTING.md) : TDD の進め方、テスト、CI
