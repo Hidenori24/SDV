@@ -75,7 +75,7 @@ flowchart TB
 ```
 src/        C++ 参照実装（app / bsw / model / rte / swc）
 tests/      C++ 単体テスト（Catch2）
-rust/       Rust 実装（sdv-core）。WASM にして web/ から使う
+rust/       Rust 実装（sdv-core: シミュレータ本体 / sdv-sec: 署名・MAC などの通信の基礎ライブラリ）。WASM にして web/ から使う
 web/        ブラウザ GUI（HTML + JS）
 docs/       設計文書（design/）と設計判断（adr/）
 tasks/      実装タスクの記録（SWC ごと）
@@ -97,6 +97,7 @@ tools/      可視化などの補助スクリプト（Python）
 - [docs/adr/ADR-0003-config-nvm.md](docs/adr/ADR-0003-config-nvm.md) : Config / NVM（更新とロールバック）
 - [docs/adr/ADR-0005-fota.md](docs/adr/ADR-0005-fota.md) : FOTA（ECU ソフトの更新・署名検証・試験適用・ロールバック）
 - [rust/README.md](rust/README.md) : Rust 実装の構成・WASM API
+- [rust/sdv-sec/README.md](rust/sdv-sec/README.md) : 通信の基礎ライブラリ（SHA-256・Ed25519 検証・フレーム MAC、C ABI）
 - [web/README.md](web/README.md) : ブラウザ GUI の使い方
 - [CONTRIBUTING.md](CONTRIBUTING.md) : TDD の進め方、テスト、CI
 
