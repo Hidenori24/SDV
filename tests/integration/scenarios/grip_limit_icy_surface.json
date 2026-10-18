@@ -1,0 +1,38 @@
+{
+  "name": "grip_limit_icy_surface",
+  "description": "路面を氷(μ=0.2)にする Config を適用して起動すると、同じ操作で横加速度の上限が 0.2×9.81=1.962 m/s² に下がる(Config → 挙動の結合)",
+  "seconds": 10,
+  "config": {
+    "physics": {
+      "tire_friction_mu": 0.2
+    }
+  },
+  "scenario": {
+    "name": "full lock on ice",
+    "steps": [
+      {
+        "until_s": 20,
+        "throttle": 1.0,
+        "steer": 1.0
+      }
+    ]
+  },
+  "expect": [
+    {
+      "kind": "always",
+      "from": 0,
+      "to": 10,
+      "signal": "lateral_accel",
+      "op": "<=",
+      "value": 1.97
+    },
+    {
+      "kind": "at",
+      "t": 10.0,
+      "signal": "lateral_accel",
+      "op": "approx",
+      "value": 1.962,
+      "tol": 0.01
+    }
+  ]
+}

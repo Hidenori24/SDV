@@ -1,0 +1,31 @@
+{
+  "name": "steer_negative_turns_right",
+  "description": "符号規約: steer が負なら右旋回(yaw が減り、y が負の側へ進む)",
+  "seconds": 3,
+  "scenario": {
+    "name": "steer -",
+    "steps": [
+      {
+        "until_s": 20,
+        "throttle": 0.5,
+        "steer": -0.5
+      }
+    ]
+  },
+  "expect": [
+    {
+      "kind": "at",
+      "t": 3.0,
+      "signal": "yaw",
+      "op": "<",
+      "value": -1.0
+    },
+    {
+      "kind": "at",
+      "t": 3.0,
+      "signal": "y",
+      "op": "<",
+      "value": -0.5
+    }
+  ]
+}

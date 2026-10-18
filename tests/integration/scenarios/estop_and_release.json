@@ -1,0 +1,81 @@
+{
+  "name": "estop_and_release",
+  "description": "E-Stop で止まり、解除で再び走れる。E-Stop 中は状態が EStop で、解除後は Normal に戻る",
+  "seconds": 9,
+  "scenario": {
+    "name": "estop and release",
+    "steps": [
+      {
+        "until_s": 20,
+        "throttle": 1.0
+      }
+    ],
+    "events": [
+      {
+        "at_s": 2.5,
+        "action": "estop"
+      },
+      {
+        "at_s": 4.5,
+        "action": "estop_release"
+      }
+    ]
+  },
+  "expect": [
+    {
+      "kind": "first",
+      "between": [
+        2.5,
+        2.8
+      ],
+      "signal": "state",
+      "op": "==",
+      "value": 2
+    },
+    {
+      "kind": "at",
+      "t": 3.0,
+      "signal": "v",
+      "op": "==",
+      "value": 0
+    },
+    {
+      "kind": "always",
+      "from": 3.0,
+      "to": 4.4,
+      "signal": "state",
+      "op": "==",
+      "value": 2
+    },
+    {
+      "kind": "always",
+      "from": 3.0,
+      "to": 4.4,
+      "signal": "v",
+      "op": "==",
+      "value": 0
+    },
+    {
+      "kind": "at",
+      "t": 4.7,
+      "signal": "state",
+      "op": "==",
+      "value": 0
+    },
+    {
+      "kind": "at",
+      "t": 4.7,
+      "signal": "estop",
+      "op": "==",
+      "value": 0
+    },
+    {
+      "kind": "at",
+      "t": 8.5,
+      "signal": "v",
+      "op": "approx",
+      "value": 3.0,
+      "tol": 0.01
+    }
+  ]
+}
