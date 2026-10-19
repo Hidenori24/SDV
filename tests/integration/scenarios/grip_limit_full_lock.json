@@ -1,0 +1,41 @@
+{
+  "name": "grip_limit_full_lock",
+  "description": "最高速でフルロックにしても、横加速度は μ·g(既定 0.6×9.81=5.886 m/s²)を超えない。上限には実際に達する",
+  "seconds": 10,
+  "scenario": {
+    "name": "full lock",
+    "steps": [
+      {
+        "until_s": 20,
+        "throttle": 1.0,
+        "steer": 1.0
+      }
+    ]
+  },
+  "expect": [
+    {
+      "kind": "always",
+      "from": 0,
+      "to": 10,
+      "signal": "lateral_accel",
+      "op": "<=",
+      "value": 5.89
+    },
+    {
+      "kind": "at",
+      "t": 10.0,
+      "signal": "lateral_accel",
+      "op": "approx",
+      "value": 5.886,
+      "tol": 0.01
+    },
+    {
+      "kind": "at",
+      "t": 10.0,
+      "signal": "v",
+      "op": "approx",
+      "value": 3.0,
+      "tol": 0.01
+    }
+  ]
+}

@@ -1,0 +1,80 @@
+{
+  "name": "fault_two_ecus_stall",
+  "description": "Steering ECU(3.0s)と Brake ECU(4.5s)が停止。1つ目の検出で DEGRADED、2つ目で E-STOP(ラッチ)になり、車は止まる。検出はタイムアウト(1秒)の後",
+  "seconds": 12,
+  "scenario": {
+    "name": "two ECUs stall",
+    "steps": [
+      {
+        "until_s": 20,
+        "throttle": 0.7,
+        "steer": 0.25
+      }
+    ],
+    "events": [
+      {
+        "at_s": 3.0,
+        "action": "stall",
+        "target": "steering"
+      },
+      {
+        "at_s": 4.5,
+        "action": "stall",
+        "target": "brake"
+      }
+    ]
+  },
+  "expect": [
+    {
+      "kind": "at",
+      "t": 3.1,
+      "signal": "stalled_steering",
+      "op": "==",
+      "value": 1
+    },
+    {
+      "kind": "always",
+      "from": 0,
+      "to": 4.0,
+      "signal": "state",
+      "op": "==",
+      "value": 0
+    },
+    {
+      "kind": "first",
+      "between": [
+        4.0,
+        4.3
+      ],
+      "signal": "state",
+      "op": "==",
+      "value": 1
+    },
+    {
+      "kind": "first",
+      "between": [
+        5.5,
+        5.8
+      ],
+      "signal": "state",
+      "op": "==",
+      "value": 2
+    },
+    {
+      "kind": "always",
+      "from": 6.2,
+      "to": 12,
+      "signal": "state",
+      "op": "==",
+      "value": 2
+    },
+    {
+      "kind": "always",
+      "from": 6.5,
+      "to": 12,
+      "signal": "v",
+      "op": "==",
+      "value": 0
+    }
+  ]
+}

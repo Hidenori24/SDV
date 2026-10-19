@@ -1,0 +1,31 @@
+{
+  "name": "steer_positive_turns_left",
+  "description": "符号規約: steer が正なら左旋回(yaw が増え、y が正の側へ進む)。GUI は右が + なので渡すときに反転している",
+  "seconds": 3,
+  "scenario": {
+    "name": "steer +",
+    "steps": [
+      {
+        "until_s": 20,
+        "throttle": 0.5,
+        "steer": 0.5
+      }
+    ]
+  },
+  "expect": [
+    {
+      "kind": "at",
+      "t": 3.0,
+      "signal": "yaw",
+      "op": ">",
+      "value": 1.0
+    },
+    {
+      "kind": "at",
+      "t": 3.0,
+      "signal": "y",
+      "op": ">",
+      "value": 0.5
+    }
+  ]
+}

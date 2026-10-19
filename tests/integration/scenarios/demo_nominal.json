@@ -1,0 +1,81 @@
+{
+  "name": "demo_nominal",
+  "description": "デモ走行(加速→旋回→停止)。異常は起きず、速度は 0〜3 m/s の範囲に収まり、最後は止まる",
+  "seconds": 10,
+  "scenario": {
+    "name": "demo",
+    "steps": [
+      {
+        "until_s": 2.0,
+        "throttle": 0.6
+      },
+      {
+        "until_s": 5.0,
+        "throttle": 0.2,
+        "steer": 0.2
+      },
+      {
+        "until_s": 7.0,
+        "brake": 0.6
+      }
+    ]
+  },
+  "expect": [
+    {
+      "kind": "always",
+      "from": 0,
+      "to": 10,
+      "signal": "state",
+      "op": "==",
+      "value": 0
+    },
+    {
+      "kind": "always",
+      "from": 0,
+      "to": 10,
+      "signal": "estop",
+      "op": "==",
+      "value": 0
+    },
+    {
+      "kind": "always",
+      "from": 0,
+      "to": 10,
+      "signal": "v",
+      "op": ">=",
+      "value": 0
+    },
+    {
+      "kind": "always",
+      "from": 0,
+      "to": 10,
+      "signal": "v",
+      "op": "<=",
+      "value": 3.0
+    },
+    {
+      "kind": "at",
+      "t": 2.0,
+      "signal": "v",
+      "op": "approx",
+      "value": 2.075,
+      "tol": 0.01
+    },
+    {
+      "kind": "at",
+      "t": 5.0,
+      "signal": "yaw",
+      "op": "approx",
+      "value": 2.503,
+      "tol": 0.01
+    },
+    {
+      "kind": "always",
+      "from": 7.5,
+      "to": 10,
+      "signal": "v",
+      "op": "==",
+      "value": 0
+    }
+  ]
+}

@@ -74,6 +74,19 @@ jobs:
       - name: C ABI smoke test (a C program through the public header)
         run: ./tests/c_smoke.sh
 
+  integration:
+    name: integration
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Build the WASM artifact
+        run: cargo build --release --target wasm32-unknown-unknown --manifest-path rust/sdv-core/Cargo.toml
+      - name: Scenario + expectation tests on the built .wasm (Node, no browser)
+        run: node tests/integration/run_wasm.mjs
+
   golden-log:
     name: golden-log
     needs: cpp-tests
@@ -100,7 +113,7 @@ jobs:
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [cpp-tests, rust-tests, sec-tests, golden-log]
+    needs: [cpp-tests, rust-tests, sec-tests, integration, golden-log]
     runs-on: ubuntu-24.04
     steps:
       - name: All required jobs succeeded

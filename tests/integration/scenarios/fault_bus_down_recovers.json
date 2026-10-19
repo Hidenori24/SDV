@@ -1,0 +1,66 @@
+{
+  "name": "fault_bus_down_recovers",
+  "description": "車載バスが 0.8 秒だけ断。各 ECU は入力途絶のフェイルセーフで自分で減速し、バスが戻れば自動で復帰して再加速する。Watchdog は作動しない(断は 1 秒未満)",
+  "seconds": 8,
+  "scenario": {
+    "name": "bus down 0.8 s",
+    "steps": [
+      {
+        "until_s": 20,
+        "throttle": 0.8
+      }
+    ],
+    "events": [
+      {
+        "at_s": 3.0,
+        "action": "bus_down"
+      },
+      {
+        "at_s": 3.8,
+        "action": "bus_up"
+      }
+    ]
+  },
+  "expect": [
+    {
+      "kind": "first",
+      "between": [
+        3.0,
+        3.4
+      ],
+      "signal": "failsafe_engine",
+      "op": ">=",
+      "value": 1
+    },
+    {
+      "kind": "at",
+      "t": 3.78,
+      "signal": "v",
+      "op": "<",
+      "value": 0.3
+    },
+    {
+      "kind": "always",
+      "from": 0,
+      "to": 8,
+      "signal": "state",
+      "op": "==",
+      "value": 0
+    },
+    {
+      "kind": "at",
+      "t": 3.9,
+      "signal": "failsafe_engine",
+      "op": "==",
+      "value": 0
+    },
+    {
+      "kind": "at",
+      "t": 8.0,
+      "signal": "v",
+      "op": "approx",
+      "value": 3.0,
+      "tol": 0.01
+    }
+  ]
+}

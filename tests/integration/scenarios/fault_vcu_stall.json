@@ -1,0 +1,55 @@
+{
+  "name": "fault_vcu_stall",
+  "description": "VCU が停止。ECU は Safety/DriverInput の途絶を検出して自律的に止まる(VCU の助けなし)",
+  "seconds": 8,
+  "scenario": {
+    "name": "vcu stall",
+    "steps": [
+      {
+        "until_s": 20,
+        "throttle": 0.8
+      }
+    ],
+    "events": [
+      {
+        "at_s": 2.0,
+        "action": "vcu_stall"
+      }
+    ]
+  },
+  "expect": [
+    {
+      "kind": "always",
+      "from": 0,
+      "to": 1.9,
+      "signal": "failsafe_engine",
+      "op": "==",
+      "value": 0
+    },
+    {
+      "kind": "first",
+      "between": [
+        2.0,
+        2.4
+      ],
+      "signal": "failsafe_engine",
+      "op": ">=",
+      "value": 1
+    },
+    {
+      "kind": "always",
+      "from": 3.0,
+      "to": 8,
+      "signal": "v",
+      "op": "==",
+      "value": 0
+    },
+    {
+      "kind": "at",
+      "t": 8.0,
+      "signal": "stalled_vcu",
+      "op": "==",
+      "value": 1
+    }
+  ]
+}
