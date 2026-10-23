@@ -11,7 +11,7 @@ add_executable(sdv_sim
   src/bsw/timebase.cpp
   src/bsw/logging.cpp
   src/bsw/diag.cpp
-  src/swc/engine_swc.cpp
+  src/swc/engine_swc.cppaaaa
   src/swc/brake_swc.cpp
   src/swc/steering_swc.cpp
   src/swc/vehicledynamics_swc.cpp
