@@ -16,7 +16,7 @@
 
 ## テストの実行方法
 
-| 対象 | コマンド |
+| 対象 | コマンド |aaaa
 |---|---|
 | C++（Catch2 / ctest） | `cmake -S . -B build && cmake --build build -j && ctest --test-dir build --output-on-failure` |
 | Rust | `cd rust/sdv-core && cargo test` |
