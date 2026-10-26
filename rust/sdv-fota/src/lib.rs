@@ -15,7 +15,7 @@ mod service;
 pub use model::{
     BootDecision, BootState, Ecu, FixedString, FixedU32List, Image, Manifest, Package,
     Requirements, Slot, TrialImage, TrustKey, UpdatePolicy, ValidatedPackage, ValidationContext,
-    ValidationError, MAX_CONFIG_SCHEMA_VERSIONS,
+    ValidationError, DEFAULT_TRIAL_WINDOW_MS, MAX_CONFIG_SCHEMA_VERSIONS,
 };
 pub use package::{
     encode_package, parse_package, validate_package, validate_signed_manifest, MANIFEST_SCHEMA,

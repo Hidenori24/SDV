@@ -9,7 +9,11 @@ use super::{BootControl, BootDecision, BootState, ImageStorage, Slot, TrialImage
 use serde::Serialize;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, ExitStatus};
+use std::thread;
+use std::time::{Duration, Instant};
 
 const RECORD_MAGIC: &[u8; 4] = b"SDVB";
 const RECORD_HEADER_BYTES: usize = 16;
@@ -25,6 +29,8 @@ pub enum Error {
     ImageWriteInProgress,
     InvalidImageWrite,
     InvalidRecord,
+    TrialImageExited,
+    TrialHealthTimeout,
 }
 
 impl From<io::Error> for Error {
@@ -122,6 +128,9 @@ impl ImageStorage for FileSlotStorage {
             self.pending = Some(pending);
             return Err(Error::InvalidImageWrite);
         }
+        pending
+            .file
+            .set_permissions(fs::Permissions::from_mode(0o755))?;
         pending.file.sync_all()?;
         drop(pending.file);
         fs::rename(&pending.temporary, &pending.destination)?;
@@ -149,6 +158,147 @@ impl ImageStorage for FileSlotStorage {
         let mut file = File::open(self.image_path(slot))?;
         file.seek(SeekFrom::Start(u64::from(offset)))?;
         Ok(file.read(buffer)?)
+    }
+}
+
+/// Select and run the configured A/B image. A trial image is committed only after the supplied
+/// health command exits successfully before the manifest's trial window expires.
+pub fn run_selected_image(
+    root: impl Into<PathBuf>,
+    health_program: &Path,
+    health_args: &[std::ffi::OsString],
+) -> Result<ExitStatus, Error> {
+    let root = root.into();
+    let mut boot = FileBootControl::new(&root);
+    let decision = boot.select_for_boot()?;
+    let image = FileSlotStorage::new(&root).image_path(decision.slot);
+    let trial_window_ms = if decision.trial {
+        boot.state()?
+            .trial
+            .ok_or(Error::NoTrialPending)?
+            .trial_window_ms
+    } else {
+        0
+    };
+    let mut child = match Command::new(&image).spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            if decision.trial {
+                boot.rollback_trial()?;
+            }
+            return Err(Error::Io(error));
+        }
+    };
+
+    if decision.trial {
+        if let Err(error) = wait_for_trial_health(
+            &mut child,
+            &mut boot,
+            decision.slot,
+            &image,
+            health_program,
+            health_args,
+            Duration::from_millis(u64::from(trial_window_ms)),
+        ) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+        if let Err(error) = boot.commit_trial() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+    }
+    child.wait().map_err(Error::Io)
+}
+
+fn wait_for_trial_health(
+    child: &mut Child,
+    boot: &mut FileBootControl,
+    slot: Slot,
+    image: &Path,
+    health_program: &Path,
+    health_args: &[std::ffi::OsString],
+    timeout: Duration,
+) -> Result<(), Error> {
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                boot.rollback_trial()?;
+                return Err(Error::TrialImageExited);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                boot.rollback_trial()?;
+                return Err(Error::Io(error));
+            }
+        }
+        let mut health = match Command::new(health_program)
+            .args(health_args)
+            .env("SDV_TRIAL_SLOT", slot_name(slot))
+            .env("SDV_IMAGE_PATH", image)
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) => {
+                boot.rollback_trial()?;
+                return Err(Error::Io(error));
+            }
+        };
+        loop {
+            match health.try_wait() {
+                Ok(Some(status)) if status.success() => match child.try_wait() {
+                    Ok(Some(_)) => {
+                        boot.rollback_trial()?;
+                        return Err(Error::TrialImageExited);
+                    }
+                    Ok(None) => return Ok(()),
+                    Err(error) => {
+                        boot.rollback_trial()?;
+                        return Err(Error::Io(error));
+                    }
+                },
+                Ok(Some(_)) => break,
+                Ok(None) => {}
+                Err(error) => {
+                    let _ = health.kill();
+                    let _ = health.wait();
+                    boot.rollback_trial()?;
+                    return Err(Error::Io(error));
+                }
+            }
+            match child.try_wait() {
+                Ok(Some(_)) => {
+                    let _ = health.kill();
+                    let _ = health.wait();
+                    boot.rollback_trial()?;
+                    return Err(Error::TrialImageExited);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    let _ = health.kill();
+                    let _ = health.wait();
+                    boot.rollback_trial()?;
+                    return Err(Error::Io(error));
+                }
+            }
+            let elapsed = started.elapsed();
+            if elapsed >= timeout {
+                let _ = health.kill();
+                let _ = health.wait();
+                boot.rollback_trial()?;
+                return Err(Error::TrialHealthTimeout);
+            }
+            thread::sleep(Duration::from_millis(10).min(timeout - elapsed));
+        }
+        let elapsed = started.elapsed();
+        if elapsed >= timeout {
+            boot.rollback_trial()?;
+            return Err(Error::TrialHealthTimeout);
+        }
+        thread::sleep(Duration::from_millis(100).min(timeout - elapsed));
     }
 }
 

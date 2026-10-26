@@ -544,6 +544,7 @@ fn failed_health_check_rolls_back_trial() {
         version: "1.1.0".into(),
         security_version: 2,
         boots_left: 1,
+        trial_window_ms: 5_000,
     })
     .unwrap();
 

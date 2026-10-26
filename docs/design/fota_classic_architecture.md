@@ -59,7 +59,7 @@ FOTA状態機械はサービス要求を発行し、Classic統合側が選定BSW
 | 起動バンク・trial/commit/rollback | Bootloader/OEM Boot Manager | 起動メタデータ形式、試行回数、復帰条件、確定権限 |
 | 更新許可・安全状態 | VCU/SafetySupervisorとの契約 | 車両停止、EStop/Degraded、同時更新禁止 |
 
-Flash write/readbackは固定長block単位になり、readbackは増分SHA-256で処理する。SDVF受信は呼び出し側のmanifest領域を使い、イメージ全体をメモリに保持しない。マニフェストのJSON文字列とconfig schema一覧も固定容量型で解析し、入力は64 KiB、schema一覧は16要素までに制限する。ホスト向けboot metadataとLinux adapterには引き続き `alloc` があるため、Classic統合では診断/Bootloader用状態型を含め採用ECUの静的メモリ配置へbindする。`no_std` でビルドできることだけでは Classic 向け成立を意味しない。
+Flash write/readbackは固定長block単位になり、readbackは増分SHA-256で処理する。SDVF受信は呼び出し側のmanifest領域を使い、イメージ全体をメモリに保持しない。マニフェストのJSON文字列とconfig schema一覧も固定容量型で解析し、入力は64 KiB、schema一覧は16要素までに制限する。ホスト向けboot metadataとLinux adapterには引き続き `alloc` があるため、Classic統合では診断/Bootloader用状態型を含め採用ECUの静的メモリ配置へbindする。Pi 5ホスト向けにはsystemdからスロット選択、起動、health check、trial commit/rollbackを実行するlauncherを用意する。`no_std` でビルドできることだけでは Classic 向け成立を意味しない。
 
 ## Raspberry Pi 5 の位置づけ
 

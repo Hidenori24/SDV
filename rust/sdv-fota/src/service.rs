@@ -83,6 +83,7 @@ impl<S: ImageStorage, B: BootControl> FotaInstaller<S, B> {
             return Err(InstallError::Downgrade);
         }
         let security_version = manifest.image.security_version;
+        let trial_window_ms = manifest.policy.trial_ms;
         if security_version < state.highest_security_version {
             return Err(InstallError::SecurityVersionRollback);
         }
@@ -130,6 +131,7 @@ impl<S: ImageStorage, B: BootControl> FotaInstaller<S, B> {
                 version: manifest.image.version.as_str().to_string(),
                 security_version,
                 boots_left: self.trial_boots.max(1),
+                trial_window_ms,
             })
             .map_err(InstallError::BootControl)?;
         Ok(slot)
@@ -176,6 +178,7 @@ impl<S: ImageStorage, B: BootControl> FotaInstaller<S, B> {
             return Err(StreamInstallError::Downgrade);
         }
         let security_version = manifest.image.security_version;
+        let trial_window_ms = manifest.policy.trial_ms;
         if security_version < state.highest_security_version {
             return Err(StreamInstallError::SecurityVersionRollback);
         }
@@ -247,6 +250,7 @@ impl<S: ImageStorage, B: BootControl> FotaInstaller<S, B> {
                 version: manifest.image.version.as_str().to_string(),
                 security_version,
                 boots_left: self.trial_boots.max(1),
+                trial_window_ms,
             })
             .map_err(StreamInstallError::BootControl)?;
         Ok(slot)

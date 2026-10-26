@@ -1,9 +1,10 @@
 #![cfg(target_os = "linux")]
 
-use sdv_fota::linux::{FileBootControl, FileSlotStorage};
+use sdv_fota::linux::{run_selected_image, FileBootControl, FileSlotStorage};
 use sdv_fota::{BootControl, ImageStorage, Slot, TrialImage};
 use std::fs;
-use std::path::PathBuf;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
@@ -23,6 +24,11 @@ impl Drop for TempRoot {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
     }
+}
+
+fn write_executable(path: &Path, contents: &str) {
+    fs::write(path, contents).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 #[test]
@@ -52,6 +58,7 @@ fn linux_backend_stages_image_and_commits_trial() {
         version: "1.1.0".into(),
         security_version: 2,
         boots_left: 1,
+        trial_window_ms: 5_000,
     })
     .unwrap();
     assert_eq!(boot.select_for_boot().unwrap().slot, Slot::B);
@@ -74,6 +81,7 @@ fn corrupt_newest_boot_record_falls_back_to_previous_record() {
         version: "1.1.0".into(),
         security_version: 2,
         boots_left: 1,
+        trial_window_ms: 5_000,
     })
     .unwrap();
 
@@ -86,5 +94,97 @@ fn corrupt_newest_boot_record_falls_back_to_previous_record() {
     let state = boot.state().unwrap();
     assert_eq!(state.active, Slot::A);
     assert_eq!(state.active_version, "1.0.0");
+    assert!(state.trial.is_none());
+}
+
+#[test]
+fn linux_launcher_commits_trial_after_health_command_succeeds() {
+    let root = TempRoot::new();
+    let mut boot = FileBootControl::new(&root.0);
+    boot.initialize(Slot::A, "1.0.0".into(), 1).unwrap();
+    let slot_dir = root.0.join("slots/b");
+    fs::create_dir_all(&slot_dir).unwrap();
+    write_executable(&slot_dir.join("sdv-image.bin"), "#!/bin/sh\nexec sleep 2\n");
+    let health = root.0.join("health-check");
+    write_executable(
+        &health,
+        "#!/bin/sh\ntest \"$SDV_TRIAL_SLOT\" = b && test -x \"$SDV_IMAGE_PATH\"\n",
+    );
+    boot.schedule_trial(TrialImage {
+        slot: Slot::B,
+        version: "1.1.0".into(),
+        security_version: 2,
+        boots_left: 2,
+        trial_window_ms: 2_000,
+    })
+    .unwrap();
+
+    let status = run_selected_image(&root.0, &health, &[]).unwrap();
+
+    assert!(status.success());
+    let state = boot.state().unwrap();
+    assert_eq!(state.active, Slot::B);
+    assert_eq!(state.active_version, "1.1.0");
+    assert!(state.trial.is_none());
+}
+
+#[test]
+fn linux_launcher_rolls_back_trial_when_health_window_expires() {
+    let root = TempRoot::new();
+    let mut boot = FileBootControl::new(&root.0);
+    boot.initialize(Slot::A, "1.0.0".into(), 1).unwrap();
+    let slot_dir = root.0.join("slots/b");
+    fs::create_dir_all(&slot_dir).unwrap();
+    write_executable(&slot_dir.join("sdv-image.bin"), "#!/bin/sh\nexec sleep 2\n");
+    let health = root.0.join("health-check");
+    write_executable(&health, "#!/bin/sh\nexit 1\n");
+    boot.schedule_trial(TrialImage {
+        slot: Slot::B,
+        version: "1.1.0".into(),
+        security_version: 2,
+        boots_left: 2,
+        trial_window_ms: 20,
+    })
+    .unwrap();
+
+    let result = run_selected_image(&root.0, &health, &[]);
+
+    assert!(matches!(
+        result,
+        Err(sdv_fota::linux::Error::TrialHealthTimeout)
+    ));
+    let state = boot.state().unwrap();
+    assert_eq!(state.active, Slot::A);
+    assert_eq!(state.active_version, "1.0.0");
+    assert!(state.trial.is_none());
+}
+
+#[test]
+fn linux_launcher_rolls_back_if_trial_image_exits_before_health_check() {
+    let root = TempRoot::new();
+    let mut boot = FileBootControl::new(&root.0);
+    boot.initialize(Slot::A, "1.0.0".into(), 1).unwrap();
+    let slot_dir = root.0.join("slots/b");
+    fs::create_dir_all(&slot_dir).unwrap();
+    write_executable(&slot_dir.join("sdv-image.bin"), "#!/bin/sh\nexit 1\n");
+    let health = root.0.join("health-check");
+    write_executable(&health, "#!/bin/sh\nexit 0\n");
+    boot.schedule_trial(TrialImage {
+        slot: Slot::B,
+        version: "1.1.0".into(),
+        security_version: 2,
+        boots_left: 2,
+        trial_window_ms: 2_000,
+    })
+    .unwrap();
+
+    let result = run_selected_image(&root.0, &health, &[]);
+
+    assert!(matches!(
+        result,
+        Err(sdv_fota::linux::Error::TrialImageExited)
+    ));
+    let state = boot.state().unwrap();
+    assert_eq!(state.active, Slot::A);
     assert!(state.trial.is_none());
 }

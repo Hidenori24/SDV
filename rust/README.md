@@ -91,8 +91,12 @@ payload are not assembled into one package-sized allocation.
 `resolve_trial` commits only after the health adapter reports success;
 otherwise it requests rollback. `sdv-fota::linux` implements the Pi 5/Linux host backend for
 application-image slots and redundant CRC-protected boot metadata in a configured Linux data directory. On the Pi 5 this
-adapter does not write the OS, EEPROM, boot partition, or raw block devices. A systemd launcher
-that selects and starts the slot image is still needed. The common crate also compiles with
+adapter does not write the OS, EEPROM, boot partition, or raw block devices. The
+`sdv-fota-launcher` binary and example unit at `deploy/systemd/sdv-fota-launcher.service` select
+and start an image, poll a configured health command during the manifest's trial window, commit a
+healthy trial, and roll back an unhealthy one. Provisioning still needs to initialize boot
+metadata, install the launcher and health check, and provide an executable signed application
+image. The common crate also compiles with
 `--no-default-features` (`no_std` + `alloc`). This removes `std` dependencies, but it is not
 heap-free and does not make the crate AUTOSAR Classic compatible. Flash I/O and read-back are
 block-oriented; streaming avoids an image-sized allocation. Manifest text and supported schema

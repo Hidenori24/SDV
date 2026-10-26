@@ -19,3 +19,8 @@ std = ["serde/std", "serde_json/std", "sdv-sec/std"]
 
 [lib]
 crate-type = ["rlib"]
+
+[[bin]]
+name = "sdv-fota-launcher"
+path = "src/bin/sdv-fota-launcher.rs"
+required-features = ["std"]

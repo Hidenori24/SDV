@@ -10,6 +10,11 @@ const SWC_ID_CAPACITY: usize = 64;
 const VERSION_CAPACITY: usize = 32;
 const SHA256_HEX_CAPACITY: usize = 64;
 pub const MAX_CONFIG_SCHEMA_VERSIONS: usize = 16;
+pub const DEFAULT_TRIAL_WINDOW_MS: u32 = 30_000;
+
+fn default_trial_window_ms() -> u32 {
+    DEFAULT_TRIAL_WINDOW_MS
+}
 
 /// UTF-8 string stored inline; deserialization rejects values larger than the chosen capacity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -171,6 +176,8 @@ pub struct TrialImage {
     pub version: String,
     pub security_version: u64,
     pub boots_left: u32,
+    #[serde(default = "default_trial_window_ms")]
+    pub trial_window_ms: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, serde::Serialize)]
