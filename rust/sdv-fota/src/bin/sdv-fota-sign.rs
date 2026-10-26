@@ -4,6 +4,14 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+struct Seed([u8; 32]);
+
+impl Drop for Seed {
+    fn drop(&mut self) {
+        self.0.fill(0);
+    }
+}
+
 fn main() {
     if let Err(error) = run(std::env::args().skip(1).collect()) {
         eprintln!("sdv-fota-sign: {error}");
@@ -15,7 +23,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
     if args.len() != 10 {
         return Err(usage());
     }
-    let mut seed = read_seed(&args[0])?;
+    let seed = Seed(read_seed(&args[0])?);
     let key_id = &args[1];
     let (ecu, swc) = match args[2].as_str() {
         "engine" => (Ecu::Engine, "EngineSWC"),
@@ -61,9 +69,8 @@ fn run(args: Vec<String>) -> Result<(), String> {
     if manifest_bytes.len() > MAX_MANIFEST_BYTES {
         return Err("encoded manifest exceeds the package limit".into());
     }
-    let signature = ed25519_sign(&seed, &manifest_bytes);
-    let public_key = ed25519_public_key(&seed);
-    seed.fill(0);
+    let signature = ed25519_sign(&seed.0, &manifest_bytes);
+    let public_key = ed25519_public_key(&seed.0);
     let result = write_package(
         key_id,
         &signature,
