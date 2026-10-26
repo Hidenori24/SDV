@@ -400,3 +400,28 @@ pub unsafe extern "C" fn sdv_fota_resolve_trial(callbacks: *const SdvFotaCallbac
         }
     }
 }
+
+/// Ask the target boot manager to select the next slot and report whether it is a trial.
+/// The target persists/consumes the boot attempt through its callback before returning.
+#[no_mangle]
+pub unsafe extern "C" fn sdv_fota_select_for_boot(
+    callbacks: *const SdvFotaCallbacks,
+    out_slot: *mut u8,
+    out_is_trial: *mut u8,
+) -> i32 {
+    if callbacks.is_null() || out_slot.is_null() || out_is_trial.is_null() {
+        return SDV_FOTA_INVALID_ARG;
+    }
+    // SAFETY: callbacks and output pointers are caller-owned and valid for this synchronous call.
+    let mut ports = Ports(unsafe { &*callbacks });
+    match ports.select_for_boot() {
+        Ok(decision) => {
+            unsafe {
+                *out_slot = slot_id(decision.slot);
+                *out_is_trial = u8::from(decision.trial);
+            }
+            SDV_FOTA_OK
+        }
+        Err(()) => SDV_FOTA_CALLBACK_ERROR,
+    }
+}

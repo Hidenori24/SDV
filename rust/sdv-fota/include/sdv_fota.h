@@ -86,6 +86,11 @@ int32_t sdv_fota_stage_package(
 /* Run the persisted trial health decision: commit when healthy, otherwise request rollback. */
 int32_t sdv_fota_resolve_trial(const sdv_fota_callbacks_t *callbacks);
 
+/* Select active or trial slot for the next boot through the target boot manager callback. */
+int32_t sdv_fota_select_for_boot(const sdv_fota_callbacks_t *callbacks,
+                                 uint8_t *out_slot,
+                                 uint8_t *out_is_trial);
+
 #ifdef __cplusplus
 }
 #endif
