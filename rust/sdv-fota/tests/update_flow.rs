@@ -348,6 +348,40 @@ fn streamed_package_payload_is_written_without_a_whole_image_readback() {
 }
 
 #[test]
+fn framed_package_stream_uses_caller_manifest_buffer() {
+    let payload = vec![0xC3; 2200];
+    let bytes = signed_package_for_payload("1.1.0", 2, &payload);
+    let public_key = ed25519_public_key(&SEED);
+    let trust_key = TrustKey {
+        key_id: KEY_ID,
+        public_key: &public_key,
+    };
+    let mut source = SlicePackageSource {
+        bytes: &bytes,
+        offset: 0,
+    };
+    let mut manifest_buffer = [0u8; sdv_fota::MAX_MANIFEST_BYTES];
+    let mut installer = FotaInstaller {
+        storage: MemoryImageStorage::default(),
+        boot_control: MemoryBootControl::current(),
+        trial_boots: 2,
+    };
+
+    let slot = installer
+        .stage_package_from_source(
+            &mut source,
+            &mut manifest_buffer,
+            &[trust_key],
+            &validation_context(),
+        )
+        .unwrap();
+
+    assert_eq!(slot, Slot::B);
+    assert_eq!(installer.storage.images[1], payload);
+    assert!(installer.boot_control.state.trial.is_some());
+}
+
+#[test]
 fn streamed_payload_hash_failure_aborts_inactive_image() {
     let mut bytes = signed_package("1.1.0", 2);
     let last = bytes.len() - 1;

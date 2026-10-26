@@ -85,6 +85,9 @@ back through a fixed-size buffer for SHA-256 verification, then schedules a tria
 bytes, then streams payload chunks directly from the `PackageSource` port to inactive storage.
 That path uses a fixed 1 KiB I/O buffer and rejects truncation, trailing bytes, and digest
 mismatches before scheduling a trial boot.
+`stage_package_from_source` additionally reads the SDVF header, signature, key ID, and manifest
+from the same source. The caller supplies bounded manifest storage; envelope metadata and image
+payload are not assembled into one package-sized allocation.
 `resolve_trial` commits only after the health adapter reports success;
 otherwise it requests rollback. `sdv-fota::linux` implements the Pi 5/Linux host backend for
 application-image slots and redundant CRC-protected boot metadata in a configured Linux data directory. On the Pi 5 this
@@ -93,7 +96,8 @@ that selects and starts the slot image is still needed. The common crate also co
 `--no-default-features` (`no_std` + `alloc`). This removes `std` dependencies, but it is not
 heap-free and does not make the crate AUTOSAR Classic compatible. Flash I/O and read-back are
 block-oriented; the streaming path avoids an image-sized allocation, while the signed manifest
-is still parsed with `alloc`. Classic integration still needs a bounded manifest parser and
+is still parsed with `alloc` (within the 64 KiB input bound). Classic integration still needs a
+fixed-capacity manifest representation to avoid those allocations and
 adapters for the selected DCM, Csm/Crypto, NvM, MemIf/Fls, and bootloader.
 See [the Classic architecture proposal](../docs/design/fota_classic_architecture.md). `SIGNAL_IF_VERSION` is currently 1.
 

@@ -2,6 +2,7 @@
 
 use crate::package::{
     decode_sha256, parse_package, parse_version, validate_package, validate_signed_manifest,
+    MAX_KEY_ID_BYTES, MAX_MANIFEST_BYTES,
 };
 use crate::{
     BootControl, HealthMonitor, ImageStorage, PackageSource, Slot, TrialImage, TrustKey,
@@ -10,6 +11,9 @@ use crate::{
 use sdv_sec::Sha256Context;
 
 const IMAGE_IO_CHUNK_BYTES: usize = 1024;
+const PACKAGE_HEADER_BYTES: usize = 18;
+const PACKAGE_SIGNATURE_BYTES: usize = 64;
+const PACKAGE_MAGIC: &[u8; 4] = b"SDVF";
 
 pub struct FotaInstaller<S, B> {
     pub storage: S,
@@ -245,6 +249,71 @@ impl<S: ImageStorage, B: BootControl> FotaInstaller<S, B> {
             })
             .map_err(StreamInstallError::BootControl)?;
         Ok(slot)
+    }
+
+    /// Receive a complete v1 package envelope through bounded caller-provided manifest storage.
+    ///
+    /// The fixed-size header, signature, and key ID are read into stack buffers. The caller
+    /// supplies manifest storage so this API does not reserve a 64 KiB stack frame; payload
+    /// bytes then flow directly to inactive storage through the streaming install path.
+    pub fn stage_package_from_source<P: PackageSource>(
+        &mut self,
+        source: &mut P,
+        manifest_buffer: &mut [u8],
+        trust_keys: &[TrustKey<'_>],
+        context: &ValidationContext<'_>,
+    ) -> Result<Slot, StreamInstallError<P::Error, S::Error, B::Error>> {
+        let mut header = [0u8; PACKAGE_HEADER_BYTES];
+        source
+            .read_exact(&mut header)
+            .map_err(StreamInstallError::Source)?;
+        if &header[..4] != PACKAGE_MAGIC {
+            return Err(StreamInstallError::Validation(
+                ValidationError::InvalidPackageHeader,
+            ));
+        }
+        if header[4] != 1 {
+            return Err(StreamInstallError::Validation(
+                ValidationError::UnsupportedPackageFormat,
+            ));
+        }
+        let key_id_len = header[5] as usize;
+        let manifest_len = u32::from_be_bytes(header[6..10].try_into().unwrap()) as usize;
+        let payload_size = u64::from_be_bytes(header[10..18].try_into().unwrap());
+        if key_id_len == 0 || key_id_len > MAX_KEY_ID_BYTES {
+            return Err(StreamInstallError::Validation(
+                ValidationError::InvalidKeyId,
+            ));
+        }
+        if manifest_len > MAX_MANIFEST_BYTES || manifest_len > manifest_buffer.len() {
+            return Err(StreamInstallError::Validation(
+                ValidationError::ManifestTooLarge,
+            ));
+        }
+
+        let mut signature = [0u8; PACKAGE_SIGNATURE_BYTES];
+        source
+            .read_exact(&mut signature)
+            .map_err(StreamInstallError::Source)?;
+        let mut key_id = [0u8; MAX_KEY_ID_BYTES];
+        source
+            .read_exact(&mut key_id[..key_id_len])
+            .map_err(StreamInstallError::Source)?;
+        let key_id = core::str::from_utf8(&key_id[..key_id_len])
+            .map_err(|_| StreamInstallError::Validation(ValidationError::InvalidKeyId))?;
+        source
+            .read_exact(&mut manifest_buffer[..manifest_len])
+            .map_err(StreamInstallError::Source)?;
+
+        self.stage_signed_manifest_from_source(
+            key_id,
+            &signature,
+            &manifest_buffer[..manifest_len],
+            payload_size,
+            source,
+            trust_keys,
+            context,
+        )
     }
 }
 
