@@ -16,6 +16,7 @@ sdv-sec = { path = "../sdv-sec", features = ["sign"] }
 [features]
 default = ["std"]
 std = ["serde/std", "serde_json/std", "sdv-sec/std"]
+host-signing = ["sdv-sec/sign"]
 
 [lib]
 crate-type = ["rlib"]
@@ -29,3 +30,8 @@ required-features = ["std"]
 name = "sdv-fota"
 path = "src/bin/sdv-fota.rs"
 required-features = ["std"]
+
+[[bin]]
+name = "sdv-fota-sign"
+path = "src/bin/sdv-fota-sign.rs"
+required-features = ["std", "host-signing"]

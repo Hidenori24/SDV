@@ -255,3 +255,64 @@ fn install_cli_streams_signed_package_into_inactive_slot() {
         0
     );
 }
+
+#[cfg(feature = "host-signing")]
+#[test]
+fn signing_and_install_commands_complete_a_host_update() {
+    let root = TempRoot::new();
+    let boot = FileBootControl::new(&root.0);
+    boot.initialize(Slot::A, "1.0.0".into(), 1).unwrap();
+    let seed_path = root.0.join("signing.seed");
+    fs::write(&seed_path, hex(&SIGNING_SEED)).unwrap();
+    let image_path = root.0.join("candidate.bin");
+    let payload = b"#!/bin/sh\nexec sleep 1\n";
+    fs::write(&image_path, payload).unwrap();
+    let package_path = root.0.join("candidate.sdvf");
+
+    let signed = Command::new(env!("CARGO_BIN_EXE_sdv-fota-sign"))
+        .args([
+            seed_path.to_str().unwrap(),
+            KEY_ID,
+            "engine",
+            "1.1.0",
+            "2",
+            "5000",
+            "1",
+            "1",
+            image_path.to_str().unwrap(),
+            package_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        signed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&signed.stderr)
+    );
+
+    let public_key = ed25519_public_key(&SIGNING_SEED);
+    let installed = Command::new(env!("CARGO_BIN_EXE_sdv-fota"))
+        .args([
+            "install",
+            root.0.to_str().unwrap(),
+            package_path.to_str().unwrap(),
+            KEY_ID,
+            &hex(&public_key),
+            "engine",
+            "1",
+            "1",
+            "2",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        installed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    assert_eq!(
+        fs::read(FileSlotStorage::new(&root.0).image_path(Slot::B)).unwrap(),
+        payload
+    );
+    assert_eq!(boot.state().unwrap().trial.unwrap().version, "1.1.0");
+}

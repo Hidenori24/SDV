@@ -98,6 +98,11 @@ healthy trial, and roll back an unhealthy one. Provisioning still needs to initi
 metadata, install the launcher and health check, and provide an executable signed application
 image. The `sdv-fota` host command initializes boot metadata and streams a signed package file
 into the inactive slot; it accepts the ECU compatibility values and public trust key as inputs.
+The host-only `sdv-fota-sign` tool creates SDVF packages from image files using a protected
+32-byte seed file and streams the payload with a 4 KiB buffer. Build it with
+`cargo build --release --manifest-path rust/sdv-fota/Cargo.toml --features host-signing --bin sdv-fota-sign`;
+the signing feature is not enabled in the target installer or no-std library builds. Keep the
+signing seed in the release environment and provision only the matching public key to the ECU.
 The common crate also compiles with
 `--no-default-features` (`no_std` + `alloc`). This removes `std` dependencies, but it is not
 heap-free and does not make the crate AUTOSAR Classic compatible. Flash I/O and read-back are
