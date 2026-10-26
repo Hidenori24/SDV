@@ -8,6 +8,7 @@
 #[cfg(feature = "std")]
 extern crate alloc;
 
+mod ffi;
 mod manifest_parser;
 mod model;
 mod package;
