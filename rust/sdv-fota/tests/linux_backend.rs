@@ -398,6 +398,68 @@ fn install_url_streams_https_package_through_curl_ingress() {
     assert_eq!(boot.state().unwrap().trial.unwrap().version, "1.1.0");
 }
 
+#[test]
+fn failed_https_transfer_aborts_candidate_and_does_not_schedule_trial() {
+    let root = TempRoot::new();
+    let boot = FileBootControl::new(&root.0);
+    boot.initialize(Slot::A, "1.0.0", 1).unwrap();
+    let payload = b"network transfer interrupted";
+    let manifest = serde_json::json!({
+        "manifest_schema": 1,
+        "image": {
+            "target_ecu": "engine",
+            "swc": "EngineSWC",
+            "version": "1.1.0",
+            "security_version": 2,
+            "size_bytes": payload.len(),
+            "sha256": hex(&sha256(payload))
+        },
+        "requires": {"signal_if_version": 1, "config_schema": [1]},
+        "policy": {"allow_downgrade": false, "trial_ms": 5000}
+    });
+    let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+    let signature = ed25519_sign(&SIGNING_SEED, &manifest_bytes);
+    let package = encode_package(KEY_ID, &signature, &manifest_bytes, payload).unwrap();
+    let package_path = root.0.join("partial-network-response.sdvf");
+    fs::write(&package_path, package).unwrap();
+
+    let fake_bin = root.0.join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    write_executable(
+        fake_bin.join("curl").as_path(),
+        "#!/bin/sh\ncat \"$SDV_FOTA_TEST_PACKAGE\"\nexit 22\n",
+    );
+    let path = format!(
+        "{}:{}",
+        fake_bin.display(),
+        std::env::var_os("PATH")
+            .unwrap_or_default()
+            .to_string_lossy()
+    );
+    let public_key = ed25519_public_key(&SIGNING_SEED);
+    let result = Command::new(env!("CARGO_BIN_EXE_sdv-fota"))
+        .args([
+            "install-url",
+            root.0.to_str().unwrap(),
+            "https://updates.example.test/engine.sdvf",
+            KEY_ID,
+            &hex(&public_key),
+            "engine",
+            "1",
+            "1",
+            "2",
+        ])
+        .env("PATH", path)
+        .env("SDV_FOTA_TEST_PACKAGE", &package_path)
+        .output()
+        .unwrap();
+
+    assert!(!result.status.success());
+    assert!(boot.state().unwrap().trial.is_none());
+    let inactive = root.0.join("slots/b");
+    assert!(fs::read_dir(inactive).unwrap().next().is_none());
+}
+
 #[cfg(feature = "host-signing")]
 #[test]
 fn signing_and_install_commands_complete_a_host_update() {
