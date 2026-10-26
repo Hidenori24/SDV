@@ -80,6 +80,23 @@ fn linux_backend_stages_image_and_commits_trial() {
 }
 
 #[test]
+fn incomplete_replacement_preserves_previous_inactive_image() {
+    let root = TempRoot::new();
+    let mut images = FileSlotStorage::new(&root.0);
+    let slot = images.begin_inactive_image(Slot::A, 8).unwrap();
+    images.write_image_chunk(slot, 0, b"oldimage").unwrap();
+    images.finish_inactive_image(slot).unwrap();
+
+    let slot = images.begin_inactive_image(Slot::A, 10).unwrap();
+    images.write_image_chunk(slot, 0, b"new").unwrap();
+    assert!(images.finish_inactive_image(slot).is_err());
+    images.abort_inactive_image(slot);
+
+    assert_eq!(fs::read(images.image_path(Slot::B)).unwrap(), b"oldimage");
+    assert!(!root.0.join("slots/b/sdv-image.tmp").exists());
+}
+
+#[test]
 fn corrupt_newest_boot_record_falls_back_to_previous_record() {
     let root = TempRoot::new();
     let mut boot = FileBootControl::new(&root.0);

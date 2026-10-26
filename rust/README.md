@@ -92,6 +92,8 @@ payload are not assembled into one package-sized allocation.
 otherwise it requests rollback. `sdv-fota::linux` implements the Pi 5/Linux host backend for
 application-image slots and redundant CRC-protected boot metadata in a configured Linux data directory. On the Pi 5 this
 adapter does not write the OS, EEPROM, boot partition, or raw block devices. The
+inactive image is written to a temporary file and atomically renamed only after all expected
+bytes are synced; aborting an incomplete transfer leaves the previously staged slot image intact.
 `sdv-fota-launcher` binary and example unit at `deploy/systemd/sdv-fota-launcher.service` select
 and start an image, poll a configured health command during the manifest's trial window, commit a
 healthy trial, and roll back an unhealthy one. Provisioning still needs to initialize boot

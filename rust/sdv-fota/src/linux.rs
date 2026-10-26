@@ -159,12 +159,22 @@ impl ImageStorage for FileSlotStorage {
             self.pending = Some(pending);
             return Err(Error::InvalidImageWrite);
         }
-        pending
+        if let Err(error) = pending
             .file
-            .set_permissions(fs::Permissions::from_mode(0o755))?;
-        pending.file.sync_all()?;
+            .set_permissions(fs::Permissions::from_mode(0o755))
+        {
+            discard_temp_file(&pending.temporary);
+            return Err(Error::Io(error));
+        }
+        if let Err(error) = pending.file.sync_all() {
+            discard_temp_file(&pending.temporary);
+            return Err(Error::Io(error));
+        }
         drop(pending.file);
-        fs::rename(&pending.temporary, &pending.destination)?;
+        if let Err(error) = fs::rename(&pending.temporary, &pending.destination) {
+            discard_temp_file(&pending.temporary);
+            return Err(Error::Io(error));
+        }
         sync_directory(&pending.directory)?;
         Ok(())
     }
@@ -190,6 +200,10 @@ impl ImageStorage for FileSlotStorage {
         file.seek(SeekFrom::Start(u64::from(offset)))?;
         Ok(file.read(buffer)?)
     }
+}
+
+fn discard_temp_file(path: &Path) {
+    let _ = fs::remove_file(path);
 }
 
 /// Select and run the configured A/B image. A trial image is committed only after the supplied
