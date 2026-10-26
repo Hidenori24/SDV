@@ -366,6 +366,7 @@ pub unsafe extern "C" fn sdv_fota_stage_package(
         Err(crate::StreamInstallError::Source(())) => SDV_FOTA_CALLBACK_ERROR,
         Err(crate::StreamInstallError::Storage(()))
         | Err(crate::StreamInstallError::BootControl(())) => SDV_FOTA_IO_ERROR,
+        Err(crate::StreamInstallError::StorageSlotMismatch) => SDV_FOTA_IO_ERROR,
         Err(crate::StreamInstallError::TrialAlreadyPending) => SDV_FOTA_UPDATE_PENDING,
         Err(_) => SDV_FOTA_REJECTED,
     }

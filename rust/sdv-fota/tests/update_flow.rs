@@ -54,13 +54,18 @@ fn validation_context<'a>() -> ValidationContext<'a> {
 struct MemoryImageStorage {
     images: [Vec<u8>; 2],
     pending: Option<(Slot, u32, Vec<u8>)>,
+    return_active_slot: bool,
 }
 
 impl ImageStorage for MemoryImageStorage {
     type Error = Infallible;
 
     fn begin_inactive_image(&mut self, active: Slot, image_size: u32) -> Result<Slot, Self::Error> {
-        let target = active.other();
+        let target = if self.return_active_slot {
+            active
+        } else {
+            active.other()
+        };
         self.pending = Some((target, image_size, Vec::with_capacity(image_size as usize)));
         Ok(target)
     }
@@ -312,6 +317,68 @@ fn installer_stages_inactive_image_and_schedules_trial() {
     assert_eq!(trial.slot, Slot::B);
     assert_eq!(trial.version, "1.1.0");
     assert_eq!(trial.boots_left, 2);
+}
+
+#[test]
+fn installer_rejects_storage_that_returns_active_slot() {
+    let bytes = signed_package("1.1.0", 2);
+    let public_key = ed25519_public_key(&SEED);
+    let mut storage = MemoryImageStorage {
+        return_active_slot: true,
+        ..MemoryImageStorage::default()
+    };
+    let mut installer = FotaInstaller {
+        storage: core::mem::take(&mut storage),
+        boot_control: MemoryBootControl::current(),
+        trial_boots: 3,
+    };
+    let result = installer.stage_package(
+        &bytes,
+        &[TrustKey {
+            key_id: KEY_ID,
+            public_key: &public_key,
+        }],
+        &validation_context(),
+    );
+    assert!(matches!(result, Err(InstallError::StorageSlotMismatch)));
+    assert!(installer.storage.pending.is_none());
+    assert!(installer.boot_control.state.trial.is_none());
+}
+
+#[test]
+fn streamed_installer_rejects_storage_that_returns_active_slot() {
+    let bytes = signed_package("1.1.0", 2);
+    let public_key = ed25519_public_key(&SEED);
+    let mut source = SlicePackageSource {
+        bytes: &bytes,
+        offset: 0,
+    };
+    let mut manifest_buffer = [0u8; sdv_fota::MAX_MANIFEST_BYTES];
+    let mut installer = FotaInstaller {
+        storage: MemoryImageStorage {
+            return_active_slot: true,
+            ..MemoryImageStorage::default()
+        },
+        boot_control: MemoryBootControl::current(),
+        trial_boots: 3,
+    };
+
+    let result = installer.stage_package_from_source(
+        &mut source,
+        &mut manifest_buffer,
+        &[TrustKey {
+            key_id: KEY_ID,
+            public_key: &public_key,
+        }],
+        &validation_context(),
+    );
+
+    assert!(matches!(
+        result,
+        Err(sdv_fota::StreamInstallError::StorageSlotMismatch)
+    ));
+    assert!(installer.storage.pending.is_none());
+    assert!(installer.boot_control.state.trial.is_none());
 }
 
 #[test]
