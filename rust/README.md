@@ -115,6 +115,8 @@ versions); parsing does not allocate per field. The broader host-facing domain s
 for boot metadata and Linux integration. Classic integration needs adapters for the selected
 DCM, Csm/Crypto, NvM, MemIf/Fls, and bootloader.
 See [the Classic architecture proposal](../docs/design/fota_classic_architecture.md). `SIGNAL_IF_VERSION` is currently 1.
+See the [Pi 5 host operation workflow](../docs/design/fota-pi5-operations.md) for initial provisioning,
+package signing, staging, and trial activation.
 
 ## WASM API（C ABI、wasm-bindgen 不要）
 | 関数 | 説明 |

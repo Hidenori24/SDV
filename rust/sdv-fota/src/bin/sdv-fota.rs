@@ -14,8 +14,33 @@ fn run(args: Vec<OsString>) -> Result<(), String> {
     match args.first().and_then(|value| value.to_str()) {
         Some("init") => initialize(&args[1..]),
         Some("install") => install(&args[1..]),
+        Some("status") => status(&args[1..]),
         _ => Err(usage()),
     }
+}
+
+fn status(args: &[OsString]) -> Result<(), String> {
+    if args.len() != 1 {
+        return Err(usage());
+    }
+    let state = FileBootControl::new(PathBuf::from(&args[0]))
+        .state()
+        .map_err(|error| format!("cannot read boot metadata: {error:?}"))?;
+    println!("active_slot: {}", slot_name(state.active));
+    println!("active_version: {}", state.active_version);
+    println!(
+        "highest_security_version: {}",
+        state.highest_security_version
+    );
+    if let Some(trial) = state.trial {
+        println!("trial_slot: {}", slot_name(trial.slot));
+        println!("trial_version: {}", trial.version);
+        println!("trial_boots_left: {}", trial.boots_left);
+        println!("trial_window_ms: {}", trial.trial_window_ms);
+    } else {
+        println!("trial: none");
+    }
+    Ok(())
 }
 
 fn initialize(args: &[OsString]) -> Result<(), String> {
@@ -130,5 +155,5 @@ fn slot_name(slot: sdv_fota::Slot) -> &'static str {
 }
 
 fn usage() -> String {
-    "usage:\n  sdv-fota init <state-root> <active-slot:a|b> <active-version> <security-version>\n  sdv-fota install <state-root> <package-file> <key-id> <public-key-hex> <ecu> <config-schema> <signal-if-version> [trial-boots]".into()
+    "usage:\n  sdv-fota init <state-root> <active-slot:a|b> <active-version> <security-version>\n  sdv-fota install <state-root> <package-file> <key-id> <public-key-hex> <ecu> <config-schema> <signal-if-version> [trial-boots]\n  sdv-fota status <state-root>".into()
 }

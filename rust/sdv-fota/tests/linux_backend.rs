@@ -287,6 +287,12 @@ fn install_cli_streams_signed_package_into_inactive_slot() {
     assert_eq!(trial.slot, Slot::B);
     assert_eq!(trial.version, "1.1.0");
     assert_eq!(trial.trial_window_ms, 5_000);
+    let reported = Command::new(env!("CARGO_BIN_EXE_sdv-fota"))
+        .args(["status", root.0.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(reported.status.success());
+    assert!(String::from_utf8_lossy(&reported.stdout).contains("trial_slot: B"));
     let image_path = FileSlotStorage::new(&root.0).image_path(Slot::B);
     assert_eq!(fs::read(&image_path).unwrap(), payload);
     assert_ne!(
