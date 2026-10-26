@@ -101,6 +101,23 @@ fn incomplete_replacement_preserves_previous_inactive_image() {
 }
 
 #[test]
+fn concurrent_update_attempts_are_rejected_until_abort_releases_lock() {
+    let root = TempRoot::new();
+    let mut first = FileSlotStorage::new(&root.0);
+    let mut second = FileSlotStorage::new(&root.0);
+    let slot = first.begin_inactive_image(Slot::A, 8).unwrap();
+
+    assert!(matches!(
+        second.begin_inactive_image(Slot::A, 8),
+        Err(sdv_fota::linux::Error::UpdateInProgress)
+    ));
+
+    first.abort_inactive_image(slot);
+    let second_slot = second.begin_inactive_image(Slot::A, 8).unwrap();
+    second.abort_inactive_image(second_slot);
+}
+
+#[test]
 fn corrupt_newest_boot_record_falls_back_to_previous_record() {
     let root = TempRoot::new();
     let mut boot = FileBootControl::new(&root.0);

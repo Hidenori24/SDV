@@ -9,6 +9,7 @@ use super::{BootControl, BootDecision, BootState, ImageStorage, Slot, TrialImage
 use serde::Serialize;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
@@ -19,6 +20,12 @@ const RECORD_MAGIC: &[u8; 4] = b"SDVB";
 const RECORD_HEADER_BYTES: usize = 16;
 const MAX_BOOT_RECORD_BYTES: usize = 4096;
 const IMAGE_FILE: &str = "sdv-image.bin";
+const LOCK_EX: i32 = 2;
+const LOCK_NB: i32 = 4;
+
+extern "C" {
+    fn flock(fd: i32, operation: i32) -> i32;
+}
 
 #[derive(Debug)]
 pub enum Error {
@@ -33,6 +40,7 @@ pub enum Error {
     TrialImageExited,
     TrialHealthTimeout,
     TrailingPackageData,
+    UpdateInProgress,
 }
 
 impl From<io::Error> for Error {
@@ -75,6 +83,7 @@ impl super::PackageSource for FilePackageSource {
 pub struct FileSlotStorage {
     root: PathBuf,
     pending: Option<PendingImage>,
+    update_lock: Option<File>,
 }
 
 struct PendingImage {
@@ -92,6 +101,7 @@ impl FileSlotStorage {
         Self {
             root: root.into(),
             pending: None,
+            update_lock: None,
         }
     }
 
@@ -113,6 +123,11 @@ impl ImageStorage for FileSlotStorage {
         if image_size == 0 {
             return Err(Error::InvalidImageWrite);
         }
+        let new_lock = if self.update_lock.is_none() {
+            Some(acquire_update_lock(&self.root)?)
+        } else {
+            None
+        };
         let slot = active.other();
         let directory = self.root.join("slots").join(slot_name(slot));
         fs::create_dir_all(&directory)?;
@@ -132,6 +147,9 @@ impl ImageStorage for FileSlotStorage {
             expected_size: image_size,
             written: 0,
         });
+        if let Some(lock) = new_lock {
+            self.update_lock = Some(lock);
+        }
         Ok(slot)
     }
 
@@ -185,9 +203,12 @@ impl ImageStorage for FileSlotStorage {
             if pending.slot == slot {
                 drop(pending.file);
                 let _ = fs::remove_file(pending.temporary);
+                self.update_lock = None;
             } else {
                 self.pending = Some(pending);
             }
+        } else {
+            self.update_lock = None;
         }
     }
 
@@ -200,6 +221,27 @@ impl ImageStorage for FileSlotStorage {
         let mut file = File::open(self.image_path(slot))?;
         file.seek(SeekFrom::Start(u64::from(offset)))?;
         Ok(file.read(buffer)?)
+    }
+}
+
+fn acquire_update_lock(root: &Path) -> Result<File, Error> {
+    fs::create_dir_all(root)?;
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(root.join(".fota-update.lock"))?;
+    // SAFETY: `file` owns a valid descriptor; flock does not retain the descriptor pointer.
+    if unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) } == 0 {
+        Ok(file)
+    } else {
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::WouldBlock {
+            Err(Error::UpdateInProgress)
+        } else {
+            Err(Error::Io(error))
+        }
     }
 }
 

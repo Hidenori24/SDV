@@ -95,6 +95,8 @@ adapter does not write the OS, EEPROM, boot partition, or raw block devices. The
 inactive image is written to a temporary file and atomically renamed only after all expected
 bytes are synced; aborting an incomplete transfer leaves the previously staged slot image intact.
 Boot records are redundant, CRC-protected, and capped at 4 KiB per copy during recovery.
+Linux installer processes take a nonblocking OS file lock; a second concurrent update receives
+`UpdateInProgress`, and the kernel releases the lock after a process crash.
 `sdv-fota-launcher` binary and example unit at `deploy/systemd/sdv-fota-launcher.service` select
 and start an image, poll a configured health command during the manifest's trial window, commit a
 healthy trial, and roll back an unhealthy one. Provisioning still needs to initialize boot
