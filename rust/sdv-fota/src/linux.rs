@@ -12,7 +12,7 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus};
+use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -41,6 +41,8 @@ pub enum Error {
     TrialHealthTimeout,
     TrailingPackageData,
     UpdateInProgress,
+    InvalidHttpsUrl,
+    DownloadFailed,
 }
 
 impl From<io::Error> for Error {
@@ -75,6 +77,84 @@ impl super::PackageSource for FilePackageSource {
             Ok(())
         } else {
             Err(Error::TrailingPackageData)
+        }
+    }
+}
+
+/// HTTPS package ingress. `curl` performs system-CA TLS verification; redirects remain HTTPS
+/// and the response body streams through stdout without a package-sized temporary file.
+pub struct HttpsPackageSource {
+    child: Option<Child>,
+    stdout: ChildStdout,
+}
+
+impl HttpsPackageSource {
+    pub fn open(url: &str) -> Result<Self, Error> {
+        let Some(host_and_path) = url.strip_prefix("https://") else {
+            return Err(Error::InvalidHttpsUrl);
+        };
+        if host_and_path.is_empty() || host_and_path.starts_with('/') {
+            return Err(Error::InvalidHttpsUrl);
+        }
+        let mut child = Command::new("curl")
+            .args([
+                "--disable",
+                "--fail",
+                "--location",
+                "--silent",
+                "--show-error",
+                "--proto",
+                "=https",
+                "--proto-redir",
+                "=https",
+                "--connect-timeout",
+                "20",
+                "--max-time",
+                "900",
+                "--output",
+                "-",
+                "--",
+                url,
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .spawn()?;
+        let stdout = child.stdout.take().ok_or(Error::DownloadFailed)?;
+        Ok(Self {
+            child: Some(child),
+            stdout,
+        })
+    }
+}
+
+impl super::PackageSource for HttpsPackageSource {
+    type Error = Error;
+
+    fn read_exact(&mut self, buffer: &mut [u8]) -> Result<(), Self::Error> {
+        self.stdout.read_exact(buffer).map_err(Error::Io)
+    }
+
+    fn finish(&mut self) -> Result<(), Self::Error> {
+        let mut trailing = [0u8; 1];
+        if self.stdout.read(&mut trailing)? != 0 {
+            return Err(Error::TrailingPackageData);
+        }
+        let status = self.child.take().ok_or(Error::DownloadFailed)?.wait()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(Error::DownloadFailed)
+        }
+    }
+}
+
+impl Drop for HttpsPackageSource {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            if child.try_wait().ok().flatten().is_none() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
         }
     }
 }

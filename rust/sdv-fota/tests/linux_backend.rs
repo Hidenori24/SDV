@@ -1,6 +1,6 @@
 #![cfg(target_os = "linux")]
 
-use sdv_fota::linux::{run_selected_image, FileBootControl, FileSlotStorage};
+use sdv_fota::linux::{run_selected_image, FileBootControl, FileSlotStorage, HttpsPackageSource};
 use sdv_fota::{encode_package, BootControl, ImageStorage, Slot, TrialImage, VersionString};
 use sdv_sec::{ed25519_public_key, ed25519_sign, sha256};
 use std::fs;
@@ -33,6 +33,14 @@ impl Drop for TempRoot {
 fn write_executable(path: &Path, contents: &str) {
     fs::write(path, contents).unwrap();
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn https_ingress_rejects_plain_http_urls() {
+    assert!(matches!(
+        HttpsPackageSource::open("http://updates.example.test/update.sdvf"),
+        Err(sdv_fota::linux::Error::InvalidHttpsUrl)
+    ));
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -320,6 +328,74 @@ fn install_cli_streams_signed_package_into_inactive_slot() {
         fs::metadata(image_path).unwrap().permissions().mode() & 0o111,
         0
     );
+}
+
+#[test]
+fn install_url_streams_https_package_through_curl_ingress() {
+    let root = TempRoot::new();
+    let boot = FileBootControl::new(&root.0);
+    boot.initialize(Slot::A, "1.0.0", 1).unwrap();
+    let payload = b"#! /bin/sh\nexit 0\n";
+    let manifest = serde_json::json!({
+        "manifest_schema": 1,
+        "image": {
+            "target_ecu": "engine",
+            "swc": "EngineSWC",
+            "version": "1.1.0",
+            "security_version": 2,
+            "size_bytes": payload.len(),
+            "sha256": hex(&sha256(payload))
+        },
+        "requires": {"signal_if_version": 1, "config_schema": [1]},
+        "policy": {"allow_downgrade": false, "trial_ms": 5000}
+    });
+    let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+    let signature = ed25519_sign(&SIGNING_SEED, &manifest_bytes);
+    let package = encode_package(KEY_ID, &signature, &manifest_bytes, payload).unwrap();
+    let package_path = root.0.join("network-response.sdvf");
+    fs::write(&package_path, package).unwrap();
+
+    let fake_bin = root.0.join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    write_executable(
+        fake_bin.join("curl").as_path(),
+        "#!/bin/sh\ncat \"$SDV_FOTA_TEST_PACKAGE\"\n",
+    );
+    let path = format!(
+        "{}:{}",
+        fake_bin.display(),
+        std::env::var_os("PATH")
+            .unwrap_or_default()
+            .to_string_lossy()
+    );
+    let public_key = ed25519_public_key(&SIGNING_SEED);
+    let result = Command::new(env!("CARGO_BIN_EXE_sdv-fota"))
+        .args([
+            "install-url",
+            root.0.to_str().unwrap(),
+            "https://updates.example.test/engine.sdvf",
+            KEY_ID,
+            &hex(&public_key),
+            "engine",
+            "1",
+            "1",
+            "2",
+        ])
+        .env("PATH", path)
+        .env("SDV_FOTA_TEST_PACKAGE", &package_path)
+        .output()
+        .unwrap();
+
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        fs::read(FileSlotStorage::new(&root.0).image_path(Slot::B)).unwrap(),
+        payload
+    );
+    assert_eq!(boot.state().unwrap().trial.unwrap().version, "1.1.0");
 }
 
 #[cfg(feature = "host-signing")]
