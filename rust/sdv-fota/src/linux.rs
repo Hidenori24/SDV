@@ -31,11 +31,42 @@ pub enum Error {
     InvalidRecord,
     TrialImageExited,
     TrialHealthTimeout,
+    TrailingPackageData,
 }
 
 impl From<io::Error> for Error {
     fn from(error: io::Error) -> Self {
         Self::Io(error)
+    }
+}
+
+/// File-backed package ingress for bounded streaming installation.
+pub struct FilePackageSource {
+    file: File,
+}
+
+impl FilePackageSource {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
+        Ok(Self {
+            file: File::open(path)?,
+        })
+    }
+}
+
+impl super::PackageSource for FilePackageSource {
+    type Error = Error;
+
+    fn read_exact(&mut self, buffer: &mut [u8]) -> Result<(), Self::Error> {
+        Read::read_exact(&mut self.file, buffer).map_err(Error::Io)
+    }
+
+    fn finish(&mut self) -> Result<(), Self::Error> {
+        let mut trailing = [0u8; 1];
+        if self.file.read(&mut trailing)? == 0 {
+            Ok(())
+        } else {
+            Err(Error::TrailingPackageData)
+        }
     }
 }
 

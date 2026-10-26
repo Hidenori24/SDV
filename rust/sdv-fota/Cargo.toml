@@ -24,3 +24,8 @@ crate-type = ["rlib"]
 name = "sdv-fota-launcher"
 path = "src/bin/sdv-fota-launcher.rs"
 required-features = ["std"]
+
+[[bin]]
+name = "sdv-fota"
+path = "src/bin/sdv-fota.rs"
+required-features = ["std"]

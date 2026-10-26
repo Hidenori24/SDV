@@ -96,7 +96,9 @@ adapter does not write the OS, EEPROM, boot partition, or raw block devices. The
 and start an image, poll a configured health command during the manifest's trial window, commit a
 healthy trial, and roll back an unhealthy one. Provisioning still needs to initialize boot
 metadata, install the launcher and health check, and provide an executable signed application
-image. The common crate also compiles with
+image. The `sdv-fota` host command initializes boot metadata and streams a signed package file
+into the inactive slot; it accepts the ECU compatibility values and public trust key as inputs.
+The common crate also compiles with
 `--no-default-features` (`no_std` + `alloc`). This removes `std` dependencies, but it is not
 heap-free and does not make the crate AUTOSAR Classic compatible. Flash I/O and read-back are
 block-oriented; streaming avoids an image-sized allocation. Manifest text and supported schema

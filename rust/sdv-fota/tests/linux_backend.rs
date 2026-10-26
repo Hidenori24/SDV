@@ -1,13 +1,17 @@
 #![cfg(target_os = "linux")]
 
 use sdv_fota::linux::{run_selected_image, FileBootControl, FileSlotStorage};
-use sdv_fota::{BootControl, ImageStorage, Slot, TrialImage};
+use sdv_fota::{encode_package, BootControl, ImageStorage, Slot, TrialImage};
+use sdv_sec::{ed25519_public_key, ed25519_sign, sha256};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
+const SIGNING_SEED: [u8; 32] = [7; 32];
+const KEY_ID: &str = "pi-test-key";
 
 struct TempRoot(PathBuf);
 
@@ -29,6 +33,10 @@ impl Drop for TempRoot {
 fn write_executable(path: &Path, contents: &str) {
     fs::write(path, contents).unwrap();
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[test]
@@ -187,4 +195,63 @@ fn linux_launcher_rolls_back_if_trial_image_exits_before_health_check() {
     let state = boot.state().unwrap();
     assert_eq!(state.active, Slot::A);
     assert!(state.trial.is_none());
+}
+
+#[test]
+fn install_cli_streams_signed_package_into_inactive_slot() {
+    let root = TempRoot::new();
+    let boot = FileBootControl::new(&root.0);
+    boot.initialize(Slot::A, "1.0.0".into(), 1).unwrap();
+    let payload = b"#!/bin/sh\nexec sleep 1\n";
+    let manifest = serde_json::json!({
+        "manifest_schema": 1,
+        "image": {
+            "target_ecu": "engine",
+            "swc": "EngineSWC",
+            "version": "1.1.0",
+            "security_version": 2,
+            "size_bytes": payload.len(),
+            "sha256": hex(&sha256(payload))
+        },
+        "requires": {"signal_if_version": 1, "config_schema": [1]},
+        "policy": {"allow_downgrade": false, "trial_ms": 5000}
+    });
+    let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+    let signature = ed25519_sign(&SIGNING_SEED, &manifest_bytes);
+    let package = encode_package(KEY_ID, &signature, &manifest_bytes, payload).unwrap();
+    let package_path = root.0.join("update.sdvf");
+    fs::write(&package_path, package).unwrap();
+    let public_key = ed25519_public_key(&SIGNING_SEED);
+
+    let result = Command::new(env!("CARGO_BIN_EXE_sdv-fota"))
+        .args([
+            "install",
+            root.0.to_str().unwrap(),
+            package_path.to_str().unwrap(),
+            KEY_ID,
+            &hex(&public_key),
+            "engine",
+            "1",
+            "1",
+            "2",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let state = boot.state().unwrap();
+    let trial = state.trial.unwrap();
+    assert_eq!(trial.slot, Slot::B);
+    assert_eq!(trial.version, "1.1.0");
+    assert_eq!(trial.trial_window_ms, 5_000);
+    let image_path = FileSlotStorage::new(&root.0).image_path(Slot::B);
+    assert_eq!(fs::read(&image_path).unwrap(), payload);
+    assert_ne!(
+        fs::metadata(image_path).unwrap().permissions().mode() & 0o111,
+        0
+    );
 }
