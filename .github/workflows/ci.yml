@@ -53,6 +53,8 @@ jobs:
           targets: wasm32-unknown-unknown
       - name: cargo test (includes C++ golden log cross-check)
         run: cargo test
+      - name: cargo test (FOTA service and Pi 5/Linux backend)
+        run: cargo test --manifest-path ../sdv-fota/Cargo.toml
       - name: WASM build
         run: cargo build --release --target wasm32-unknown-unknown
 
