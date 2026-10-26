@@ -244,6 +244,30 @@ fn signed_package_is_verified_and_compatible() {
 }
 
 #[test]
+fn manifest_fields_have_fixed_capacity() {
+    let overlong_version = serde_json::json!({
+        "manifest_schema": 1,
+        "image": {
+            "target_ecu": "engine",
+            "swc": "EngineSWC",
+            "version": "123456789012345678901234567890123",
+            "security_version": 2,
+            "size_bytes": 1,
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        "requires": {"signal_if_version": 1, "config_schema": [1]},
+        "policy": {"allow_downgrade": false, "trial_ms": 1000}
+    });
+    assert!(serde_json::from_value::<sdv_fota::Manifest>(overlong_version.clone()).is_err());
+
+    let mut excessive_schemas = overlong_version;
+    excessive_schemas["image"]["version"] = serde_json::json!("1.2.3");
+    excessive_schemas["requires"]["config_schema"] =
+        serde_json::json!([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]);
+    assert!(serde_json::from_value::<sdv_fota::Manifest>(excessive_schemas).is_err());
+}
+
+#[test]
 fn invalid_signature_is_rejected_before_manifest_use() {
     let mut bytes = signed_package("1.1.0", 2);
     bytes[18] ^= 0x01;

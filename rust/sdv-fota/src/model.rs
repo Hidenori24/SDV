@@ -1,8 +1,151 @@
 //! FOTA domain types shared by the package validator, update service, and platform ports.
 
-use alloc::{string::String, vec::Vec};
+use alloc::string::String;
+use core::{fmt, ops::Deref};
 use sdv_sec::ED25519_PUBLIC_KEY_LEN;
-use serde::Deserialize;
+use serde::de::{Error as DeError, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer};
+
+const SWC_ID_CAPACITY: usize = 64;
+const VERSION_CAPACITY: usize = 32;
+const SHA256_HEX_CAPACITY: usize = 64;
+pub const MAX_CONFIG_SCHEMA_VERSIONS: usize = 16;
+
+/// UTF-8 string stored inline; deserialization rejects values larger than the chosen capacity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FixedString<const N: usize> {
+    bytes: [u8; N],
+    len: usize,
+}
+
+impl<const N: usize> FixedString<N> {
+    pub const fn new() -> Self {
+        Self {
+            bytes: [0; N],
+            len: 0,
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.bytes[..self.len]).unwrap_or("")
+    }
+}
+
+impl<const N: usize> Default for FixedString<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const N: usize> Deref for FixedString<N> {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl<const N: usize> PartialEq<&str> for FixedString<N> {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl<'de, const N: usize> Deserialize<'de> for FixedString<N> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct FixedStringVisitor<const N: usize>;
+
+        impl<const N: usize> Visitor<'_> for FixedStringVisitor<N> {
+            type Value = FixedString<N>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(formatter, "a UTF-8 string of at most {N} bytes")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: DeError,
+            {
+                if value.len() > N {
+                    return Err(E::invalid_length(value.len(), &self));
+                }
+                let mut result = FixedString::new();
+                result.bytes[..value.len()].copy_from_slice(value.as_bytes());
+                result.len = value.len();
+                Ok(result)
+            }
+        }
+
+        deserializer.deserialize_str(FixedStringVisitor::<N>)
+    }
+}
+
+/// Bounded list used for the manifest's supported configuration schema versions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FixedU32List<const N: usize> {
+    values: [u32; N],
+    len: usize,
+}
+
+impl<const N: usize> FixedU32List<N> {
+    pub const fn new() -> Self {
+        Self {
+            values: [0; N],
+            len: 0,
+        }
+    }
+}
+
+impl<const N: usize> Default for FixedU32List<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const N: usize> Deref for FixedU32List<N> {
+    type Target = [u32];
+
+    fn deref(&self) -> &Self::Target {
+        &self.values[..self.len]
+    }
+}
+
+impl<'de, const N: usize> Deserialize<'de> for FixedU32List<N> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct FixedU32ListVisitor<const N: usize>;
+
+        impl<'de, const N: usize> Visitor<'de> for FixedU32ListVisitor<N> {
+            type Value = FixedU32List<N>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(formatter, "a list of at most {N} unsigned 32-bit integers")
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut result = FixedU32List::new();
+                while let Some(value) = sequence.next_element()? {
+                    if result.len == N {
+                        return Err(A::Error::invalid_length(N + 1, &self));
+                    }
+                    result.values[result.len] = value;
+                    result.len += 1;
+                }
+                Ok(result)
+            }
+        }
+
+        deserializer.deserialize_seq(FixedU32ListVisitor::<N>)
+    }
+}
 
 /// Logical A/B software slot. Platform boot code maps these names to its own storage layout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, serde::Serialize)]
@@ -77,18 +220,18 @@ pub struct Manifest {
 #[serde(deny_unknown_fields)]
 pub struct Image {
     pub target_ecu: Ecu,
-    pub swc: String,
-    pub version: String,
+    pub swc: FixedString<SWC_ID_CAPACITY>,
+    pub version: FixedString<VERSION_CAPACITY>,
     pub security_version: u64,
     pub size_bytes: u64,
-    pub sha256: String,
+    pub sha256: FixedString<SHA256_HEX_CAPACITY>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Requirements {
     pub signal_if_version: u32,
-    pub config_schema: Vec<u32>,
+    pub config_schema: FixedU32List<MAX_CONFIG_SCHEMA_VERSIONS>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]

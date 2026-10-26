@@ -95,10 +95,11 @@ adapter does not write the OS, EEPROM, boot partition, or raw block devices. A s
 that selects and starts the slot image is still needed. The common crate also compiles with
 `--no-default-features` (`no_std` + `alloc`). This removes `std` dependencies, but it is not
 heap-free and does not make the crate AUTOSAR Classic compatible. Flash I/O and read-back are
-block-oriented; the streaming path avoids an image-sized allocation, while the signed manifest
-is still parsed with `alloc` (within the 64 KiB input bound). Classic integration still needs a
-fixed-capacity manifest representation to avoid those allocations and
-adapters for the selected DCM, Csm/Crypto, NvM, MemIf/Fls, and bootloader.
+block-oriented; streaming avoids an image-sized allocation. Manifest text and supported schema
+versions are deserialized into fixed-capacity inline fields (64 KiB maximum input, 16 schema
+versions); parsing does not allocate per field. The broader host-facing domain still uses `alloc`
+for boot metadata and Linux integration. Classic integration needs adapters for the selected
+DCM, Csm/Crypto, NvM, MemIf/Fls, and bootloader.
 See [the Classic architecture proposal](../docs/design/fota_classic_architecture.md). `SIGNAL_IF_VERSION` is currently 1.
 
 ## WASM API（C ABI、wasm-bindgen 不要）
