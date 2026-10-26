@@ -5,7 +5,7 @@
 //! launcher should call `select_for_boot`, start the returned slot's image, then call
 //! `commit_trial` only after the SDV service passes its health checks.
 
-use super::{BootControl, BootDecision, BootState, ImageStorage, Slot, TrialImage};
+use super::{BootControl, BootDecision, BootState, ImageStorage, Slot, TrialImage, VersionString};
 use serde::Serialize;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -362,7 +362,7 @@ impl FileBootControl {
     pub fn initialize(
         &self,
         active: Slot,
-        active_version: String,
+        active_version: &str,
         highest_security_version: u64,
     ) -> Result<(), Error> {
         fs::create_dir_all(&self.root)?;
@@ -373,7 +373,8 @@ impl FileBootControl {
             0,
             &BootState {
                 active,
-                active_version,
+                active_version: VersionString::try_from_str(active_version)
+                    .ok_or(Error::InvalidRecord)?,
                 highest_security_version,
                 trial: None,
             },
@@ -434,7 +435,7 @@ impl BootControl for FileBootControl {
 
     fn select_for_boot(&mut self) -> Result<BootDecision, Self::Error> {
         let (sequence, mut state) = self.load()?;
-        let Some(mut trial) = state.trial.clone() else {
+        let Some(mut trial) = state.trial else {
             return Ok(BootDecision {
                 slot: state.active,
                 trial: false,

@@ -106,14 +106,13 @@ The host-only `sdv-fota-sign` tool creates SDVF packages from image files using 
 `cargo build --release --manifest-path rust/sdv-fota/Cargo.toml --features host-signing --bin sdv-fota-sign`;
 the signing feature is not enabled in the target installer or no-std library builds. Keep the
 signing seed in the release environment and provision only the matching public key to the ECU.
-The common crate also compiles with
-`--no-default-features` (`no_std` + `alloc`). This removes `std` dependencies, but it is not
-heap-free and does not make the crate AUTOSAR Classic compatible. Flash I/O and read-back are
-block-oriented; streaming avoids an image-sized allocation. Manifest text and supported schema
-versions are deserialized into fixed-capacity inline fields (64 KiB maximum input, 16 schema
-versions); parsing does not allocate per field. The broader host-facing domain still uses `alloc`
-for boot metadata and Linux integration. Classic integration needs adapters for the selected
-DCM, Csm/Crypto, NvM, MemIf/Fls, and bootloader.
+The shared FOTA policy, package validation, fixed manifest parser, and service ports compile with
+`--no-default-features` as `no_std` without enabling the allocator or `serde_json`. Manifest input
+is capped at 64 KiB; inline fields and the 16-entry schema list have fixed capacities. The Pi/Linux
+adapter and host package encoding use `std`/`alloc`; they are excluded from that core build. This
+heap-free common core is a stronger Classic boundary, but does not by itself make the crate
+AUTOSAR Classic compliant. Classic integration still needs adapters for the selected DCM,
+Csm/Crypto, NvM, MemIf/Fls, and bootloader.
 See [the Classic architecture proposal](../docs/design/fota_classic_architecture.md). `SIGNAL_IF_VERSION` is currently 1.
 See the [Pi 5 host operation workflow](../docs/design/fota-pi5-operations.md) for initial provisioning,
 package signing, staging, and trial activation.

@@ -1,16 +1,16 @@
 //! FOTA domain types shared by the package validator, update service, and platform ports.
 
-use alloc::string::String;
 use core::{fmt, ops::Deref};
 use sdv_sec::ED25519_PUBLIC_KEY_LEN;
 use serde::de::{Error as DeError, SeqAccess, Visitor};
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 const SWC_ID_CAPACITY: usize = 64;
 const VERSION_CAPACITY: usize = 32;
 const SHA256_HEX_CAPACITY: usize = 64;
 pub const MAX_CONFIG_SCHEMA_VERSIONS: usize = 16;
 pub const DEFAULT_TRIAL_WINDOW_MS: u32 = 30_000;
+pub type VersionString = FixedString<VERSION_CAPACITY>;
 
 fn default_trial_window_ms() -> u32 {
     DEFAULT_TRIAL_WINDOW_MS
@@ -34,6 +34,21 @@ impl<const N: usize> FixedString<N> {
     pub fn as_str(&self) -> &str {
         core::str::from_utf8(&self.bytes[..self.len]).unwrap_or("")
     }
+
+    pub fn try_from_str(value: &str) -> Option<Self> {
+        Self::try_from_bytes(value.as_bytes())
+    }
+
+    pub(crate) fn try_from_bytes(value: &[u8]) -> Option<Self> {
+        if value.len() > N {
+            return None;
+        }
+        core::str::from_utf8(value).ok()?;
+        let mut result = Self::new();
+        result.bytes[..value.len()].copy_from_slice(value);
+        result.len = value.len();
+        Some(result)
+    }
 }
 
 impl<const N: usize> Default for FixedString<N> {
@@ -50,9 +65,24 @@ impl<const N: usize> Deref for FixedString<N> {
     }
 }
 
+impl<const N: usize> fmt::Display for FixedString<N> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 impl<const N: usize> PartialEq<&str> for FixedString<N> {
     fn eq(&self, other: &&str) -> bool {
         self.as_str() == *other
+    }
+}
+
+impl<const N: usize> Serialize for FixedString<N> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
     }
 }
 
@@ -101,6 +131,15 @@ impl<const N: usize> FixedU32List<N> {
             values: [0; N],
             len: 0,
         }
+    }
+
+    pub(crate) fn try_push(&mut self, value: u32) -> bool {
+        if self.len == N {
+            return false;
+        }
+        self.values[self.len] = value;
+        self.len += 1;
+        true
     }
 }
 
@@ -169,22 +208,22 @@ impl Slot {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrialImage {
     pub slot: Slot,
-    pub version: String,
+    pub version: VersionString,
     pub security_version: u64,
     pub boots_left: u32,
     #[serde(default = "default_trial_window_ms")]
     pub trial_window_ms: u32,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BootState {
     pub active: Slot,
-    pub active_version: String,
+    pub active_version: VersionString,
     pub highest_security_version: u64,
     #[serde(default)]
     pub trial: Option<TrialImage>,

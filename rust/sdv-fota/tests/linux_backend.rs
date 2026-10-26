@@ -1,7 +1,7 @@
 #![cfg(target_os = "linux")]
 
 use sdv_fota::linux::{run_selected_image, FileBootControl, FileSlotStorage};
-use sdv_fota::{encode_package, BootControl, ImageStorage, Slot, TrialImage};
+use sdv_fota::{encode_package, BootControl, ImageStorage, Slot, TrialImage, VersionString};
 use sdv_sec::{ed25519_public_key, ed25519_sign, sha256};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -39,12 +39,16 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+fn fixed_version(version: &str) -> VersionString {
+    VersionString::try_from_str(version).unwrap()
+}
+
 #[test]
 fn linux_backend_stages_image_and_commits_trial() {
     let root = TempRoot::new();
     let mut images = FileSlotStorage::new(&root.0);
     let mut boot = FileBootControl::new(&root.0);
-    boot.initialize(Slot::A, "1.0.0".into(), 1).unwrap();
+    boot.initialize(Slot::A, "1.0.0", 1).unwrap();
 
     let slot = images
         .begin_inactive_image(Slot::A, b"candidate image".len() as u32)
@@ -63,7 +67,7 @@ fn linux_backend_stages_image_and_commits_trial() {
     assert_eq!(full_image, b"candidate image");
     boot.schedule_trial(TrialImage {
         slot,
-        version: "1.1.0".into(),
+        version: fixed_version("1.1.0"),
         security_version: 2,
         boots_left: 1,
         trial_window_ms: 5_000,
@@ -100,10 +104,10 @@ fn incomplete_replacement_preserves_previous_inactive_image() {
 fn corrupt_newest_boot_record_falls_back_to_previous_record() {
     let root = TempRoot::new();
     let mut boot = FileBootControl::new(&root.0);
-    boot.initialize(Slot::A, "1.0.0".into(), 1).unwrap();
+    boot.initialize(Slot::A, "1.0.0", 1).unwrap();
     boot.schedule_trial(TrialImage {
         slot: Slot::B,
-        version: "1.1.0".into(),
+        version: fixed_version("1.1.0"),
         security_version: 2,
         boots_left: 1,
         trial_window_ms: 5_000,
@@ -126,10 +130,10 @@ fn corrupt_newest_boot_record_falls_back_to_previous_record() {
 fn oversized_boot_record_is_ignored_in_favor_of_valid_copy() {
     let root = TempRoot::new();
     let mut boot = FileBootControl::new(&root.0);
-    boot.initialize(Slot::A, "1.0.0".into(), 1).unwrap();
+    boot.initialize(Slot::A, "1.0.0", 1).unwrap();
     boot.schedule_trial(TrialImage {
         slot: Slot::B,
-        version: "1.1.0".into(),
+        version: fixed_version("1.1.0"),
         security_version: 2,
         boots_left: 2,
         trial_window_ms: 5_000,
@@ -148,7 +152,7 @@ fn oversized_boot_record_is_ignored_in_favor_of_valid_copy() {
 fn linux_launcher_commits_trial_after_health_command_succeeds() {
     let root = TempRoot::new();
     let mut boot = FileBootControl::new(&root.0);
-    boot.initialize(Slot::A, "1.0.0".into(), 1).unwrap();
+    boot.initialize(Slot::A, "1.0.0", 1).unwrap();
     let slot_dir = root.0.join("slots/b");
     fs::create_dir_all(&slot_dir).unwrap();
     write_executable(&slot_dir.join("sdv-image.bin"), "#!/bin/sh\nexec sleep 2\n");
@@ -159,7 +163,7 @@ fn linux_launcher_commits_trial_after_health_command_succeeds() {
     );
     boot.schedule_trial(TrialImage {
         slot: Slot::B,
-        version: "1.1.0".into(),
+        version: fixed_version("1.1.0"),
         security_version: 2,
         boots_left: 2,
         trial_window_ms: 2_000,
@@ -179,7 +183,7 @@ fn linux_launcher_commits_trial_after_health_command_succeeds() {
 fn linux_launcher_rolls_back_trial_when_health_window_expires() {
     let root = TempRoot::new();
     let mut boot = FileBootControl::new(&root.0);
-    boot.initialize(Slot::A, "1.0.0".into(), 1).unwrap();
+    boot.initialize(Slot::A, "1.0.0", 1).unwrap();
     let slot_dir = root.0.join("slots/b");
     fs::create_dir_all(&slot_dir).unwrap();
     write_executable(&slot_dir.join("sdv-image.bin"), "#!/bin/sh\nexec sleep 2\n");
@@ -187,7 +191,7 @@ fn linux_launcher_rolls_back_trial_when_health_window_expires() {
     write_executable(&health, "#!/bin/sh\nexit 1\n");
     boot.schedule_trial(TrialImage {
         slot: Slot::B,
-        version: "1.1.0".into(),
+        version: fixed_version("1.1.0"),
         security_version: 2,
         boots_left: 2,
         trial_window_ms: 20,
@@ -210,7 +214,7 @@ fn linux_launcher_rolls_back_trial_when_health_window_expires() {
 fn linux_launcher_rolls_back_if_trial_image_exits_before_health_check() {
     let root = TempRoot::new();
     let mut boot = FileBootControl::new(&root.0);
-    boot.initialize(Slot::A, "1.0.0".into(), 1).unwrap();
+    boot.initialize(Slot::A, "1.0.0", 1).unwrap();
     let slot_dir = root.0.join("slots/b");
     fs::create_dir_all(&slot_dir).unwrap();
     write_executable(&slot_dir.join("sdv-image.bin"), "#!/bin/sh\nexit 1\n");
@@ -218,7 +222,7 @@ fn linux_launcher_rolls_back_if_trial_image_exits_before_health_check() {
     write_executable(&health, "#!/bin/sh\nexit 0\n");
     boot.schedule_trial(TrialImage {
         slot: Slot::B,
-        version: "1.1.0".into(),
+        version: fixed_version("1.1.0"),
         security_version: 2,
         boots_left: 2,
         trial_window_ms: 2_000,
@@ -240,7 +244,7 @@ fn linux_launcher_rolls_back_if_trial_image_exits_before_health_check() {
 fn install_cli_streams_signed_package_into_inactive_slot() {
     let root = TempRoot::new();
     let boot = FileBootControl::new(&root.0);
-    boot.initialize(Slot::A, "1.0.0".into(), 1).unwrap();
+    boot.initialize(Slot::A, "1.0.0", 1).unwrap();
     let payload = b"#!/bin/sh\nexec sleep 1\n";
     let manifest = serde_json::json!({
         "manifest_schema": 1,
@@ -306,7 +310,7 @@ fn install_cli_streams_signed_package_into_inactive_slot() {
 fn signing_and_install_commands_complete_a_host_update() {
     let root = TempRoot::new();
     let boot = FileBootControl::new(&root.0);
-    boot.initialize(Slot::A, "1.0.0".into(), 1).unwrap();
+    boot.initialize(Slot::A, "1.0.0", 1).unwrap();
     let seed_path = root.0.join("signing.seed");
     fs::write(&seed_path, hex(&SIGNING_SEED)).unwrap();
     let image_path = root.0.join("candidate.bin");

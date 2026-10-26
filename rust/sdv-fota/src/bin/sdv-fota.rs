@@ -56,7 +56,7 @@ fn initialize(args: &[OsString]) -> Result<(), String> {
     let active_version = required_str(&args[2], "active version")?.to_owned();
     let security_version = parse_number(&args[3], "security version")?;
     FileBootControl::new(root)
-        .initialize(slot, active_version, security_version)
+        .initialize(slot, &active_version, security_version)
         .map_err(|error| format!("boot metadata initialization failed: {error:?}"))
 }
 
