@@ -15,6 +15,10 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn signed_package(version: &str, security_version: u64) -> Vec<u8> {
+    signed_package_for_payload(version, security_version, PAYLOAD)
+}
+
+fn signed_package_for_payload(version: &str, security_version: u64, payload: &[u8]) -> Vec<u8> {
     let manifest = format!(
         r#"{{
           "manifest_schema": 1,
@@ -29,11 +33,11 @@ fn signed_package(version: &str, security_version: u64) -> Vec<u8> {
           "requires": {{"signal_if_version": 1, "config_schema": [1]}},
           "policy": {{"allow_downgrade": false, "trial_ms": 5000}}
         }}"#,
-        PAYLOAD.len(),
-        hex(&sha256(PAYLOAD)),
+        payload.len(),
+        hex(&sha256(payload)),
     );
     let signature = ed25519_sign(&SEED, manifest.as_bytes());
-    encode_package(KEY_ID, &signature, manifest.as_bytes(), PAYLOAD).unwrap()
+    encode_package(KEY_ID, &signature, manifest.as_bytes(), payload).unwrap()
 }
 
 fn validation_context<'a>() -> ValidationContext<'a> {
@@ -49,19 +53,64 @@ fn validation_context<'a>() -> ValidationContext<'a> {
 #[derive(Default)]
 struct MemoryImageStorage {
     images: [Vec<u8>; 2],
+    pending: Option<(Slot, u32, Vec<u8>)>,
 }
 
 impl ImageStorage for MemoryImageStorage {
     type Error = Infallible;
 
-    fn write_inactive_image(&mut self, active: Slot, image: &[u8]) -> Result<Slot, Self::Error> {
+    fn begin_inactive_image(&mut self, active: Slot, image_size: u32) -> Result<Slot, Self::Error> {
         let target = active.other();
-        self.images[slot_index(target)] = image.to_vec();
+        self.pending = Some((target, image_size, Vec::with_capacity(image_size as usize)));
         Ok(target)
     }
 
-    fn read_image(&self, slot: Slot) -> Result<Vec<u8>, Self::Error> {
-        Ok(self.images[slot_index(slot)].clone())
+    fn write_image_chunk(
+        &mut self,
+        slot: Slot,
+        offset: u32,
+        chunk: &[u8],
+    ) -> Result<(), Self::Error> {
+        let (pending_slot, expected_size, image) = self.pending.as_mut().unwrap();
+        assert_eq!(*pending_slot, slot);
+        assert_eq!(offset as usize, image.len());
+        image.extend_from_slice(chunk);
+        assert!(image.len() <= *expected_size as usize);
+        Ok(())
+    }
+
+    fn finish_inactive_image(&mut self, slot: Slot) -> Result<(), Self::Error> {
+        let (pending_slot, expected_size, image) = self.pending.take().unwrap();
+        assert_eq!(pending_slot, slot);
+        assert_eq!(image.len(), expected_size as usize);
+        self.images[slot_index(slot)] = image;
+        Ok(())
+    }
+
+    fn abort_inactive_image(&mut self, slot: Slot) {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|(pending_slot, _, _)| *pending_slot == slot)
+        {
+            self.pending = None;
+        }
+    }
+
+    fn read_image_chunk(
+        &self,
+        slot: Slot,
+        offset: u32,
+        buffer: &mut [u8],
+    ) -> Result<usize, Self::Error> {
+        let image = &self.images[slot_index(slot)];
+        let start = offset as usize;
+        if start >= image.len() {
+            return Ok(0);
+        }
+        let length = buffer.len().min(image.len() - start);
+        buffer[..length].copy_from_slice(&image[start..start + length]);
+        Ok(length)
     }
 }
 
@@ -198,6 +247,30 @@ fn installer_stages_inactive_image_and_schedules_trial() {
     assert_eq!(trial.slot, Slot::B);
     assert_eq!(trial.version, "1.1.0");
     assert_eq!(trial.boots_left, 2);
+}
+
+#[test]
+fn installer_writes_and_verifies_image_across_multiple_flash_blocks() {
+    let payload = vec![0xA5; 2501];
+    let bytes = signed_package_for_payload("1.1.0", 2, &payload);
+    let public_key = ed25519_public_key(&SEED);
+    let trust_key = TrustKey {
+        key_id: KEY_ID,
+        public_key: &public_key,
+    };
+    let mut installer = FotaInstaller {
+        storage: MemoryImageStorage::default(),
+        boot_control: MemoryBootControl::current(),
+        trial_boots: 2,
+    };
+
+    let slot = installer
+        .stage_package(&bytes, &[trust_key], &validation_context())
+        .unwrap();
+
+    assert_eq!(slot, Slot::B);
+    assert_eq!(installer.storage.images[1], payload);
+    assert!(installer.boot_control.state.trial.is_some());
 }
 
 #[test]

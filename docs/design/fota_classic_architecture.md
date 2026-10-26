@@ -42,7 +42,7 @@ Classic の FOTA 全体が単一の標準 AUTOSAR モジュールとして定義
 |---|---|---|
 | `rust/sdv-core` の SWC / RTE | 独自の機能モデル・ECUシミュレーション | SW-C仕様・ポート契約の検討材料。AUTOSAR生成RTEではない |
 | `rust/sdv-fota` の検証・更新処理 | 独自FOTAサービス | ECU更新BSWのポリシー/状態遷移の試作。標準BSW APIではない |
-| `ImageStorage` / `BootControl` | 独自Rust trait | 現状は便宜的な境界。Classic実装ではNvM、MemIf/Fls、Bootloaderの契約に分解する |
+| `ImageStorage` / `BootControl` | 独自Rust trait。Flash read/writeは固定長block API | 現状はサービス境界。Classic実装ではNvM、MemIf/Fls、Bootloader APIへ結合する |
 | `rust/sdv-fota/src/linux.rs` | Linuxファイル領域にA/Bイメージと状態を保存 | Pi 5開発・シミュレーション用バックエンド。MCALやBootloaderの代替ではない |
 | `sdv-sec` | no_std・ヒープなしの暗号基礎 | Csm/Cryptoとの接続方式を選ぶ。BSW Csm APIを直接実装したものではない |
 
@@ -59,7 +59,7 @@ FOTA状態機械はサービス要求を発行し、Classic統合側が選定BSW
 | 起動バンク・trial/commit/rollback | Bootloader/OEM Boot Manager | 起動メタデータ形式、試行回数、復帰条件、確定権限 |
 | 更新許可・安全状態 | VCU/SafetySupervisorとの契約 | 車両停止、EStop/Degraded、同時更新禁止 |
 
-Classic ECUへの移植時には動的メモリ確保を前提にしない。現行 `sdv-fota` の `alloc`、`Vec`、`String`、JSONマニフェスト解析は、固定長バッファ、静的設定、採用ECUの資源上限に合わせて再設計する項目である。`no_std` でビルドできることだけでは Classic 向け成立を意味しない。
+Flash write/readbackは固定長block単位になり、readbackは増分SHA-256で処理する。Classic ECUへの移植時には動的メモリ確保を前提にしない。現行 `sdv-fota` のパッケージ保持、`alloc`、`Vec`、`String`、JSONマニフェスト解析は、固定長バッファ、静的設定、採用ECUの資源上限に合わせて再設計する項目である。`no_std` でビルドできることだけでは Classic 向け成立を意味しない。
 
 ## Raspberry Pi 5 の位置づけ
 

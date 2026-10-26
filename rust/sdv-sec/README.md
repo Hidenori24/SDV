@@ -4,7 +4,7 @@ SDV の通信の基礎ライブラリ（[ADR-0005](../../docs/adr/ADR-0005-fota.
 
 | 機能 | 用途 |
 | ---- | ---- |
-| `sha256` | 破損検知、manifest の `sha256` |
+| `sha256` / `Sha256Context` | 破損検知、manifest の `sha256`。コンテキストAPIは分割受信データを固定メモリで検証 |
 | `ed25519_verify` | パッケージ・manifest の署名検証（ECU 側。持つのは公開鍵だけ）。検証してから解析する |
 | `ed25519_sign` / `ed25519_public_key`（feature `sign`、ホスト専用） | 署名ツール、テスト、デモ鍵。**ECU 向けのビルドには含めない** |
 | `hmac_sha256`、`ct_eq` | MAC、定数時間の比較 |

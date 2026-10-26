@@ -8,7 +8,7 @@
 use super::{BootControl, BootDecision, BootState, ImageStorage, Slot, TrialImage};
 use serde::Serialize;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 const RECORD_MAGIC: &[u8; 4] = b"SDVB";
@@ -22,6 +22,8 @@ pub enum Error {
     AlreadyInitialized,
     TrialAlreadyPending,
     NoTrialPending,
+    ImageWriteInProgress,
+    InvalidImageWrite,
     InvalidRecord,
 }
 
@@ -34,11 +36,25 @@ impl From<io::Error> for Error {
 /// Image payloads stored in versioned directories beneath the configured application-data root.
 pub struct FileSlotStorage {
     root: PathBuf,
+    pending: Option<PendingImage>,
+}
+
+struct PendingImage {
+    slot: Slot,
+    directory: PathBuf,
+    temporary: PathBuf,
+    destination: PathBuf,
+    file: File,
+    expected_size: u32,
+    written: u32,
 }
 
 impl FileSlotStorage {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            pending: None,
+        }
     }
 
     pub fn image_path(&self, slot: Slot) -> PathBuf {
@@ -52,26 +68,87 @@ impl FileSlotStorage {
 impl ImageStorage for FileSlotStorage {
     type Error = Error;
 
-    fn write_inactive_image(&mut self, active: Slot, image: &[u8]) -> Result<Slot, Self::Error> {
+    fn begin_inactive_image(&mut self, active: Slot, image_size: u32) -> Result<Slot, Self::Error> {
+        if self.pending.is_some() {
+            return Err(Error::ImageWriteInProgress);
+        }
+        if image_size == 0 {
+            return Err(Error::InvalidImageWrite);
+        }
         let slot = active.other();
         let directory = self.root.join("slots").join(slot_name(slot));
         fs::create_dir_all(&directory)?;
         let temporary = directory.join("sdv-image.tmp");
         let destination = directory.join(IMAGE_FILE);
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .create(true)
             .truncate(true)
             .write(true)
             .open(&temporary)?;
-        file.write_all(image)?;
-        file.sync_all()?;
-        fs::rename(&temporary, &destination)?;
-        sync_directory(&directory)?;
+        self.pending = Some(PendingImage {
+            slot,
+            directory,
+            temporary,
+            destination,
+            file,
+            expected_size: image_size,
+            written: 0,
+        });
         Ok(slot)
     }
 
-    fn read_image(&self, slot: Slot) -> Result<Vec<u8>, Self::Error> {
-        Ok(fs::read(self.image_path(slot))?)
+    fn write_image_chunk(
+        &mut self,
+        slot: Slot,
+        offset: u32,
+        chunk: &[u8],
+    ) -> Result<(), Self::Error> {
+        let pending = self.pending.as_mut().ok_or(Error::InvalidImageWrite)?;
+        let next = pending
+            .written
+            .checked_add(u32::try_from(chunk.len()).map_err(|_| Error::InvalidImageWrite)?)
+            .ok_or(Error::InvalidImageWrite)?;
+        if pending.slot != slot || offset != pending.written || next > pending.expected_size {
+            return Err(Error::InvalidImageWrite);
+        }
+        pending.file.write_all(chunk)?;
+        pending.written = next;
+        Ok(())
+    }
+
+    fn finish_inactive_image(&mut self, slot: Slot) -> Result<(), Self::Error> {
+        let pending = self.pending.take().ok_or(Error::InvalidImageWrite)?;
+        if pending.slot != slot || pending.written != pending.expected_size {
+            self.pending = Some(pending);
+            return Err(Error::InvalidImageWrite);
+        }
+        pending.file.sync_all()?;
+        drop(pending.file);
+        fs::rename(&pending.temporary, &pending.destination)?;
+        sync_directory(&pending.directory)?;
+        Ok(())
+    }
+
+    fn abort_inactive_image(&mut self, slot: Slot) {
+        if let Some(pending) = self.pending.take() {
+            if pending.slot == slot {
+                drop(pending.file);
+                let _ = fs::remove_file(pending.temporary);
+            } else {
+                self.pending = Some(pending);
+            }
+        }
+    }
+
+    fn read_image_chunk(
+        &self,
+        slot: Slot,
+        offset: u32,
+        buffer: &mut [u8],
+    ) -> Result<usize, Self::Error> {
+        let mut file = File::open(self.image_path(slot))?;
+        file.seek(SeekFrom::Start(u64::from(offset)))?;
+        Ok(file.read(buffer)?)
     }
 }
 

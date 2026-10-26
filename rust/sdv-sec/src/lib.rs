@@ -26,9 +26,34 @@ pub const ED25519_SIGNATURE_LEN: usize = 64;
 /// Length of the truncated frame MAC (64 bit, as commonly used for CAN-class links).
 pub const FRAME_MAC_LEN: usize = 8;
 
+/// Incremental SHA-256 state for bounded-memory image verification.
+pub struct Sha256Context(Sha256);
+
+impl Sha256Context {
+    pub fn new() -> Self {
+        Self(Sha256::new())
+    }
+
+    pub fn update(&mut self, data: &[u8]) {
+        self.0.update(data);
+    }
+
+    pub fn finalize(self) -> [u8; SHA256_LEN] {
+        self.0.finalize().into()
+    }
+}
+
+impl Default for Sha256Context {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// SHA-256 of `data`.
 pub fn sha256(data: &[u8]) -> [u8; SHA256_LEN] {
-    Sha256::digest(data).into()
+    let mut context = Sha256Context::new();
+    context.update(data);
+    context.finalize()
 }
 
 /// HMAC-SHA256. Any key length is accepted (RFC 2104).

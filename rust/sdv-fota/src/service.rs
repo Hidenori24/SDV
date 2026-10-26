@@ -5,7 +5,9 @@ use crate::{
     BootControl, HealthMonitor, ImageStorage, Slot, TrialImage, TrustKey, ValidatedPackage,
     ValidationContext, ValidationError,
 };
-use sdv_sec::sha256;
+use sdv_sec::Sha256Context;
+
+const IMAGE_IO_CHUNK_BYTES: usize = 1024;
 
 pub struct FotaInstaller<S, B> {
     pub storage: S,
@@ -19,6 +21,7 @@ pub enum InstallError<StorageError, BootError> {
     Storage(StorageError),
     BootControl(BootError),
     TrialAlreadyPending,
+    ImageTooLarge,
     Downgrade,
     SecurityVersionRollback,
     ReadbackMismatch,
@@ -63,17 +66,42 @@ impl<S: ImageStorage, B: BootControl> FotaInstaller<S, B> {
         if security_version < state.highest_security_version {
             return Err(InstallError::SecurityVersionRollback);
         }
+        let image_size =
+            u32::try_from(package.payload().len()).map_err(|_| InstallError::ImageTooLarge)?;
         let slot = self
             .storage
-            .write_inactive_image(state.active, package.payload())
+            .begin_inactive_image(state.active, image_size)
             .map_err(InstallError::Storage)?;
-        let readback = self
-            .storage
-            .read_image(slot)
-            .map_err(InstallError::Storage)?;
+        let mut offset = 0u32;
+        for chunk in package.payload().chunks(IMAGE_IO_CHUNK_BYTES) {
+            if let Err(error) = self.storage.write_image_chunk(slot, offset, chunk) {
+                self.storage.abort_inactive_image(slot);
+                return Err(InstallError::Storage(error));
+            }
+            offset += chunk.len() as u32;
+        }
+        if let Err(error) = self.storage.finish_inactive_image(slot) {
+            self.storage.abort_inactive_image(slot);
+            return Err(InstallError::Storage(error));
+        }
         let expected =
             decode_sha256(&manifest.image.sha256).ok_or(InstallError::ReadbackMismatch)?;
-        if readback.len() != package.payload().len() || sha256(&readback) != expected {
+        let mut digest = Sha256Context::new();
+        let mut readback = [0u8; IMAGE_IO_CHUNK_BYTES];
+        let mut offset = 0u32;
+        while offset < image_size {
+            let requested = (image_size - offset).min(IMAGE_IO_CHUNK_BYTES as u32) as usize;
+            let read = self
+                .storage
+                .read_image_chunk(slot, offset, &mut readback[..requested])
+                .map_err(InstallError::Storage)?;
+            if read == 0 || read > requested {
+                return Err(InstallError::ReadbackMismatch);
+            }
+            digest.update(&readback[..read]);
+            offset += read as u32;
+        }
+        if digest.finalize() != expected {
             return Err(InstallError::ReadbackMismatch);
         }
         self.boot_control

@@ -33,10 +33,20 @@ fn linux_backend_stages_image_and_commits_trial() {
     boot.initialize(Slot::A, "1.0.0".into(), 1).unwrap();
 
     let slot = images
-        .write_inactive_image(Slot::A, b"candidate image")
+        .begin_inactive_image(Slot::A, b"candidate image".len() as u32)
         .unwrap();
     assert_eq!(slot, Slot::B);
-    assert_eq!(images.read_image(Slot::B).unwrap(), b"candidate image");
+    images.write_image_chunk(slot, 0, b"candidate").unwrap();
+    images.write_image_chunk(slot, 9, b" image").unwrap();
+    images.finish_inactive_image(slot).unwrap();
+    let mut readback = [0u8; 8];
+    let first = images.read_image_chunk(Slot::B, 0, &mut readback).unwrap();
+    let mut full_image = readback[..first].to_vec();
+    let second = images
+        .read_image_chunk(Slot::B, first as u32, &mut readback)
+        .unwrap();
+    full_image.extend_from_slice(&readback[..second]);
+    assert_eq!(full_image, b"candidate image");
     boot.schedule_trial(TrialImage {
         slot,
         version: "1.1.0".into(),
