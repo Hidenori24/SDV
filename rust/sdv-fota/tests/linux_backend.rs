@@ -8,6 +8,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Barrier};
 
 static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
 const SIGNING_SEED: [u8; 32] = [7; 32];
@@ -40,6 +41,52 @@ fn https_ingress_rejects_plain_http_urls() {
     assert!(matches!(
         HttpsPackageSource::open("http://updates.example.test/update.sdvf"),
         Err(sdv_fota::linux::Error::InvalidHttpsUrl)
+    ));
+}
+
+#[test]
+fn concurrent_trial_scheduling_keeps_one_consistent_boot_record() {
+    let root = TempRoot::new();
+    FileBootControl::new(&root.0)
+        .initialize(Slot::A, "1.0.0", 1)
+        .unwrap();
+    let gate = Arc::new(Barrier::new(3));
+    let workers: Vec<_> = ["1.1.0", "1.2.0"]
+        .into_iter()
+        .map(|version| {
+            let root = root.0.clone();
+            let gate = Arc::clone(&gate);
+            std::thread::spawn(move || {
+                let mut boot = FileBootControl::new(root);
+                gate.wait();
+                boot.schedule_trial(TrialImage {
+                    slot: Slot::B,
+                    version: fixed_version(version),
+                    security_version: 2,
+                    boots_left: 3,
+                    trial_window_ms: 5000,
+                })
+            })
+        })
+        .collect();
+    gate.wait();
+    let results: Vec<_> = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap())
+        .collect();
+
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(result, Err(sdv_fota::linux::Error::TrialAlreadyPending)))
+            .count(),
+        1
+    );
+    let state = FileBootControl::new(&root.0).state().unwrap();
+    assert!(matches!(
+        state.trial.unwrap().version.as_str(),
+        "1.1.0" | "1.2.0"
     ));
 }
 

@@ -22,6 +22,7 @@ const MAX_BOOT_RECORD_BYTES: usize = 4096;
 const IMAGE_FILE: &str = "sdv-image.bin";
 const LOCK_EX: i32 = 2;
 const LOCK_NB: i32 = 4;
+const LOCK_UN: i32 = 8;
 
 extern "C" {
     fn flock(fd: i32, operation: i32) -> i32;
@@ -174,6 +175,31 @@ struct PendingImage {
     file: File,
     expected_size: u32,
     written: u32,
+}
+
+/// Serializes read-modify-write boot metadata transitions across installer and launcher processes.
+struct BootRecordLock(File);
+
+impl BootRecordLock {
+    fn acquire(root: &Path) -> io::Result<Self> {
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(root.join(".fota-bootctl.lock"))?;
+        // SAFETY: this is a valid open file descriptor; flock is released when the guard drops.
+        if unsafe { flock(file.as_raw_fd(), LOCK_EX) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self(file))
+    }
+}
+
+impl Drop for BootRecordLock {
+    fn drop(&mut self) {
+        // SAFETY: the descriptor remains open until after this Drop implementation returns.
+        let _ = unsafe { flock(self.0.as_raw_fd(), LOCK_UN) };
+    }
 }
 
 impl FileSlotStorage {
@@ -488,6 +514,7 @@ impl FileBootControl {
         highest_security_version: u64,
     ) -> Result<(), Error> {
         fs::create_dir_all(&self.root)?;
+        let _lock = BootRecordLock::acquire(&self.root)?;
         if self.root.join("bootctl.a").exists() || self.root.join("bootctl.b").exists() {
             return Err(Error::AlreadyInitialized);
         }
@@ -544,6 +571,7 @@ impl BootControl for FileBootControl {
     }
 
     fn schedule_trial(&mut self, trial: TrialImage) -> Result<(), Self::Error> {
+        let _lock = BootRecordLock::acquire(&self.root)?;
         let (sequence, mut state) = self.load()?;
         if state.trial.is_some() {
             return Err(Error::TrialAlreadyPending);
@@ -556,6 +584,7 @@ impl BootControl for FileBootControl {
     }
 
     fn select_for_boot(&mut self) -> Result<BootDecision, Self::Error> {
+        let _lock = BootRecordLock::acquire(&self.root)?;
         let (sequence, mut state) = self.load()?;
         let Some(mut trial) = state.trial else {
             return Ok(BootDecision {
@@ -579,6 +608,7 @@ impl BootControl for FileBootControl {
     }
 
     fn commit_trial(&mut self) -> Result<(), Self::Error> {
+        let _lock = BootRecordLock::acquire(&self.root)?;
         let (sequence, mut state) = self.load()?;
         let trial = state.trial.take().ok_or(Error::NoTrialPending)?;
         state.active = trial.slot;
@@ -588,6 +618,7 @@ impl BootControl for FileBootControl {
     }
 
     fn rollback_trial(&mut self) -> Result<(), Self::Error> {
+        let _lock = BootRecordLock::acquire(&self.root)?;
         let (sequence, mut state) = self.load()?;
         if state.trial.take().is_none() {
             return Err(Error::NoTrialPending);
