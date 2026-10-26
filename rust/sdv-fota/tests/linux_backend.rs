@@ -123,6 +123,28 @@ fn corrupt_newest_boot_record_falls_back_to_previous_record() {
 }
 
 #[test]
+fn oversized_boot_record_is_ignored_in_favor_of_valid_copy() {
+    let root = TempRoot::new();
+    let mut boot = FileBootControl::new(&root.0);
+    boot.initialize(Slot::A, "1.0.0".into(), 1).unwrap();
+    boot.schedule_trial(TrialImage {
+        slot: Slot::B,
+        version: "1.1.0".into(),
+        security_version: 2,
+        boots_left: 2,
+        trial_window_ms: 5_000,
+    })
+    .unwrap();
+    fs::write(root.0.join("bootctl.a"), vec![0u8; 4097]).unwrap();
+
+    let state = boot.state().unwrap();
+
+    assert_eq!(state.active, Slot::A);
+    assert_eq!(state.active_version, "1.0.0");
+    assert_eq!(state.trial.unwrap().slot, Slot::B);
+}
+
+#[test]
 fn linux_launcher_commits_trial_after_health_command_succeeds() {
     let root = TempRoot::new();
     let mut boot = FileBootControl::new(&root.0);

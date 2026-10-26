@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 const RECORD_MAGIC: &[u8; 4] = b"SDVB";
 const RECORD_HEADER_BYTES: usize = 16;
+const MAX_BOOT_RECORD_BYTES: usize = 4096;
 const IMAGE_FILE: &str = "sdv-image.bin";
 
 #[derive(Debug)]
@@ -482,11 +483,24 @@ fn encode_record(sequence: u64, state: &impl Serialize) -> Result<Vec<u8>, Error
     bytes.extend_from_slice(&body);
     let checksum = crc32(&bytes[4..]);
     bytes.extend_from_slice(&checksum.to_be_bytes());
+    if bytes.len() > MAX_BOOT_RECORD_BYTES {
+        return Err(Error::InvalidRecord);
+    }
     Ok(bytes)
 }
 
 fn read_record(path: &Path) -> Option<(u64, BootState)> {
-    let bytes = fs::read(path).ok()?;
+    let mut file = File::open(path).ok()?;
+    let size = usize::try_from(file.metadata().ok()?.len()).ok()?;
+    if !(RECORD_HEADER_BYTES + 4..=MAX_BOOT_RECORD_BYTES).contains(&size) {
+        return None;
+    }
+    let mut bytes = vec![0u8; size];
+    file.read_exact(&mut bytes).ok()?;
+    let mut trailing = [0u8; 1];
+    if file.read(&mut trailing).ok()? != 0 {
+        return None;
+    }
     if bytes.len() < RECORD_HEADER_BYTES + 4 || &bytes[..4] != RECORD_MAGIC {
         return None;
     }
