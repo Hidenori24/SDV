@@ -310,9 +310,20 @@ fn signing_and_install_commands_complete_a_host_update() {
         "{}",
         String::from_utf8_lossy(&installed.stderr)
     );
-    assert_eq!(
-        fs::read(FileSlotStorage::new(&root.0).image_path(Slot::B)).unwrap(),
-        payload
-    );
+    let image_path = FileSlotStorage::new(&root.0).image_path(Slot::B);
+    assert_eq!(fs::read(&image_path).unwrap(), payload);
     assert_eq!(boot.state().unwrap().trial.unwrap().version, "1.1.0");
+    let health = root.0.join("health-check");
+    write_executable(
+        &health,
+        "#!/bin/sh\ntest \"$SDV_TRIAL_SLOT\" = b && test -x \"$SDV_IMAGE_PATH\"\n",
+    );
+
+    let status = run_selected_image(&root.0, &health, &[]).unwrap();
+
+    assert!(status.success());
+    let state = boot.state().unwrap();
+    assert_eq!(state.active, Slot::B);
+    assert_eq!(state.active_version, "1.1.0");
+    assert!(state.trial.is_none());
 }
