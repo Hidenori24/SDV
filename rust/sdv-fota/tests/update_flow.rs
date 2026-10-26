@@ -1,7 +1,7 @@
 use sdv_fota::{
     encode_package, parse_package, resolve_trial, validate_package, BootControl, BootDecision,
-    BootState, Ecu, FotaInstaller, HealthMonitor, ImageStorage, InstallError, Slot, TrialImage,
-    TrustKey, ValidationContext, ValidationError,
+    BootState, Ecu, FotaInstaller, HealthMonitor, ImageStorage, InstallError, PackageSource, Slot,
+    TrialImage, TrustKey, ValidationContext, ValidationError,
 };
 use sdv_sec::{ed25519_public_key, ed25519_sign, sha256};
 use std::convert::Infallible;
@@ -184,6 +184,43 @@ impl HealthMonitor for FixedHealth {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SourceFailure {
+    UnexpectedEnd,
+    TrailingData,
+}
+
+struct SlicePackageSource<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl PackageSource for SlicePackageSource<'_> {
+    type Error = SourceFailure;
+
+    fn read_exact(&mut self, buffer: &mut [u8]) -> Result<(), Self::Error> {
+        let end = self
+            .offset
+            .checked_add(buffer.len())
+            .ok_or(SourceFailure::UnexpectedEnd)?;
+        let bytes = self
+            .bytes
+            .get(self.offset..end)
+            .ok_or(SourceFailure::UnexpectedEnd)?;
+        buffer.copy_from_slice(bytes);
+        self.offset = end;
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Result<(), Self::Error> {
+        if self.offset == self.bytes.len() {
+            Ok(())
+        } else {
+            Err(SourceFailure::TrailingData)
+        }
+    }
+}
+
 fn slot_index(slot: Slot) -> usize {
     match slot {
         Slot::A => 0,
@@ -271,6 +308,150 @@ fn installer_writes_and_verifies_image_across_multiple_flash_blocks() {
     assert_eq!(slot, Slot::B);
     assert_eq!(installer.storage.images[1], payload);
     assert!(installer.boot_control.state.trial.is_some());
+}
+
+#[test]
+fn streamed_package_payload_is_written_without_a_whole_image_readback() {
+    let payload = vec![0x3C; 2501];
+    let bytes = signed_package_for_payload("1.1.0", 2, &payload);
+    let package = parse_package(&bytes).unwrap();
+    let public_key = ed25519_public_key(&SEED);
+    let trust_key = TrustKey {
+        key_id: KEY_ID,
+        public_key: &public_key,
+    };
+    let mut source = SlicePackageSource {
+        bytes: package.payload,
+        offset: 0,
+    };
+    let mut installer = FotaInstaller {
+        storage: MemoryImageStorage::default(),
+        boot_control: MemoryBootControl::current(),
+        trial_boots: 2,
+    };
+
+    let slot = installer
+        .stage_signed_manifest_from_source(
+            package.key_id,
+            package.signature,
+            package.manifest_bytes,
+            package.payload.len() as u64,
+            &mut source,
+            &[trust_key],
+            &validation_context(),
+        )
+        .unwrap();
+
+    assert_eq!(slot, Slot::B);
+    assert_eq!(installer.storage.images[1], payload);
+    assert!(installer.boot_control.state.trial.is_some());
+}
+
+#[test]
+fn streamed_payload_hash_failure_aborts_inactive_image() {
+    let mut bytes = signed_package("1.1.0", 2);
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0x01;
+    let package = parse_package(&bytes).unwrap();
+    let public_key = ed25519_public_key(&SEED);
+    let trust_key = TrustKey {
+        key_id: KEY_ID,
+        public_key: &public_key,
+    };
+    let mut source = SlicePackageSource {
+        bytes: package.payload,
+        offset: 0,
+    };
+    let mut installer = FotaInstaller {
+        storage: MemoryImageStorage::default(),
+        boot_control: MemoryBootControl::current(),
+        trial_boots: 2,
+    };
+
+    let result = installer.stage_signed_manifest_from_source(
+        package.key_id,
+        package.signature,
+        package.manifest_bytes,
+        package.payload.len() as u64,
+        &mut source,
+        &[trust_key],
+        &validation_context(),
+    );
+
+    assert!(matches!(
+        result,
+        Err(sdv_fota::StreamInstallError::Validation(
+            ValidationError::PayloadHashMismatch
+        ))
+    ));
+    assert!(installer.storage.images.iter().all(Vec::is_empty));
+    assert!(installer.storage.pending.is_none());
+    assert!(installer.boot_control.state.trial.is_none());
+}
+
+#[test]
+fn streamed_payload_rejects_truncation_and_trailing_bytes() {
+    let payload = vec![0x5A; 1500];
+    let bytes = signed_package_for_payload("1.1.0", 2, &payload);
+    let package = parse_package(&bytes).unwrap();
+    let public_key = ed25519_public_key(&SEED);
+    let trust_key = TrustKey {
+        key_id: KEY_ID,
+        public_key: &public_key,
+    };
+
+    let mut truncated = SlicePackageSource {
+        bytes: &package.payload[..package.payload.len() - 1],
+        offset: 0,
+    };
+    let mut installer = FotaInstaller {
+        storage: MemoryImageStorage::default(),
+        boot_control: MemoryBootControl::current(),
+        trial_boots: 2,
+    };
+    let truncated_result = installer.stage_signed_manifest_from_source(
+        package.key_id,
+        package.signature,
+        package.manifest_bytes,
+        package.payload.len() as u64,
+        &mut truncated,
+        &[trust_key],
+        &validation_context(),
+    );
+    assert!(matches!(
+        truncated_result,
+        Err(sdv_fota::StreamInstallError::Source(
+            SourceFailure::UnexpectedEnd
+        ))
+    ));
+    assert!(installer.storage.images.iter().all(Vec::is_empty));
+
+    let mut with_trailing_byte = package.payload.to_vec();
+    with_trailing_byte.push(0xFF);
+    let mut trailing = SlicePackageSource {
+        bytes: &with_trailing_byte,
+        offset: 0,
+    };
+    let trailing_result = installer.stage_signed_manifest_from_source(
+        package.key_id,
+        package.signature,
+        package.manifest_bytes,
+        package.payload.len() as u64,
+        &mut trailing,
+        &[TrustKey {
+            key_id: KEY_ID,
+            public_key: &public_key,
+        }],
+        &validation_context(),
+    );
+    assert!(matches!(
+        trailing_result,
+        Err(sdv_fota::StreamInstallError::Source(
+            SourceFailure::TrailingData
+        ))
+    ));
+    assert!(installer.storage.images.iter().all(Vec::is_empty));
+    assert!(installer.boot_control.state.trial.is_none());
 }
 
 #[test]

@@ -17,11 +17,13 @@ pub use model::{
     TrustKey, UpdatePolicy, ValidatedPackage, ValidationContext, ValidationError,
 };
 pub use package::{
-    encode_package, parse_package, validate_package, MANIFEST_SCHEMA, MAX_KEY_ID_BYTES,
-    MAX_MANIFEST_BYTES, SIGNAL_IF_VERSION,
+    encode_package, parse_package, validate_package, validate_signed_manifest, MANIFEST_SCHEMA,
+    MAX_KEY_ID_BYTES, MAX_MANIFEST_BYTES, SIGNAL_IF_VERSION,
 };
 pub use ports::{BootControl, HealthMonitor, ImageStorage, PackageSource};
-pub use service::{resolve_trial, FotaInstaller, InstallError, TrialError, TrialResolution};
+pub use service::{
+    resolve_trial, FotaInstaller, InstallError, StreamInstallError, TrialError, TrialResolution,
+};
 
 #[cfg(all(feature = "std", target_os = "linux"))]
 pub mod linux;

@@ -4,7 +4,6 @@
 //! DCM/Csm/NvM/MemIf/Fls and bootloader services; the Linux adapter remains the Pi 5 host backend.
 
 use crate::{BootDecision, BootState, Slot, TrialImage};
-use alloc::vec::Vec;
 /// Bounded-memory image partition port.
 ///
 /// A Classic integration must implement this contract through the selected memory stack
@@ -62,12 +61,13 @@ pub trait HealthMonitor {
     fn check(&mut self, slot: Slot, trial_window_ms: u32) -> Result<bool, Self::Error>;
 }
 
-/// Acquires one complete package from a host transport or a Classic diagnostic integration.
+/// Streams payload bytes after the signed manifest has been received and validated.
 ///
-/// A DCM-backed implementation owns session/download framing and forwards validated byte ranges
-/// to the FOTA service. This whole-package convenience API is currently host-oriented.
+/// A DCM-backed implementation owns session/download framing. `read_exact` supplies only the
+/// declared payload bytes, and `finish` confirms transport completion with no trailing bytes.
 pub trait PackageSource {
     type Error;
 
-    fn receive_package(&mut self, max_bytes: usize) -> Result<Vec<u8>, Self::Error>;
+    fn read_exact(&mut self, buffer: &mut [u8]) -> Result<(), Self::Error>;
+    fn finish(&mut self) -> Result<(), Self::Error>;
 }
