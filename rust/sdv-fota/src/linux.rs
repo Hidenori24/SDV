@@ -6,6 +6,7 @@
 //! `commit_trial` only after the SDV service passes its health checks.
 
 use super::{BootControl, BootDecision, BootState, ImageStorage, Slot, TrialImage, VersionString};
+use crate::package::decode_sha256;
 use serde::Serialize;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -22,6 +23,8 @@ const RECORD_MAGIC: &[u8; 4] = b"SDVB";
 const RECORD_HEADER_BYTES: usize = 16;
 const MAX_BOOT_RECORD_BYTES: usize = 4096;
 const IMAGE_FILE: &str = "sdv-image.bin";
+const IMAGE_DIGEST_FILE: &str = "sdv-image.sha256";
+const IMAGE_DIGEST_HEX_BYTES: usize = 64;
 const LOCK_EX: i32 = 2;
 const LOCK_NB: i32 = 4;
 const LOCK_UN: i32 = 8;
@@ -57,6 +60,7 @@ pub enum Error {
     DownloadFailed,
     InvalidRunIdentity,
     UnsafeStatePath,
+    SlotIsNotActive,
 }
 
 impl From<io::Error> for Error {
@@ -188,6 +192,7 @@ struct PendingImage {
     file: File,
     expected_size: u32,
     written: u32,
+    digest: sdv_sec::Sha256Context,
 }
 
 /// Serializes read-modify-write boot metadata transitions across installer and launcher processes.
@@ -252,6 +257,26 @@ impl FileSlotStorage {
         }
         Ok(())
     }
+
+    /// Record an integrity digest for an already provisioned executable image.
+    pub fn record_image_integrity(&self, slot: Slot) -> Result<(), Error> {
+        self.validate_executable_image(slot)?;
+        let image = open_slot_image(&self.root, slot)?;
+        let digest = hash_file(image)?;
+        write_image_digest(&self.root, slot, &digest)
+    }
+
+    /// Validate the executable image and compare it with the digest recorded at provisioning or
+    /// update time. This is required before the Linux launcher starts a slot.
+    pub fn verify_executable_image(&self, slot: Slot) -> Result<(), Error> {
+        self.validate_executable_image(slot)?;
+        let expected = read_image_digest(&self.root, slot)?;
+        let actual = hash_file(open_slot_image(&self.root, slot)?)?;
+        if actual != expected {
+            return Err(Error::InvalidBootImage);
+        }
+        Ok(())
+    }
 }
 
 impl ImageStorage for FileSlotStorage {
@@ -284,6 +309,7 @@ impl ImageStorage for FileSlotStorage {
             file,
             expected_size: image_size,
             written: 0,
+            digest: sdv_sec::Sha256Context::new(),
         });
         if let Some(lock) = new_lock {
             self.update_lock = Some(lock);
@@ -306,6 +332,7 @@ impl ImageStorage for FileSlotStorage {
             return Err(Error::InvalidImageWrite);
         }
         pending.file.write_all(chunk)?;
+        pending.digest.update(chunk);
         pending.written = next;
         Ok(())
     }
@@ -327,12 +354,14 @@ impl ImageStorage for FileSlotStorage {
             discard_temp_file(&pending.temporary);
             return Err(Error::Io(error));
         }
+        let digest = pending.digest.finalize();
         drop(pending.file);
         if let Err(error) = fs::rename(&pending.temporary, &pending.destination) {
             discard_temp_file(&pending.temporary);
             return Err(Error::Io(error));
         }
         sync_directory(&pending.directory)?;
+        write_image_digest_in_directory(&pending.directory, &digest)?;
         Ok(())
     }
 
@@ -357,7 +386,10 @@ impl ImageStorage for FileSlotStorage {
         buffer: &mut [u8],
     ) -> Result<usize, Self::Error> {
         validate_slot_image(&self.root, slot)?;
-        let mut file = File::open(self.image_path(slot))?;
+        let mut file = OpenOptions::new()
+            .read(true)
+            .custom_flags(O_NOFOLLOW)
+            .open(self.image_path(slot))?;
         file.seek(SeekFrom::Start(u64::from(offset)))?;
         Ok(file.read(buffer)?)
     }
@@ -470,7 +502,7 @@ fn run_selected_image_with_identity(
     let mut boot = FileBootControl::new(&root);
     let decision = boot.select_for_boot()?;
     let storage = FileSlotStorage::new(&root);
-    if let Err(error) = storage.validate_executable_image(decision.slot) {
+    if let Err(error) = storage.verify_executable_image(decision.slot) {
         if decision.trial {
             boot.rollback_trial()?;
         }
@@ -626,12 +658,64 @@ impl FileBootControl {
         active_version: &str,
         highest_security_version: u64,
     ) -> Result<(), Error> {
+        self.initialize_inner(None, active, active_version, highest_security_version)
+    }
+
+    /// Initialize boot metadata and the active image digest under one boot-record lock.
+    pub fn initialize_with_image(
+        &self,
+        storage: &FileSlotStorage,
+        active: Slot,
+        active_version: &str,
+        highest_security_version: u64,
+    ) -> Result<(), Error> {
+        if storage.root != self.root {
+            return Err(Error::UnsafeStatePath);
+        }
+        self.initialize_inner(
+            Some(storage),
+            active,
+            active_version,
+            highest_security_version,
+        )
+    }
+
+    /// Add an integrity record for an existing active image with no pending trial.
+    pub fn record_active_image_integrity(
+        &self,
+        storage: &FileSlotStorage,
+        slot: Slot,
+    ) -> Result<(), Error> {
+        if storage.root != self.root {
+            return Err(Error::UnsafeStatePath);
+        }
+        let _lock = BootRecordLock::acquire(&self.root)?;
+        let (_, state) = self.load()?;
+        if state.trial.is_some() {
+            return Err(Error::TrialAlreadyPending);
+        }
+        if state.active != slot {
+            return Err(Error::SlotIsNotActive);
+        }
+        storage.record_image_integrity(slot)
+    }
+
+    fn initialize_inner(
+        &self,
+        storage: Option<&FileSlotStorage>,
+        active: Slot,
+        active_version: &str,
+        highest_security_version: u64,
+    ) -> Result<(), Error> {
         ensure_secure_directory(&self.root, true)?;
         let _lock = BootRecordLock::acquire(&self.root)?;
         if path_entry_exists(&self.root.join("bootctl.a"))
             || path_entry_exists(&self.root.join("bootctl.b"))
         {
             return Err(Error::AlreadyInitialized);
+        }
+        if let Some(storage) = storage {
+            storage.record_image_integrity(active)?;
         }
         self.save(
             0,
@@ -824,6 +908,79 @@ fn validate_slot_image(root: &Path, slot: Slot) -> Result<(), Error> {
         return Err(Error::UnsafeStatePath);
     }
     Ok(())
+}
+
+fn open_slot_image(root: &Path, slot: Slot) -> Result<File, Error> {
+    validate_slot_image(root, slot)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW)
+        .open(root.join("slots").join(slot_name(slot)).join(IMAGE_FILE))?;
+    validate_owned_file(&file)?;
+    Ok(file)
+}
+
+fn hash_file(mut file: File) -> Result<[u8; 32], Error> {
+    let mut digest = sdv_sec::Sha256Context::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            return Ok(digest.finalize());
+        }
+        digest.update(&buffer[..read]);
+    }
+}
+
+fn write_image_digest(root: &Path, slot: Slot, digest: &[u8; 32]) -> Result<(), Error> {
+    ensure_secure_directory(root, false)?;
+    ensure_slot_directories(root, slot, false)?;
+    let directory = root.join("slots").join(slot_name(slot));
+    write_image_digest_in_directory(&directory, digest)
+}
+
+fn write_image_digest_in_directory(directory: &Path, digest: &[u8; 32]) -> Result<(), Error> {
+    let (temporary, mut file) = create_temporary_file(directory, "sdv-image-sha256")?;
+    let mut encoded = [0u8; IMAGE_DIGEST_HEX_BYTES];
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for (index, byte) in digest.iter().copied().enumerate() {
+        encoded[index * 2] = HEX[(byte >> 4) as usize];
+        encoded[index * 2 + 1] = HEX[(byte & 0x0f) as usize];
+    }
+    let write_result = file.write_all(&encoded).and_then(|()| file.sync_all());
+    drop(file);
+    if let Err(error) = write_result {
+        discard_temp_file(&temporary);
+        return Err(Error::Io(error));
+    }
+    let destination = directory.join(IMAGE_DIGEST_FILE);
+    if let Err(error) = fs::rename(&temporary, &destination) {
+        discard_temp_file(&temporary);
+        return Err(Error::Io(error));
+    }
+    sync_directory(directory)?;
+    Ok(())
+}
+
+fn read_image_digest(root: &Path, slot: Slot) -> Result<[u8; 32], Error> {
+    ensure_secure_directory(root, false)?;
+    ensure_slot_directories(root, slot, false)?;
+    let path = root
+        .join("slots")
+        .join(slot_name(slot))
+        .join(IMAGE_DIGEST_FILE);
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW)
+        .open(path)?;
+    validate_owned_file(&file)?;
+    if file.metadata()?.len() != IMAGE_DIGEST_HEX_BYTES as u64 {
+        return Err(Error::InvalidBootImage);
+    }
+    let mut encoded = [0u8; IMAGE_DIGEST_HEX_BYTES];
+    file.read_exact(&mut encoded)?;
+    let encoded = core::str::from_utf8(&encoded).map_err(|_| Error::InvalidBootImage)?;
+    decode_sha256(encoded).ok_or(Error::InvalidBootImage)
 }
 
 fn validate_owned_file(file: &File) -> io::Result<()> {

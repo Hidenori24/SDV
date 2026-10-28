@@ -16,12 +16,12 @@ header,main{max-width:900px;margin:auto;padding:18px}header{display:flex;justify
 <main>
   <section class="card">
     <span class="pill">開発プレビュー</span>
-    <p>署名済みアプリイメージをHTTPSまたはファイルから受け取り、署名と互換性を検証して非稼働スロットへ書き込みます。再起動後に試験起動し、ヘルスチェックに合格すれば確定、失敗すれば元のスロットへ戻ります。</p>
+    <p>署名済みアプリイメージをHTTPSまたはファイルから受け取り、署名と互換性を検証して非稼働スロットへ書き込みます。起動時には記録済みSHA-256と照合してから試験起動し、ヘルスチェックに合格すれば確定、失敗すれば元のスロットへ戻ります。</p>
     <p class="sub">このページは実装済みのPi 5/Linuxホスト経路を説明します。ブラウザ上のシミュレータ自体はFOTA更新しません。</p>
   </section>
   <section class="card">
     <h2>Pi 5への初期セットアップ</h2>
-    <p>リポジトリからFOTAランチャーとPiCar-X車両イメージをビルドします。署名ツールは別の保護されたリリース環境だけでビルドしてください。<code>sdv-fota init</code> は初期active slotに空でない通常の実行可能ファイルがあることを確認してから起動状態を記録します。</p>
+    <p>リポジトリからFOTAランチャーとPiCar-X車両イメージをビルドします。署名ツールは別の保護されたリリース環境だけでビルドしてください。<code>sdv-fota init</code> は初期active slotに空でない通常の実行可能ファイルがあることを確認し、そのSHA-256を記録してから起動状態を初期化します。</p>
 <pre><code>cargo build --release --manifest-path rust/sdv-fota/Cargo.toml \
   --bin sdv-fota --bin sdv-fota-launcher
 sudo install -m 0755 rust/sdv-fota/target/release/sdv-fota /usr/bin/
@@ -44,6 +44,8 @@ printf 'SDV_FOTA_APP_UID=%s\nSDV_FOTA_APP_GID=%s\n' "$(id -u sdv-app)" "$(id -g 
 sudo chmod 0644 /etc/default/sdv-fota-launcher</code></pre>
     <p>設定ファイルの場所をlauncherの環境へ追加します。</p>
 <pre><code>printf 'SDV_PICARX_CONFIG=/etc/sdv-picarx/vehicle.json' | sudo tee -a /etc/default/sdv-fota-launcher</code></pre>
+    <p>以前の試作版から移行する場合は、旧launcherが稼働している間にactive imageを承認済みリリースと照合し、<code>status</code>で確認したactive slotのdigestを登録します。これは現在のファイルをハッシュする操作なので、リリース由来の確認にはなりません。trial中は登録できません。</p>
+<pre><code>sudo sdv-fota record-active-integrity --state-root /var/lib/sdv-fota --slot a</code></pre>
     <p class="note">例の設定は前進モーター出力をゼロにしています。GPIO chip pathとモーター・操舵校正を実車で確認するまで、forward powerを有効にしないでください。</p>
   </section>
   <section class="card">
