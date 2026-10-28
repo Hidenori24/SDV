@@ -5,8 +5,10 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+#[cfg(feature = "std")]
 extern crate alloc;
 
+mod manifest_parser;
 mod model;
 mod package;
 mod ports;
@@ -15,11 +17,13 @@ mod service;
 pub use model::{
     BootDecision, BootState, Ecu, FixedString, FixedU32List, Image, Manifest, Package,
     Requirements, Slot, TrialImage, TrustKey, UpdatePolicy, ValidatedPackage, ValidationContext,
-    ValidationError, MAX_CONFIG_SCHEMA_VERSIONS,
+    ValidationError, VersionString, DEFAULT_TRIAL_WINDOW_MS, MAX_CONFIG_SCHEMA_VERSIONS,
 };
+#[cfg(feature = "std")]
+pub use package::encode_package;
 pub use package::{
-    encode_package, parse_package, validate_package, validate_signed_manifest, MANIFEST_SCHEMA,
-    MAX_KEY_ID_BYTES, MAX_MANIFEST_BYTES, SIGNAL_IF_VERSION,
+    parse_package, validate_package, validate_signed_manifest, MANIFEST_SCHEMA, MAX_KEY_ID_BYTES,
+    MAX_MANIFEST_BYTES, SIGNAL_IF_VERSION,
 };
 pub use ports::{BootControl, HealthMonitor, ImageStorage, PackageSource};
 pub use service::{

@@ -59,7 +59,7 @@ FOTA状態機械はサービス要求を発行し、Classic統合側が選定BSW
 | 起動バンク・trial/commit/rollback | Bootloader/OEM Boot Manager | 起動メタデータ形式、試行回数、復帰条件、確定権限 |
 | 更新許可・安全状態 | VCU/SafetySupervisorとの契約 | 車両停止、EStop/Degraded、同時更新禁止 |
 
-Flash write/readbackは固定長block単位になり、readbackは増分SHA-256で処理する。SDVF受信は呼び出し側のmanifest領域を使い、イメージ全体をメモリに保持しない。マニフェストのJSON文字列とconfig schema一覧も固定容量型で解析し、入力は64 KiB、schema一覧は16要素までに制限する。ホスト向けboot metadataとLinux adapterには引き続き `alloc` があるため、Classic統合では診断/Bootloader用状態型を含め採用ECUの静的メモリ配置へbindする。`no_std` でビルドできることだけでは Classic 向け成立を意味しない。
+Flash write/readbackは固定長block単位になり、readbackは増分SHA-256で処理する。SDVF受信は呼び出し側のmanifest領域を使い、イメージ全体をメモリに保持しない。マニフェストは固定容量JSON parserで解析し、入力は64 KiB、schema一覧は16要素までに制限する。共有FOTA状態、manifest、ポート、検証処理は `no_std` かつallocatorなしでビルドできる。Linux adapterとホスト向けpackage encoderは別featureで `std`/`alloc` を使う。Pi 5ホスト向けにはsystemdからスロット選択、起動、health check、trial commit/rollbackを実行するlauncherを用意する。`no_std` でビルドできることだけでは Classic 向け成立を意味しない。
 
 ## Raspberry Pi 5 の位置づけ
 
@@ -81,7 +81,7 @@ Pi 5上のLinux実装は、FOTA状態機械とインターフェースを開発�
 
 1. **Classic境界を固定**: SW-C/RTE/BSW/ECU Abstraction/MCAL/Bootloader間の責務と型・エラー契約を文書化する。
 2. **FOTA内部を分離**: 状態機械・互換性ポリシーと、Crypto/NvM/Flash/Bootloader接続を別モジュールにする。Linux backendはホスト試験用として維持する。
-3. **固定メモリ化**: ECU側パスから `alloc` と可変長JSON依存を除き、サイズ上限とバッファ所有権を静的に定義する。
+3. **固定メモリ化**: 共有FOTA状態機械はallocatorなしで動き、SDVF parserはcaller bufferとinline値のみを使う。Classic adapter側も生成設定とBSW契約の範囲で静的メモリを割り当てる。
 4. **Classic BSW adapter**: 採用製品のC API/生成コードとの結合層を作る。製品のAPI/MCALが決まる前に仮のAPIをAUTOSAR標準として固定しない。
 5. **Bootloader契約と実機検証**: 書込み範囲、A/B bank、trial boot、電源断復旧、Commit/rollbackをターゲットで検証する。
 

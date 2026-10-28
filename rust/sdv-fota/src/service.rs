@@ -8,7 +8,6 @@ use crate::{
     BootControl, HealthMonitor, ImageStorage, PackageSource, Slot, TrialImage, TrustKey,
     ValidatedPackage, ValidationContext, ValidationError,
 };
-use alloc::string::ToString;
 use sdv_sec::Sha256Context;
 
 const IMAGE_IO_CHUNK_BYTES: usize = 1024;
@@ -83,6 +82,7 @@ impl<S: ImageStorage, B: BootControl> FotaInstaller<S, B> {
             return Err(InstallError::Downgrade);
         }
         let security_version = manifest.image.security_version;
+        let trial_window_ms = manifest.policy.trial_ms;
         if security_version < state.highest_security_version {
             return Err(InstallError::SecurityVersionRollback);
         }
@@ -127,9 +127,10 @@ impl<S: ImageStorage, B: BootControl> FotaInstaller<S, B> {
         self.boot_control
             .schedule_trial(TrialImage {
                 slot,
-                version: manifest.image.version.as_str().to_string(),
+                version: manifest.image.version,
                 security_version,
                 boots_left: self.trial_boots.max(1),
+                trial_window_ms,
             })
             .map_err(InstallError::BootControl)?;
         Ok(slot)
@@ -176,6 +177,7 @@ impl<S: ImageStorage, B: BootControl> FotaInstaller<S, B> {
             return Err(StreamInstallError::Downgrade);
         }
         let security_version = manifest.image.security_version;
+        let trial_window_ms = manifest.policy.trial_ms;
         if security_version < state.highest_security_version {
             return Err(StreamInstallError::SecurityVersionRollback);
         }
@@ -244,9 +246,10 @@ impl<S: ImageStorage, B: BootControl> FotaInstaller<S, B> {
         self.boot_control
             .schedule_trial(TrialImage {
                 slot,
-                version: manifest.image.version.as_str().to_string(),
+                version: manifest.image.version,
                 security_version,
                 boots_left: self.trial_boots.max(1),
+                trial_window_ms,
             })
             .map_err(StreamInstallError::BootControl)?;
         Ok(slot)
