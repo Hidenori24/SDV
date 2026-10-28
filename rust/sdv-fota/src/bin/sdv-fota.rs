@@ -24,6 +24,7 @@ fn run(args: Vec<OsString>) -> Result<(), String> {
         Some("install") => install(command_args),
         Some("install-url") => install_url(command_args),
         Some("record-active-integrity") => record_active_integrity(command_args),
+        Some("rollback-trial") => rollback_trial(command_args),
         Some("status") => status(command_args),
         _ => Err(usage()),
     }
@@ -94,6 +95,21 @@ fn record_active_integrity(args: &[OsString]) -> Result<(), String> {
         "recorded active image integrity for slot {}",
         slot_name(slot)
     );
+    Ok(())
+}
+
+fn rollback_trial(args: &[OsString]) -> Result<(), String> {
+    let mut options = parse_named_options(args, &["--state-root"])?;
+    let root = PathBuf::from(required_option(&mut options, "--state-root")?);
+    FileBootControl::new(root)
+        .rollback_trial()
+        .map_err(|error| match error {
+            sdv_fota::linux::Error::NoTrialPending => {
+                "there is no pending trial to roll back".into()
+            }
+            error => format!("cannot roll back pending trial: {error:?}"),
+        })?;
+    println!("pending trial cleared; the active slot will run on the next launcher start");
     Ok(())
 }
 
@@ -363,7 +379,7 @@ fn slot_name(slot: Slot) -> &'static str {
 }
 
 fn usage() -> String {
-    "usage:\n  sdv-fota init --state-root <dir> --active-slot <a|b> --active-version <version> --security-version <n>\n  sdv-fota record-active-integrity --state-root <dir> --slot <a|b>\n  sdv-fota install --state-root <dir> --package <file> --target vehicle --config-schema <n> --signal-if-version <n> [--trial-boots <n>]\n  sdv-fota install-url --state-root <dir> --url <https-url> --target vehicle --config-schema <n> --signal-if-version <n> [--trial-boots <n>]\n  sdv-fota status --state-root <dir>".into()
+    "usage:\n  sdv-fota init --state-root <dir> --active-slot <a|b> --active-version <version> --security-version <n>\n  sdv-fota record-active-integrity --state-root <dir> --slot <a|b>\n  sdv-fota rollback-trial --state-root <dir>\n  sdv-fota install --state-root <dir> --package <file> --target vehicle --config-schema <n> --signal-if-version <n> [--trial-boots <n>]\n  sdv-fota install-url --state-root <dir> --url <https-url> --target vehicle --config-schema <n> --signal-if-version <n> [--trial-boots <n>]\n  sdv-fota status --state-root <dir>".into()
 }
 
 #[cfg(test)]

@@ -475,6 +475,43 @@ fn init_cli_accepts_named_provisioning_options() {
 }
 
 #[test]
+fn rollback_trial_cli_clears_pending_candidate_and_rejects_empty_rollback() {
+    let root = TempRoot::new();
+    let mut boot = FileBootControl::new(&root.0);
+    boot.initialize(Slot::A, "1.0.0", 1).unwrap();
+    boot.schedule_trial(TrialImage {
+        slot: Slot::B,
+        version: fixed_version("1.1.0"),
+        security_version: 2,
+        boots_left: 2,
+        trial_window_ms: 5_000,
+    })
+    .unwrap();
+
+    let rollback = || {
+        Command::new(env!("CARGO_BIN_EXE_sdv-fota"))
+            .args(["rollback-trial", "--state-root", root.0.to_str().unwrap()])
+            .output()
+            .unwrap()
+    };
+    let result = rollback();
+
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let state = boot.state().unwrap();
+    assert_eq!(state.active, Slot::A);
+    assert_eq!(state.active_version, "1.0.0");
+    assert!(state.trial.is_none());
+
+    let repeated = rollback();
+    assert!(!repeated.status.success());
+    assert!(String::from_utf8_lossy(&repeated.stderr).contains("no pending trial"));
+}
+
+#[test]
 fn record_active_integrity_only_updates_the_active_slot_without_a_trial() {
     let root = TempRoot::new();
     let mut boot = FileBootControl::new(&root.0);
