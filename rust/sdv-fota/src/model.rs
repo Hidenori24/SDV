@@ -241,6 +241,8 @@ pub enum Ecu {
     Engine,
     Brake,
     Steering,
+    /// The complete vehicle-control application hosted on the Raspberry Pi.
+    Vehicle,
 }
 
 impl Ecu {
@@ -249,6 +251,7 @@ impl Ecu {
             Self::Engine => "EngineSWC",
             Self::Brake => "BrakeSWC",
             Self::Steering => "SteeringSWC",
+            Self::Vehicle => "VehicleControlApp",
         }
     }
 }

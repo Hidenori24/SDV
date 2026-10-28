@@ -5,19 +5,19 @@
 
 use crate::Ecu;
 
-pub const MAX_CAMPAIGN_ECUS: usize = 3;
-pub const CAMPAIGN_CHECKPOINT_SIZE: usize = 16;
+pub const MAX_CAMPAIGN_ECUS: usize = 4;
+pub const CAMPAIGN_CHECKPOINT_SIZE: usize = 17;
 
 const CHECKPOINT_MAGIC: [u8; 4] = *b"SDVC";
-const CHECKPOINT_VERSION: u8 = 1;
+const CHECKPOINT_VERSION: u8 = 2;
 const CHECKPOINT_MAGIC_OFFSET: usize = 0;
 const CHECKPOINT_VERSION_OFFSET: usize = 4;
 const CHECKPOINT_TARGETS_OFFSET: usize = 5;
-const CHECKPOINT_TARGET_COUNT_OFFSET: usize = 8;
-const CHECKPOINT_TARGET_INDEX_OFFSET: usize = 9;
-const CHECKPOINT_PHASE_OFFSET: usize = 10;
-const CHECKPOINT_STATE_OFFSET: usize = 11;
-const CHECKPOINT_CRC_OFFSET: usize = 12;
+const CHECKPOINT_TARGET_COUNT_OFFSET: usize = 9;
+const CHECKPOINT_TARGET_INDEX_OFFSET: usize = 10;
+const CHECKPOINT_PHASE_OFFSET: usize = 11;
+const CHECKPOINT_STATE_OFFSET: usize = 12;
+const CHECKPOINT_CRC_OFFSET: usize = 13;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VehicleSafety {
@@ -148,6 +148,7 @@ const EMPTY_ECU_ID: u8 = 0xff;
 const ECU_ID_ENGINE: u8 = 0;
 const ECU_ID_BRAKE: u8 = 1;
 const ECU_ID_STEERING: u8 = 2;
+const ECU_ID_VEHICLE: u8 = 3;
 const PHASE_AWAITING_STAGE: u8 = 0;
 const PHASE_AWAITING_TRIAL_HEALTH: u8 = 1;
 const PHASE_AWAITING_COMMIT: u8 = 2;
@@ -161,6 +162,7 @@ fn ecu_id(ecu: Ecu) -> u8 {
         Ecu::Engine => ECU_ID_ENGINE,
         Ecu::Brake => ECU_ID_BRAKE,
         Ecu::Steering => ECU_ID_STEERING,
+        Ecu::Vehicle => ECU_ID_VEHICLE,
     }
 }
 
@@ -169,6 +171,7 @@ fn ecu_from_id(id: u8) -> Option<Ecu> {
         ECU_ID_ENGINE => Some(Ecu::Engine),
         ECU_ID_BRAKE => Some(Ecu::Brake),
         ECU_ID_STEERING => Some(Ecu::Steering),
+        ECU_ID_VEHICLE => Some(Ecu::Vehicle),
         _ => None,
     }
 }
@@ -455,7 +458,8 @@ mod tests {
 
     #[test]
     fn updates_targets_one_at_a_time_and_finishes_in_plan_order() {
-        let plan = CampaignPlan::new(&[Ecu::Engine, Ecu::Brake, Ecu::Steering]).unwrap();
+        let plan =
+            CampaignPlan::new(&[Ecu::Engine, Ecu::Brake, Ecu::Steering, Ecu::Vehicle]).unwrap();
         let mut manager = CampaignManager::new();
 
         assert_eq!(
@@ -496,6 +500,18 @@ mod tests {
         );
         assert_eq!(
             manager.report(Ecu::Steering, EcuUpdateStatus::Committed, SAFE),
+            Ok(Some(CampaignCommand::Request(Ecu::Vehicle)))
+        );
+        assert_eq!(
+            manager.report(Ecu::Vehicle, EcuUpdateStatus::Staged, SAFE),
+            Ok(Some(CampaignCommand::Activate(Ecu::Vehicle)))
+        );
+        assert_eq!(
+            manager.report(Ecu::Vehicle, EcuUpdateStatus::TrialHealthy, SAFE),
+            Ok(Some(CampaignCommand::Commit(Ecu::Vehicle)))
+        );
+        assert_eq!(
+            manager.report(Ecu::Vehicle, EcuUpdateStatus::Committed, SAFE),
             Ok(None)
         );
         assert_eq!(manager.state(), CampaignState::Completed);
@@ -584,7 +600,13 @@ mod tests {
             Err(CampaignError::DuplicateTarget)
         );
         assert_eq!(
-            CampaignPlan::new(&[Ecu::Engine, Ecu::Brake, Ecu::Steering, Ecu::Engine]),
+            CampaignPlan::new(&[
+                Ecu::Engine,
+                Ecu::Brake,
+                Ecu::Steering,
+                Ecu::Vehicle,
+                Ecu::Engine,
+            ]),
             Err(CampaignError::TooManyTargets)
         );
         let plan = CampaignPlan::new(&[Ecu::Engine]).unwrap();

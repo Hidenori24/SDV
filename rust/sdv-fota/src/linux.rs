@@ -27,6 +27,9 @@ const LOCK_UN: i32 = 8;
 
 extern "C" {
     fn flock(fd: i32, operation: i32) -> i32;
+    fn setgroups(size: usize, list: *const u32) -> i32;
+    fn setgid(gid: u32) -> i32;
+    fn setuid(uid: u32) -> i32;
 }
 
 #[derive(Debug)]
@@ -379,16 +382,51 @@ pub fn run_selected_image_as(
     uid: u32,
     gid: u32,
 ) -> Result<ExitStatus, Error> {
-    if uid == 0 || gid == 0 {
-        return Err(Error::InvalidRunIdentity);
-    }
-    run_selected_image_with_identity(root.into(), health_program, health_args, Some((uid, gid)))
+    run_selected_image_as_with_groups(root, health_program, health_args, uid, gid, &[])
 }
 
-fn command_with_identity(program: &Path, identity: Option<(u32, u32)>) -> Command {
+/// Select and run an image with explicit supplementary groups for hardware access.
+///
+/// A Raspberry Pi application may need groups such as `i2c` and `gpio` to control a PiCar-X
+/// Robot HAT while still running without root privileges.
+pub fn run_selected_image_as_with_groups(
+    root: impl Into<PathBuf>,
+    health_program: &Path,
+    health_args: &[std::ffi::OsString],
+    uid: u32,
+    gid: u32,
+    supplementary_groups: &[u32],
+) -> Result<ExitStatus, Error> {
+    if uid == 0 || gid == 0 || supplementary_groups.contains(&0) {
+        return Err(Error::InvalidRunIdentity);
+    }
+    run_selected_image_with_identity(
+        root.into(),
+        health_program,
+        health_args,
+        Some((uid, gid, supplementary_groups.to_vec())),
+    )
+}
+
+fn command_with_identity(program: &Path, identity: Option<&(u32, u32, Vec<u32>)>) -> Command {
     let mut command = Command::new(program);
-    if let Some((uid, gid)) = identity {
-        command.uid(uid).gid(gid);
+    if let Some((uid, gid, groups)) = identity {
+        let uid = *uid;
+        let gid = *gid;
+        let groups = groups.clone();
+        // SAFETY: the child applies its credentials immediately before exec and performs no
+        // allocation or locking in this callback. The groups buffer is owned by the closure.
+        unsafe {
+            command.pre_exec(move || {
+                if (!groups.is_empty() && setgroups(groups.len(), groups.as_ptr()) != 0)
+                    || setgid(gid) != 0
+                    || setuid(uid) != 0
+                {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
     }
     command
 }
@@ -397,7 +435,7 @@ fn run_selected_image_with_identity(
     root: PathBuf,
     health_program: &Path,
     health_args: &[std::ffi::OsString],
-    identity: Option<(u32, u32)>,
+    identity: Option<(u32, u32, Vec<u32>)>,
 ) -> Result<ExitStatus, Error> {
     let mut boot = FileBootControl::new(&root);
     let decision = boot.select_for_boot()?;
@@ -410,7 +448,7 @@ fn run_selected_image_with_identity(
     } else {
         0
     };
-    let mut child = match command_with_identity(&image, identity).spawn() {
+    let mut child = match command_with_identity(&image, identity.as_ref()).spawn() {
         Ok(child) => child,
         Err(error) => {
             if decision.trial {
@@ -429,7 +467,7 @@ fn run_selected_image_with_identity(
             health_program,
             health_args,
             Duration::from_millis(u64::from(trial_window_ms)),
-            identity,
+            identity.as_ref(),
         ) {
             let _ = child.kill();
             let _ = child.wait();
@@ -452,7 +490,7 @@ fn wait_for_trial_health(
     health_program: &Path,
     health_args: &[std::ffi::OsString],
     timeout: Duration,
-    identity: Option<(u32, u32)>,
+    identity: Option<&(u32, u32, Vec<u32>)>,
 ) -> Result<(), Error> {
     let started = Instant::now();
     loop {

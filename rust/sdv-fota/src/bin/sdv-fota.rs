@@ -114,7 +114,8 @@ fn install_from_source<P: PackageSource<Error = sdv_fota::linux::Error>>(
         "engine" => Ecu::Engine,
         "brake" => Ecu::Brake,
         "steering" => Ecu::Steering,
-        _ => return Err("target ECU must be engine, brake, or steering".into()),
+        "vehicle" => Ecu::Vehicle,
+        _ => return Err("target ECU must be engine, brake, steering, or vehicle".into()),
     };
     let config_schema = u32::try_from(parse_number(config_schema, "config schema")?)
         .map_err(|_| "config schema is out of range".to_owned())?;

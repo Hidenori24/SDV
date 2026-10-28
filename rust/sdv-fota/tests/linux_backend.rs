@@ -317,6 +317,24 @@ fn linux_launcher_refuses_root_as_application_identity() {
 }
 
 #[test]
+fn linux_launcher_refuses_root_supplementary_group() {
+    let root = TempRoot::new();
+    let result = sdv_fota::linux::run_selected_image_as_with_groups(
+        &root.0,
+        Path::new("/bin/true"),
+        &[],
+        1000,
+        1000,
+        &[1001, 0],
+    );
+    assert!(matches!(
+        result,
+        Err(sdv_fota::linux::Error::InvalidRunIdentity)
+    ));
+    assert!(!root.0.join("bootctl.a").exists());
+}
+
+#[test]
 fn linux_launcher_rolls_back_trial_when_health_window_expires() {
     let root = TempRoot::new();
     let mut boot = FileBootControl::new(&root.0);

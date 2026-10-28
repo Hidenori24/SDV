@@ -1,11 +1,11 @@
 # 実機（Raspberry Pi の車）の検討メモ
 
-**状態: 未決**（PiRacer か PiCar-X のどちらかにする方向。購入は未定）。
-ソフト側は、実機のドライバを後から足せる形（Platform API）で進める。
+**採用: SunFounder PiCar-X + Raspberry Pi 5**（実機での動作確認はこれから）。
+最初のFOTA対象は、Pi上で車両全体を動かす一つの`vehicle`アプリとする。論理ECUを分割してもよいが、物理ECUや個別更新を前提にしない。ハードウェアI/OはPlatform APIの下に置く。
 
 ## 前提
-- 計算機は Raspberry Pi、**64bit OS**（Raspberry Pi OS Lite 64bit）。機種は未定
-- **1 台の Pi で全 ECU を動かすところから始める**。安全性が必要になったら、アクチュエータ側をマイコン（Raspberry Pi Pico など）に分ける（ECU 構成は設定の差し替えで対応する前提。[ADR-0002](../adr/ADR-0002-ecu-partitioning.md)）
+- 計算機は Raspberry Pi 5、**64bit OS**（Raspberry Pi OS Lite 64bit）
+- Pi上の一つの車両制御アプリが実車を動かす。仮想ECUやプロセス分割は必要に応じて導入できるが、初期のOTAはアプリ全体を一度に更新する
 - **既製品の完成車**を使いたい。今のモデル（前輪操舵のバイシクルモデル）に合う、前輪操舵（アッカーマン）の車を選ぶ
 
 ## 候補（2026-10 時点で調べた内容。価格・在庫・販売店は未確認）
@@ -18,14 +18,13 @@
 
 対象外: 4 輪の差動駆動のキット（Freenove 4WD など）。操舵の方式が違い、今のモデルに合わない。
 
-## 決めること
-1. PiRacer か PiCar-X か（Pi 5 を使いたいなら PiCar-X、実機の大きさ・速度を重視するなら PiRacer）
-2. Pi の機種（PiRacer なら Pi 4B が確実）
-3. 速度センサを最初から付けるか（付けない場合は開ループ: 指令をそのまま PWM にする）
-4. 操作の入口（スマホのブラウザ = 今の GUI か、ゲームパッドか）
+## 残っている実機作業
+- Robot HATのI2C/GPIOをLinux Platform実装へ接続し、PiCar-Xで確認する
+- 速度センサのない構成で開ループ制御を評価する
+- 実機での操作入口、車両寸法、最大舵角、速度上限を決めてConfigへ反映する
 
 ## 実機に向けてソフトでやること（部品が決まってから）
-- Linux 用の Platform の実装: I2C（`/dev/i2c-1`）で PCA9685（または Robot HAT）へ書き込む
+- Linux 用の Platform の実装: I2C/GPIOでRobot HATを制御する
   - 付属の Python ライブラリは使わない。ハードの I2C の仕様だけを使う
 - アクチュエータ指令（加速度・舵角）から PWM への変換と、較正（キャリブレーション）の表
 - 入力: 今の GUI を Pi から配信、またはゲームパッド（evdev）
