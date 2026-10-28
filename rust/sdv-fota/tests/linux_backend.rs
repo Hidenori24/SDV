@@ -440,6 +440,7 @@ fn init_cli_accepts_named_provisioning_options() {
     assert!(report.contains("active_slot: B"));
     assert!(report.contains("active_version: 2.3.0"));
     assert!(report.contains("highest_security_version: 7"));
+    assert!(report.contains("active_image_integrity: verified"));
     FileSlotStorage::new(&root.0)
         .verify_executable_image(Slot::B)
         .unwrap();
@@ -490,6 +491,35 @@ fn record_active_integrity_only_updates_the_active_slot_without_a_trial() {
     FileSlotStorage::new(&root.0)
         .verify_executable_image(Slot::A)
         .unwrap();
+}
+
+#[test]
+fn status_reports_missing_and_mismatched_active_image_digests() {
+    let root = TempRoot::new();
+    let boot = FileBootControl::new(&root.0);
+    let image = FileSlotStorage::new(&root.0).image_path(Slot::A);
+    fs::create_dir_all(image.parent().unwrap()).unwrap();
+    write_executable(&image, "#!/bin/sh\nexit 0\n");
+    boot.initialize(Slot::A, "1.0.0", 1).unwrap();
+    let status = || {
+        Command::new(env!("CARGO_BIN_EXE_sdv-fota"))
+            .args(["status", "--state-root", root.0.to_str().unwrap()])
+            .output()
+            .unwrap()
+    };
+
+    let missing = status();
+    assert!(missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stdout).contains("active_image_integrity: missing"));
+
+    FileSlotStorage::new(&root.0)
+        .record_image_integrity(Slot::A)
+        .unwrap();
+    fs::write(&image, "#!/bin/sh\nexit 1\n").unwrap();
+    let mismatched = status();
+    assert!(mismatched.status.success());
+    assert!(String::from_utf8_lossy(&mismatched.stdout)
+        .contains("active_image_integrity: mismatch_or_unbootable"));
 }
 
 #[test]
@@ -796,7 +826,9 @@ fn install_cli_streams_signed_package_into_inactive_slot() {
         .output()
         .unwrap();
     assert!(reported.status.success());
-    assert!(String::from_utf8_lossy(&reported.stdout).contains("trial_slot: B"));
+    let report = String::from_utf8_lossy(&reported.stdout);
+    assert!(report.contains("trial_slot: B"));
+    assert!(report.contains("trial_image_integrity: verified"));
     let image_path = FileSlotStorage::new(&root.0).image_path(Slot::B);
     assert_eq!(fs::read(&image_path).unwrap(), payload);
     assert_eq!(

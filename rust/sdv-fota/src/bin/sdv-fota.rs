@@ -32,11 +32,16 @@ fn run(args: Vec<OsString>) -> Result<(), String> {
 fn status(args: &[OsString]) -> Result<(), String> {
     let mut options = parse_named_options(args, &["--state-root"])?;
     let state_root = PathBuf::from(required_option(&mut options, "--state-root")?);
-    let state = FileBootControl::new(state_root)
+    let state = FileBootControl::new(&state_root)
         .state()
         .map_err(|error| format!("cannot read boot metadata: {error:?}"))?;
+    let storage = FileSlotStorage::new(&state_root);
     println!("active_slot: {}", slot_name(state.active));
     println!("active_version: {}", state.active_version);
+    println!(
+        "active_image_integrity: {}",
+        image_integrity_status(&storage, state.active)
+    );
     println!(
         "highest_security_version: {}",
         state.highest_security_version
@@ -46,10 +51,27 @@ fn status(args: &[OsString]) -> Result<(), String> {
         println!("trial_version: {}", trial.version);
         println!("trial_boots_left: {}", trial.boots_left);
         println!("trial_window_ms: {}", trial.trial_window_ms);
+        println!(
+            "trial_image_integrity: {}",
+            image_integrity_status(&storage, trial.slot)
+        );
     } else {
         println!("trial: none");
+        println!("trial_image_integrity: none");
     }
     Ok(())
+}
+
+fn image_integrity_status(storage: &FileSlotStorage, slot: Slot) -> &'static str {
+    match storage.verify_executable_image(slot) {
+        Ok(()) => "verified",
+        Err(sdv_fota::linux::Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            "missing"
+        }
+        Err(sdv_fota::linux::Error::InvalidBootImage) => "mismatch_or_unbootable",
+        Err(sdv_fota::linux::Error::UnsafeStatePath) => "unsafe_path",
+        Err(_) => "unavailable",
+    }
 }
 
 fn record_active_integrity(args: &[OsString]) -> Result<(), String> {
