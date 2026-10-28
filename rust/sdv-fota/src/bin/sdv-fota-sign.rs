@@ -14,7 +14,7 @@ struct Seed([u8; 32]);
 
 impl Drop for Seed {
     fn drop(&mut self) {
-        self.0.fill(0);
+        zeroize(&mut self.0);
     }
 }
 
@@ -22,7 +22,7 @@ struct SeedText(Vec<u8>);
 
 impl Drop for SeedText {
     fn drop(&mut self) {
-        self.0.fill(0);
+        zeroize(&mut self.0);
     }
 }
 
@@ -292,7 +292,7 @@ fn read_seed(path: &Path) -> Result<Seed, String> {
         return Err("seed file must not be accessible by group or other users".into());
     }
 
-    let mut text = SeedText(Vec::with_capacity(MAX_SEED_FILE_BYTES));
+    let mut text = SeedText(Vec::with_capacity(MAX_SEED_FILE_BYTES + 1));
     file.take((MAX_SEED_FILE_BYTES + 1) as u64)
         .read_to_end(&mut text.0)
         .map_err(|error| format!("cannot read seed file: {error}"))?;
@@ -318,6 +318,14 @@ fn read_seed(path: &Path) -> Result<Seed, String> {
         seed.0[index] = (hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?;
     }
     Ok(seed)
+}
+
+fn zeroize(bytes: &mut [u8]) {
+    for byte in bytes {
+        // SAFETY: each reference points to a writable byte owned by the secret buffer.
+        unsafe { std::ptr::write_volatile(byte, 0) };
+    }
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
 }
 
 fn hex_nibble(byte: u8) -> Result<u8, String> {
