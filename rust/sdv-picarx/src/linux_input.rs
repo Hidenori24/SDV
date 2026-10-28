@@ -1,8 +1,10 @@
 //! Fresh vehicle snapshots received over a local Unix datagram socket.
 
+use std::fs;
 use std::io;
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::UnixDatagram;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use sdv_core::model::VehicleState;
@@ -75,6 +77,8 @@ impl From<InputFrame> for PlatformInputs {
 /// come from an estimator or sensor source; this adapter does not fabricate odometry.
 pub struct UnixDatagramInputSource {
     socket: UnixDatagram,
+    socket_path: PathBuf,
+    socket_identity: (u64, u64),
     max_age: Duration,
     last_sequence: Option<u64>,
     last_frame: Option<(PlatformInputs, Instant)>,
@@ -85,10 +89,26 @@ impl UnixDatagramInputSource {
         if max_age.is_zero() {
             return Err(Error::InvalidFreshnessLimit);
         }
-        let socket = UnixDatagram::bind(path).map_err(Error::Io)?;
-        socket.set_nonblocking(true).map_err(Error::Io)?;
+        let socket_path = path.as_ref().to_path_buf();
+        let socket = UnixDatagram::bind(&socket_path).map_err(Error::Io)?;
+        let metadata = match fs::symlink_metadata(&socket_path) {
+            Ok(metadata) if metadata.file_type().is_socket() => metadata,
+            Ok(_) => {
+                return Err(Error::Io(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "bound input path is not a socket",
+                )))
+            }
+            Err(error) => return Err(Error::Io(error)),
+        };
+        if let Err(error) = socket.set_nonblocking(true) {
+            let _ = fs::remove_file(&socket_path);
+            return Err(Error::Io(error));
+        }
         Ok(Self {
             socket,
+            socket_path,
+            socket_identity: (metadata.dev(), metadata.ino()),
             max_age,
             last_sequence: None,
             last_frame: None,
@@ -113,6 +133,18 @@ impl UnixDatagramInputSource {
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(()),
                 Err(error) => return Err(Error::Io(error)),
+            }
+        }
+    }
+}
+
+impl Drop for UnixDatagramInputSource {
+    fn drop(&mut self) {
+        if let Ok(metadata) = fs::symlink_metadata(&self.socket_path) {
+            if metadata.file_type().is_socket()
+                && (metadata.dev(), metadata.ino()) == self.socket_identity
+            {
+                let _ = fs::remove_file(&self.socket_path);
             }
         }
     }
@@ -200,5 +232,14 @@ mod tests {
             UnixDatagramInputSource::bind(socket_path("unused"), Duration::ZERO),
             Err(Error::InvalidFreshnessLimit)
         ));
+    }
+
+    #[test]
+    fn removes_its_socket_path_when_dropped() {
+        let input_path = socket_path("input");
+        let input = UnixDatagramInputSource::bind(&input_path, Duration::from_secs(1)).unwrap();
+        assert!(input_path.exists());
+        drop(input);
+        assert!(!input_path.exists());
     }
 }
