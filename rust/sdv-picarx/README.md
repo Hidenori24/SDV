@@ -35,9 +35,39 @@ a motor stop. Vehicle state must come from a sensor or estimator process. The pa
 {"sequence":1,"throttle":0.4,"brake":0.0,"steer":-0.1,"estop":false,"vehicle":{"t":1.0,"x":2.0,"y":3.0,"yaw":0.2,"v":0.5,"yaw_rate":0.1,"wheel_omega":5.0}}
 ```
 
-An executable that composes the I2C, GPIO, input, and ECU runtime ports is the next integration
-step. These bindings have passed unit and aarch64 compile checks; they have not been run on a
-physical PiCar-X.
+## Linux vehicle host
+
+The `sdv-picarx` executable composes the I2C, GPIO, input, PiCar-X, and virtual ECU runtime ports.
+It accepts one named option, `--config <file.json>`. The JSON config contains:
+
+| Field | Meaning |
+| --- | --- |
+| `i2c_device`, `robot_hat_address` | Linux I2C device path and 7-bit Robot HAT address |
+| `gpio_chip`, `left_direction_line`, `right_direction_line` | GPIO chip device path and line offsets |
+| `input_socket`, `input_max_age_ms` | Local input socket path and maximum input age |
+| `motor` | Forward direction polarity and measured minimum/maximum PWM duty |
+| `vehicle` | Measured drive and steering calibration used by the ECU adapter |
+
+The host validates calibration before opening devices, initializes the motor PWM to zero, and waits
+for a first valid input packet before starting the 10 ms ECU loop. Missing or stale input, hardware
+I/O failure, a missed ECU deadline, SIGINT, and SIGTERM request a motor stop. The process removes
+its input socket path on exit. Vehicle state in each packet must be supplied by a real sensor or
+state estimator; this crate does not provide one.
+
+`config/pi5.disabled.example.json` is a commissioning template. Its zero motor duty and zero
+forward-power limit keep drive output disabled. Replace the GPIO chip placeholder and calibrate
+the motor and steering values against the target PiCar-X before enabling forward power.
+
+Build and run it with:
+
+```sh
+cargo build --release --manifest-path rust/sdv-picarx/Cargo.toml
+./rust/sdv-picarx/target/release/sdv-picarx --config /etc/sdv-picarx.json
+```
+
+These bindings have passed unit and aarch64 compile checks; they have not been run on a physical
+PiCar-X. GPIO mapping, motor polarity, and steering/PWM values still need to be checked and
+calibrated on the target vehicle before enabling forward power.
 
 ```sh
 cargo test --manifest-path rust/sdv-picarx/Cargo.toml

@@ -30,6 +30,15 @@ pub struct MotorCalibration {
     pub maximum_duty: f32,
 }
 
+impl MotorCalibration {
+    pub fn is_valid(self) -> bool {
+        self.minimum_duty.is_finite()
+            && self.maximum_duty.is_finite()
+            && (0.0..=1.0).contains(&self.minimum_duty)
+            && (self.minimum_duty..=1.0).contains(&self.maximum_duty)
+    }
+}
+
 #[derive(Debug)]
 pub enum Error<P, G> {
     InvalidCalibration,
@@ -51,11 +60,7 @@ impl<T: RegisterTransport, G: MotorDirections> Actuators<T, G> {
         directions: G,
         calibration: MotorCalibration,
     ) -> Result<Self, Error<T::Error, G::Error>> {
-        if !calibration.minimum_duty.is_finite()
-            || !calibration.maximum_duty.is_finite()
-            || !(0.0..=1.0).contains(&calibration.minimum_duty)
-            || !(calibration.minimum_duty..=1.0).contains(&calibration.maximum_duty)
-        {
+        if !calibration.is_valid() {
             return Err(Error::InvalidCalibration);
         }
         let mut result = Self {
