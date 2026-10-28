@@ -9,6 +9,11 @@ The mapping is open loop: requested acceleration is scaled to normalized forward
 not estimate speed, implement a mechanical brake, or calibrate the car. The Robot HAT I2C/GPIO
 driver and Raspberry Pi executable are not yet implemented or validated on hardware.
 
+`pwm` provides the Robot HAT MCU PWM register framing behind a `RegisterTransport` interface.
+Channels share timers, so a hardware adapter must coordinate their frequency and period. A failed
+timer configuration can leave a partial write; the caller must stop the motors and reinitialize
+before proceeding. The register mapping was checked against [SunFounder's Robot HAT repository](https://github.com/sunfounder/robot-hat).
+
 ```sh
 cargo test --manifest-path rust/sdv-picarx/Cargo.toml
 ```
