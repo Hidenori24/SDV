@@ -133,8 +133,14 @@ sudo sdv-fota install-url --state-root /var/lib/sdv-fota \
   --url https://updates.example/vehicle/update.sdvf --target vehicle \
   --config-schema 1 --signal-if-version 1
 sudo sdv-fota status --state-root /var/lib/sdv-fota
+sudo sdv-fota verify-images --state-root /var/lib/sdv-fota
 sudo systemctl restart sdv-fota-launcher.service
 ```
+
+`status` is a diagnostic report and exits successfully even when it reports an image mismatch.
+`verify-images` checks the active image and any pending trial image, prints the same integrity
+states, and exits nonzero unless every bootable image has a verified digest. It can be used as a
+deployment gate or a monitoring check.
 
 The Pi Linux trial health check does not currently read a vehicle-stopped interlock. On a real
 PiCar-X, restart the launcher only after the vehicle is fully stopped and the external driver-input

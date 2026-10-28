@@ -26,6 +26,7 @@ fn run(args: Vec<OsString>) -> Result<(), String> {
         Some("record-active-integrity") => record_active_integrity(command_args),
         Some("rollback-trial") => rollback_trial(command_args),
         Some("status") => status(command_args),
+        Some("verify-images") => verify_images(command_args),
         _ => Err(usage()),
     }
 }
@@ -59,6 +60,30 @@ fn status(args: &[OsString]) -> Result<(), String> {
     } else {
         println!("trial: none");
         println!("trial_image_integrity: none");
+    }
+    Ok(())
+}
+
+fn verify_images(args: &[OsString]) -> Result<(), String> {
+    let mut options = parse_named_options(args, &["--state-root"])?;
+    let state_root = PathBuf::from(required_option(&mut options, "--state-root")?);
+    let state = FileBootControl::new(&state_root)
+        .state()
+        .map_err(|error| format!("cannot read boot metadata: {error:?}"))?;
+    let storage = FileSlotStorage::new(&state_root);
+    let active_integrity = image_integrity_status(&storage, state.active);
+    println!("active_image_integrity: {active_integrity}");
+    let trial_integrity = state
+        .trial
+        .map(|trial| image_integrity_status(&storage, trial.slot));
+    if let Some(integrity) = trial_integrity {
+        println!("trial_image_integrity: {integrity}");
+    } else {
+        println!("trial_image_integrity: none");
+    }
+    if active_integrity != "verified" || trial_integrity.is_some_and(|status| status != "verified")
+    {
+        return Err("one or more bootable images failed integrity verification".into());
     }
     Ok(())
 }
@@ -379,7 +404,7 @@ fn slot_name(slot: Slot) -> &'static str {
 }
 
 fn usage() -> String {
-    "usage:\n  sdv-fota init --state-root <dir> --active-slot <a|b> --active-version <version> --security-version <n>\n  sdv-fota record-active-integrity --state-root <dir> --slot <a|b>\n  sdv-fota rollback-trial --state-root <dir>\n  sdv-fota install --state-root <dir> --package <file> --target vehicle --config-schema <n> --signal-if-version <n> [--trial-boots <n>]\n  sdv-fota install-url --state-root <dir> --url <https-url> --target vehicle --config-schema <n> --signal-if-version <n> [--trial-boots <n>]\n  sdv-fota status --state-root <dir>".into()
+    "usage:\n  sdv-fota init --state-root <dir> --active-slot <a|b> --active-version <version> --security-version <n>\n  sdv-fota record-active-integrity --state-root <dir> --slot <a|b>\n  sdv-fota rollback-trial --state-root <dir>\n  sdv-fota install --state-root <dir> --package <file> --target vehicle --config-schema <n> --signal-if-version <n> [--trial-boots <n>]\n  sdv-fota install-url --state-root <dir> --url <https-url> --target vehicle --config-schema <n> --signal-if-version <n> [--trial-boots <n>]\n  sdv-fota status --state-root <dir>\n  sdv-fota verify-images --state-root <dir>".into()
 }
 
 #[cfg(test)]
