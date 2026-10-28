@@ -3,6 +3,35 @@
 _Static_assert(sizeof(sdv_fota_campaign_t) == 7, "campaign state ABI size changed");
 _Static_assert(SDV_FOTA_CAMPAIGN_CHECKPOINT_SIZE == 16, "campaign checkpoint size changed");
 
+typedef struct {
+    uint8_t command;
+    uint8_t ecu;
+    int32_t result;
+} campaign_capture_t;
+
+static int32_t record_campaign_action(void *context, uint8_t command, uint8_t ecu) {
+    campaign_capture_t *capture = (campaign_capture_t *)context;
+    capture->command = command;
+    capture->ecu = ecu;
+    return capture->result;
+}
+
+static int32_t record_request(void *context, uint8_t ecu) {
+    return record_campaign_action(context, SDV_FOTA_CAMPAIGN_REQUEST, ecu);
+}
+
+static int32_t record_activate(void *context, uint8_t ecu) {
+    return record_campaign_action(context, SDV_FOTA_CAMPAIGN_ACTIVATE, ecu);
+}
+
+static int32_t record_commit(void *context, uint8_t ecu) {
+    return record_campaign_action(context, SDV_FOTA_CAMPAIGN_COMMIT, ecu);
+}
+
+static int32_t record_abort(void *context, uint8_t ecu) {
+    return record_campaign_action(context, SDV_FOTA_CAMPAIGN_ABORT, ecu);
+}
+
 int main(void) {
     /* Null arguments must fail before any callback or memory access. */
     if (sdv_fota_stage_package(NULL, NULL, 0, NULL, NULL, 0,
@@ -89,6 +118,49 @@ int main(void) {
         campaign_state != SDV_FOTA_CAMPAIGN_STATE_FAILED ||
         campaign_ecu != SDV_FOTA_ECU_BRAKE) {
         return 14;
+    }
+
+    campaign_capture_t capture = {0};
+    sdv_fota_campaign_transport_t transport = {
+        .context = &capture,
+        .request_update = record_request,
+        .activate_trial = record_activate,
+        .commit_trial = record_commit,
+        .abort_update = record_abort,
+    };
+    if (sdv_fota_campaign_dispatch(&transport, &command) != SDV_FOTA_OK ||
+        capture.command != SDV_FOTA_CAMPAIGN_ABORT || capture.ecu != SDV_FOTA_ECU_BRAKE) {
+        return 15;
+    }
+    command.command = SDV_FOTA_CAMPAIGN_REQUEST;
+    command.ecu = SDV_FOTA_ECU_STEERING;
+    if (sdv_fota_campaign_dispatch(&transport, &command) != SDV_FOTA_OK ||
+        capture.command != SDV_FOTA_CAMPAIGN_REQUEST || capture.ecu != SDV_FOTA_ECU_STEERING) {
+        return 16;
+    }
+    command.command = SDV_FOTA_CAMPAIGN_ACTIVATE;
+    if (sdv_fota_campaign_dispatch(&transport, &command) != SDV_FOTA_OK ||
+        capture.command != SDV_FOTA_CAMPAIGN_ACTIVATE) {
+        return 17;
+    }
+    command.command = SDV_FOTA_CAMPAIGN_COMMIT;
+    if (sdv_fota_campaign_dispatch(&transport, &command) != SDV_FOTA_OK ||
+        capture.command != SDV_FOTA_CAMPAIGN_COMMIT) {
+        return 18;
+    }
+    command.command = SDV_FOTA_CAMPAIGN_NONE;
+    command.ecu = SDV_FOTA_ECU_NONE;
+    if (sdv_fota_campaign_dispatch(&transport, &command) != SDV_FOTA_OK) {
+        return 19;
+    }
+    command.command = SDV_FOTA_CAMPAIGN_REQUEST;
+    command.ecu = SDV_FOTA_ECU_ENGINE;
+    capture.result = -1;
+    if (sdv_fota_campaign_dispatch(&transport, &command) != SDV_FOTA_CALLBACK_ERROR) {
+        return 20;
+    }
+    if (sdv_fota_campaign_dispatch(NULL, &command) != SDV_FOTA_INVALID_ARG) {
+        return 21;
     }
     return 0;
 }

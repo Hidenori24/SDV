@@ -34,7 +34,10 @@ pub use package::{
     parse_package, validate_package, validate_signed_manifest, MANIFEST_SCHEMA, MAX_KEY_ID_BYTES,
     MAX_MANIFEST_BYTES, SIGNAL_IF_VERSION,
 };
-pub use ports::{BootControl, HealthMonitor, ImageStorage, PackageSource};
+pub use ports::{
+    dispatch_campaign_command, BootControl, CampaignTransport, HealthMonitor, ImageStorage,
+    PackageSource,
+};
 pub use service::{
     resolve_trial, FotaInstaller, InstallError, StreamInstallError, TrialError, TrialResolution,
 };

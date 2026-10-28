@@ -69,6 +69,15 @@ typedef struct {
     uint8_t ecu;
 } sdv_fota_campaign_command_t;
 
+typedef int32_t (*sdv_fota_campaign_action_fn)(void *context, uint8_t ecu);
+typedef struct {
+    void *context;
+    sdv_fota_campaign_action_fn request_update;
+    sdv_fota_campaign_action_fn activate_trial;
+    sdv_fota_campaign_action_fn commit_trial;
+    sdv_fota_campaign_action_fn abort_update;
+} sdv_fota_campaign_transport_t;
+
 typedef struct {
     uint8_t active_slot;
     uint8_t active_version[SDV_FOTA_VERSION_CAPACITY];
@@ -169,6 +178,9 @@ int32_t sdv_fota_campaign_checkpoint(const sdv_fota_campaign_t *manager,
 int32_t sdv_fota_campaign_restore(sdv_fota_campaign_t *manager,
                                   const uint8_t *checkpoint,
                                   size_t checkpoint_len);
+/* Dispatch one logical command. The selected target callback submits OEM-specific diagnostics. */
+int32_t sdv_fota_campaign_dispatch(const sdv_fota_campaign_transport_t *transport,
+                                   const sdv_fota_campaign_command_t *command);
 
 #ifdef __cplusplus
 }

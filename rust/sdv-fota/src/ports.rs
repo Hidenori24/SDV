@@ -3,7 +3,37 @@
 //! These traits are not AUTOSAR APIs. A Classic integration maps them to the selected
 //! DCM/Csm/NvM/MemIf/Fls and bootloader services; the Linux adapter remains the Pi 5 host backend.
 
-use crate::{BootDecision, BootState, Slot, TrialImage};
+use crate::{BootDecision, BootState, CampaignCommand, Ecu, Slot, TrialImage};
+
+/// Logical VCU-to-ECU campaign actions.
+///
+/// Implementations map these operations to the OEM's diagnostic client and transport stack
+/// (for example DCM-facing application services over CAN or Ethernet). Calls submit an action;
+/// ECU progress is reported separately through `CampaignManager::report`.
+pub trait CampaignTransport {
+    type Error;
+
+    fn request_update(&mut self, ecu: Ecu) -> Result<(), Self::Error>;
+    fn activate_trial(&mut self, ecu: Ecu) -> Result<(), Self::Error>;
+    fn commit_trial(&mut self, ecu: Ecu) -> Result<(), Self::Error>;
+    fn abort_update(&mut self, ecu: Ecu) -> Result<(), Self::Error>;
+}
+
+/// Submit an optional campaign action through an OEM transport port.
+pub fn dispatch_campaign_command<T: CampaignTransport>(
+    transport: &mut T,
+    command: Option<CampaignCommand>,
+) -> Result<(), T::Error> {
+    let Some(command) = command else {
+        return Ok(());
+    };
+    match command {
+        CampaignCommand::Request(ecu) => transport.request_update(ecu),
+        CampaignCommand::Activate(ecu) => transport.activate_trial(ecu),
+        CampaignCommand::Commit(ecu) => transport.commit_trial(ecu),
+        CampaignCommand::Abort(ecu) => transport.abort_update(ecu),
+    }
+}
 /// Bounded-memory image partition port.
 ///
 /// A Classic integration must implement this contract through the selected memory stack
@@ -70,4 +100,61 @@ pub trait PackageSource {
 
     fn read_exact(&mut self, buffer: &mut [u8]) -> Result<(), Self::Error>;
     fn finish(&mut self) -> Result<(), Self::Error>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::CampaignCommand;
+    use std::vec::Vec;
+
+    #[derive(Default)]
+    struct Recorder(Vec<CampaignCommand>);
+
+    impl CampaignTransport for Recorder {
+        type Error = ();
+
+        fn request_update(&mut self, ecu: Ecu) -> Result<(), Self::Error> {
+            self.0.push(CampaignCommand::Request(ecu));
+            Ok(())
+        }
+
+        fn activate_trial(&mut self, ecu: Ecu) -> Result<(), Self::Error> {
+            self.0.push(CampaignCommand::Activate(ecu));
+            Ok(())
+        }
+
+        fn commit_trial(&mut self, ecu: Ecu) -> Result<(), Self::Error> {
+            self.0.push(CampaignCommand::Commit(ecu));
+            Ok(())
+        }
+
+        fn abort_update(&mut self, ecu: Ecu) -> Result<(), Self::Error> {
+            self.0.push(CampaignCommand::Abort(ecu));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn dispatch_maps_each_campaign_action_to_the_transport_port() {
+        let mut transport = Recorder::default();
+        for command in [
+            Some(CampaignCommand::Request(Ecu::Engine)),
+            Some(CampaignCommand::Activate(Ecu::Brake)),
+            Some(CampaignCommand::Commit(Ecu::Steering)),
+            Some(CampaignCommand::Abort(Ecu::Engine)),
+            None,
+        ] {
+            dispatch_campaign_command(&mut transport, command).unwrap();
+        }
+        assert_eq!(
+            transport.0,
+            [
+                CampaignCommand::Request(Ecu::Engine),
+                CampaignCommand::Activate(Ecu::Brake),
+                CampaignCommand::Commit(Ecu::Steering),
+                CampaignCommand::Abort(Ecu::Engine),
+            ]
+        );
+    }
 }
