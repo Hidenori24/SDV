@@ -278,6 +278,34 @@ fn linux_launcher_commits_trial_after_health_command_succeeds() {
 }
 
 #[test]
+fn linux_launcher_rolls_back_if_image_exits_during_health_stability_window() {
+    let root = TempRoot::new();
+    let mut boot = FileBootControl::new(&root.0);
+    boot.initialize(Slot::A, "1.0.0", 1).unwrap();
+    write_slot_image(&root.0, Slot::B, "#!/bin/sh\nsleep 0.1\nexit 0\n");
+    let health = root.0.join("health-check");
+    write_executable(&health, "#!/bin/sh\nexit 0\n");
+    boot.schedule_trial(TrialImage {
+        slot: Slot::B,
+        version: fixed_version("1.1.0"),
+        security_version: 2,
+        boots_left: 2,
+        trial_window_ms: 2_000,
+    })
+    .unwrap();
+
+    let result = run_selected_image(&root.0, &health, &[]);
+
+    assert!(matches!(
+        result,
+        Err(sdv_fota::linux::Error::TrialImageExited)
+    ));
+    let state = boot.state().unwrap();
+    assert_eq!(state.active, Slot::A);
+    assert!(state.trial.is_none());
+}
+
+#[test]
 fn linux_launcher_runs_trial_image_and_health_check_as_configured_user() {
     let root = TempRoot::new();
     let mut boot = FileBootControl::new(&root.0);
@@ -1130,7 +1158,7 @@ fn signing_and_install_commands_complete_a_host_update() {
     let seed_path = root.0.join("signing.seed");
     write_seed_file(&seed_path, &SIGNING_SEED, 0o600);
     let image_path = root.0.join("candidate.bin");
-    let payload = b"#!/bin/sh\nexec sleep 1\n";
+    let payload = b"#!/bin/sh\nexec sleep 3\n";
     fs::write(&image_path, payload).unwrap();
     let package_path = root.0.join("candidate.sdvf");
 

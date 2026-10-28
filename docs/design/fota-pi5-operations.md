@@ -142,6 +142,9 @@ the existing package readback check must also match the signed manifest before a
 scheduled. On restart, the launcher checks the selected image against its recorded digest before
 starting it, then repeatedly runs the configured health command until it succeeds or `trial_ms`
 expires. A trial image that is missing, not executable, or has a mismatched digest is rolled back.
+After the first healthy result, the launcher requires the process to remain alive and the health
+check to keep passing for up to two seconds (half the trial window when that is shorter) before it
+commits. An exit or failed health check during this stability window rolls the trial back.
 During a trial, the health command
 receives `SDV_TRIAL_SLOT` and `SDV_IMAGE_PATH`; it must exit promptly and return success only when
 the application is healthy. A failed or expired trial is rolled back. A successful trial commits
