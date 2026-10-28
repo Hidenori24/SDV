@@ -25,6 +25,7 @@ extern "C" {
 #define SDV_FOTA_MAX_MANIFEST_BYTES (64u * 1024u)
 #define SDV_FOTA_MAX_CAMPAIGN_ECUS 3
 #define SDV_FOTA_ECU_NONE 0xff
+#define SDV_FOTA_CAMPAIGN_CHECKPOINT_SIZE 16
 
 #define SDV_FOTA_SAFETY_NORMAL 0
 #define SDV_FOTA_SAFETY_DEGRADED 1
@@ -138,7 +139,9 @@ int32_t sdv_fota_select_for_boot(const sdv_fota_callbacks_t *callbacks,
 /*
  * VCU-side, allocator-free sequential campaign policy. This emits logical actions; a target
  * adapter maps them to its diagnostic/Com transport. The caller owns the state and rechecks
- * vehicle conditions from its periodic task while an ECU update is active.
+ * vehicle conditions from its periodic task while an ECU update is active. Persist checkpoints
+ * after each state transition. After restore, query the active ECU's authoritative status before
+ * calling report; Activate and Commit may be reissued and the adapter must handle them idempotently.
  */
 int32_t sdv_fota_campaign_init(sdv_fota_campaign_t *manager);
 int32_t sdv_fota_campaign_start(sdv_fota_campaign_t *manager,
@@ -159,6 +162,13 @@ int32_t sdv_fota_campaign_cancel(sdv_fota_campaign_t *manager,
 int32_t sdv_fota_campaign_state(const sdv_fota_campaign_t *manager,
                                 uint8_t *out_state,
                                 uint8_t *out_ecu);
+/* Versioned CRC32 checkpoint for caller-owned NvM; the checksum detects corruption, not tampering. */
+int32_t sdv_fota_campaign_checkpoint(const sdv_fota_campaign_t *manager,
+                                     uint8_t *output,
+                                     size_t output_len);
+int32_t sdv_fota_campaign_restore(sdv_fota_campaign_t *manager,
+                                  const uint8_t *checkpoint,
+                                  size_t checkpoint_len);
 
 #ifdef __cplusplus
 }

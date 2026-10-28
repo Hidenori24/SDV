@@ -19,8 +19,9 @@ mod service;
 pub mod trust_store;
 
 pub use campaign::{
-    CampaignCommand, CampaignError, CampaignManager, CampaignPlan, CampaignState, EcuUpdateStatus,
-    VehicleConditions, VehicleSafety, MAX_CAMPAIGN_ECUS,
+    CampaignCheckpointError, CampaignCommand, CampaignError, CampaignManager, CampaignPlan,
+    CampaignState, EcuUpdateStatus, VehicleConditions, VehicleSafety, CAMPAIGN_CHECKPOINT_SIZE,
+    MAX_CAMPAIGN_ECUS,
 };
 pub use model::{
     BootDecision, BootState, Ecu, FixedString, FixedU32List, Image, Manifest, Package,
