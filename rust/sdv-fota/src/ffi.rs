@@ -23,6 +23,7 @@ const VERSION_CAPACITY: usize = 32;
 pub const SDV_FOTA_ECU_ENGINE: u8 = 0;
 pub const SDV_FOTA_ECU_BRAKE: u8 = 1;
 pub const SDV_FOTA_ECU_STEERING: u8 = 2;
+pub const SDV_FOTA_ECU_VEHICLE: u8 = 3;
 pub const SDV_FOTA_ECU_NONE: u8 = 0xff;
 
 pub const SDV_FOTA_SAFETY_NORMAL: u8 = 0;
@@ -332,9 +333,10 @@ fn slot_from_id(id: u8) -> Option<Slot> {
 }
 fn ecu_from_id(id: u8) -> Option<Ecu> {
     match id {
-        0 => Some(Ecu::Engine),
-        1 => Some(Ecu::Brake),
-        2 => Some(Ecu::Steering),
+        SDV_FOTA_ECU_ENGINE => Some(Ecu::Engine),
+        SDV_FOTA_ECU_BRAKE => Some(Ecu::Brake),
+        SDV_FOTA_ECU_STEERING => Some(Ecu::Steering),
+        SDV_FOTA_ECU_VEHICLE => Some(Ecu::Vehicle),
         _ => None,
     }
 }
@@ -488,6 +490,7 @@ fn campaign_ecu_from_id(id: u8) -> Option<Ecu> {
         SDV_FOTA_ECU_ENGINE => Some(Ecu::Engine),
         SDV_FOTA_ECU_BRAKE => Some(Ecu::Brake),
         SDV_FOTA_ECU_STEERING => Some(Ecu::Steering),
+        SDV_FOTA_ECU_VEHICLE => Some(Ecu::Vehicle),
         _ => None,
     }
 }
@@ -550,6 +553,7 @@ fn campaign_ecu_id(ecu: Ecu) -> u8 {
         Ecu::Engine => SDV_FOTA_ECU_ENGINE,
         Ecu::Brake => SDV_FOTA_ECU_BRAKE,
         Ecu::Steering => SDV_FOTA_ECU_STEERING,
+        Ecu::Vehicle => SDV_FOTA_ECU_VEHICLE,
     }
 }
 

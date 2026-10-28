@@ -1,4 +1,4 @@
-use sdv_fota::linux::run_selected_image_as;
+use sdv_fota::linux::run_selected_image_as_with_groups;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
@@ -16,13 +16,15 @@ fn main() {
     let health_args: Vec<OsString> = args.collect();
     let uid = configured_id("SDV_FOTA_APP_UID");
     let gid = configured_id("SDV_FOTA_APP_GID");
+    let groups = configured_groups();
 
-    match run_selected_image_as(
+    match run_selected_image_as_with_groups(
         PathBuf::from(root),
         PathBuf::from(health_program).as_path(),
         &health_args,
         uid,
         gid,
+        &groups,
     ) {
         Ok(status) => std::process::exit(status.code().unwrap_or(1)),
         Err(error) => {
@@ -30,6 +32,25 @@ fn main() {
             std::process::exit(1);
         }
     }
+}
+
+fn configured_groups() -> Vec<u32> {
+    let Ok(value) = std::env::var("SDV_FOTA_APP_GROUPS") else {
+        return Vec::new();
+    };
+    if value.trim().is_empty() {
+        return Vec::new();
+    }
+    value
+        .split(',')
+        .map(|part| match part.trim().parse::<u32>() {
+            Ok(id) if id != 0 => id,
+            _ => {
+                eprintln!("sdv-fota-launcher: SDV_FOTA_APP_GROUPS must be comma-separated non-root group IDs");
+                std::process::exit(2);
+            }
+        })
+        .collect()
 }
 
 fn configured_id(name: &str) -> u32 {

@@ -41,6 +41,20 @@ The systemd launcher retains only `CAP_SETUID` and `CAP_SETGID` so it can drop p
 starting either the application or its health command. It is otherwise restricted to writing
 under `/var/lib/sdv-fota`.
 
+For PiCar-X, the `vehicle` process may need access to Robot HAT devices. Add only the device
+groups present on the target OS to the root-owned environment file. Resolve numeric IDs on the Pi
+instead of assuming fixed IDs:
+
+```sh
+getent group i2c
+getent group gpio
+# Set SDV_FOTA_APP_GROUPS to the applicable numeric GIDs, comma-separated.
+```
+
+When both groups exist, add `SDV_FOTA_APP_GROUPS=<i2c-gid>,<gpio-gid>` to
+`/etc/default/sdv-fota-launcher`. The launcher applies these supplementary groups to both the
+vehicle process and its health check, while both run as the unprivileged `sdv-app` user.
+
 Provision the matching Ed25519 public key through the ECU's trusted configuration. The FOTA CLI
 loads trusted keys from `/etc/sdv-fota/trusted-keys`. Provision the file as root, readable by
 the `sdv` account, and not writable by group or other users. The file contains one key per line:
@@ -69,7 +83,7 @@ On the release host, sign an application image. The tool prints the key ID and p
 release process can verify which trust key is needed on the target:
 
 ```sh
-sdv-fota-sign /secure/release.seed release-2026 engine 1.1.0 2 5000 1 1 sdv-app update.sdvf
+sdv-fota-sign /secure/release.seed release-2026 vehicle 1.1.0 2 5000 1 1 sdv-app update.sdvf
 ```
 
 Deliver `update.sdvf` through the deployment's chosen transport. On the Pi, install it using the
@@ -77,8 +91,8 @@ provisioned public key and the active ECU compatibility values:
 
 ```sh
 # Install a local package or stream one from an HTTPS artifact endpoint:
-sudo sdv-fota install /var/lib/sdv-fota update.sdvf engine 1 1
-sudo sdv-fota install-url /var/lib/sdv-fota https://updates.example/engine/update.sdvf engine 1 1
+sudo sdv-fota install /var/lib/sdv-fota update.sdvf vehicle 1 1
+sudo sdv-fota install-url /var/lib/sdv-fota https://updates.example/vehicle/update.sdvf vehicle 1 1
 sudo sdv-fota status /var/lib/sdv-fota
 sudo systemctl restart sdv-fota-launcher.service
 ```
@@ -103,10 +117,15 @@ readiness protocol.
 
 ## Current boundary
 
-The Pi path can sign a package on a separate host, verify and stage it incrementally, and exercise
+The planned PiCar-X deployment uses the complete Rust Linux runtime as one `vehicle` FOTA image. Within
+that process, VCU, Engine, Brake, and Steering remain separate virtual ECU tasks with their own
+RTE state, matching the Rust simulation architecture; they do not require separate physical CPUs.
+This initial FOTA unit replaces the whole runtime, not an individual task. The Pi path can sign a
+package on a separate host, verify and stage it incrementally, and exercise
 A/B trial boot and rollback on Linux. HTTPS artifact transfer uses the device's system CA store;
-mutual TLS, private repository credentials, remote campaign orchestration, actual Pi 5 hardware
-validation, and a production health-check implementation still belong to deployment integration.
+mutual TLS, private repository credentials, remote campaign orchestration, the PiCar-X runtime and
+hardware adapter, actual Pi 5 hardware validation, and a production health-check implementation
+still belong to deployment integration.
 AUTOSAR Classic integration additionally requires the chosen
 DCM/Csm/NvM/MemIf/Fls/Bootloader bindings described in
 [the Classic architecture proposal](fota_classic_architecture.md).

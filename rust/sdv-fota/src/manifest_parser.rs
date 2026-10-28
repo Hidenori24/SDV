@@ -79,6 +79,7 @@ impl<'a> Parser<'a> {
                     "engine" => Ecu::Engine,
                     "brake" => Ecu::Brake,
                     "steering" => Ecu::Steering,
+                    "vehicle" => Ecu::Vehicle,
                     _ => return Err(ValidationError::InvalidManifest),
                 });
                 Ok(())
@@ -422,6 +423,17 @@ mod tests {
         let manifest = parse_manifest(MANIFEST).unwrap();
         assert_eq!(manifest.image.version, "1.2.3");
         assert_eq!(&*manifest.requires.config_schema, &[1, 2]);
+    }
+
+    #[test]
+    fn parses_vehicle_application_target() {
+        let vehicle = core::str::from_utf8(MANIFEST)
+            .unwrap()
+            .replace("\"engine\"", "\"vehicle\"")
+            .replace("EngineSWC", "VehicleControlApp");
+        let manifest = parse_manifest(vehicle.as_bytes()).unwrap();
+        assert_eq!(manifest.image.target_ecu, crate::Ecu::Vehicle);
+        assert_eq!(manifest.image.swc, "VehicleControlApp");
     }
 
     #[test]

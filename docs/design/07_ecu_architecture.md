@@ -210,3 +210,16 @@ flowchart LR
 | 故障注入 | `sdv_sim --stall <swc>:<t>` | API / シナリオ JSON のイベント |
 | Config / NVM / シナリオ | なし（定数・内蔵シナリオ） | あり |
 | 役割 | 参照実装（基準ログの生成元） | 主役（GUI・拡張） |
+
+## 10. Raspberry Pi 5 での実行形態
+
+実車ランタイムでは Engine / Brake / Steering / VCU を、Pi 5 上の一つの Rust Linux
+プロセス内で独立した仮想ECUタスクとして実行する。各タスクは専用のRTEを持ち、信号は
+同じECU境界を通して受け渡す。シミュレーションでは仮想バスとVehicleDynamics plantを
+使い、実車ではPiCar-X用Platform adapterがアクチュエータ指令をRobot HATへ送り、利用
+可能なセンサ値を入力する。共有するのはECUの制御ロジックと信号契約であり、Plantと
+Platform adapterは実行先ごとに差し替える。
+
+当面のFOTA単位はRustプロセス全体とし、仮想ECUタスクごとの個別イメージ更新は行わない。
+プロセス内でECUの責務を分けることと、ECUごとの独立した更新ライフサイクルは別の段階である。
+これは目標構成であり、Pi 5用実車ランタイム、Robot HAT adapter、実車確認は未実装。

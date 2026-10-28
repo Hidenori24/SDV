@@ -1,7 +1,7 @@
 #include "sdv_fota.h"
 
-_Static_assert(sizeof(sdv_fota_campaign_t) == 7, "campaign state ABI size changed");
-_Static_assert(SDV_FOTA_CAMPAIGN_CHECKPOINT_SIZE == 16, "campaign checkpoint size changed");
+_Static_assert(sizeof(sdv_fota_campaign_t) == 8, "campaign state ABI size changed");
+_Static_assert(SDV_FOTA_CAMPAIGN_CHECKPOINT_SIZE == 17, "campaign checkpoint size changed");
 
 typedef struct {
     uint8_t command;
@@ -161,6 +161,14 @@ int main(void) {
     }
     if (sdv_fota_campaign_dispatch(NULL, &command) != SDV_FOTA_INVALID_ARG) {
         return 21;
+    }
+    const uint8_t vehicle_target[] = {SDV_FOTA_ECU_VEHICLE};
+    conditions.stopped = 1;
+    if (sdv_fota_campaign_init(&resumed_campaign) != SDV_FOTA_OK ||
+        sdv_fota_campaign_start(&resumed_campaign, vehicle_target, 1, &conditions, &command) !=
+            SDV_FOTA_OK ||
+        command.command != SDV_FOTA_CAMPAIGN_REQUEST || command.ecu != SDV_FOTA_ECU_VEHICLE) {
+        return 22;
     }
     return 0;
 }

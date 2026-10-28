@@ -41,7 +41,7 @@ SDVらしさ（v1）は次を指す。
   - [ ] 更新直後に Degraded / EStop になったら自動でロールバック（試験適用、ADR-0003 の後続）
   - [ ] ログへ Config の世代・適用時刻を記録
   - [ ] ECU 構成を設定で切り替える（案B・案C を試す）
-  - [ ] FOTA: ECU ソフトの署名検証・更新・試験適用・自動ロールバック — [ADR-0005](../adr/ADR-0005-fota.md)（Accepted。`sdv-sec`、署名付きパッケージ検証、Pi 5 Linux向けA/B導入、HTTPS受信、trial launcher、root管理の信頼鍵ストア、非特権アプリ起動、順次キャンペーン方針を実装。診断/CAN transportとVCU接続、実Pi 5試験、実アプリhealth check、Classic BSW/MCAL/Bootloader結合は未完了。Classicを目標とした責務案は [fota_classic_architecture.md](fota_classic_architecture.md) を参照）
+  - [ ] FOTA: ECU ソフトの署名検証・更新・試験適用・自動ロールバック — [ADR-0005](../adr/ADR-0005-fota.md)（Accepted。`sdv-sec`、署名付きパッケージ検証、Pi 5 Linux向けA/B導入、HTTPS受信、trial launcher、root管理の信頼鍵ストア、非特権アプリ起動、順次キャンペーン方針を実装。PiCar-Xでは車両制御アプリ全体を`vehicle`対象として更新する。Robot HAT実機ドライバ・実Pi 5試験、実アプリhealth check、Classic BSW/MCAL/Bootloader結合は未完了。Classicを目標とした責務案は [fota_classic_architecture.md](fota_classic_architecture.md) を参照）
 
 ## 非ゴール（v1ではやらない）
 

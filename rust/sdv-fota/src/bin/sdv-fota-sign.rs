@@ -29,7 +29,8 @@ fn run(args: Vec<String>) -> Result<(), String> {
         "engine" => (Ecu::Engine, "EngineSWC"),
         "brake" => (Ecu::Brake, "BrakeSWC"),
         "steering" => (Ecu::Steering, "SteeringSWC"),
-        _ => return Err("ECU must be engine, brake, or steering".into()),
+        "vehicle" => (Ecu::Vehicle, "VehicleControlApp"),
+        _ => return Err("ECU must be engine, brake, steering, or vehicle".into()),
     };
     let version = &args[3];
     let security_version = parse_number(&args[4], "security version")?;
@@ -193,6 +194,7 @@ fn ecu_name(ecu: Ecu) -> &'static str {
         Ecu::Engine => "engine",
         Ecu::Brake => "brake",
         Ecu::Steering => "steering",
+        Ecu::Vehicle => "vehicle",
     }
 }
 
