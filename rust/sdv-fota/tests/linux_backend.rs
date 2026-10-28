@@ -406,6 +406,9 @@ fn linux_launcher_rolls_back_if_trial_image_exits_before_health_check() {
 #[test]
 fn init_cli_accepts_named_provisioning_options() {
     let root = TempRoot::new();
+    let image_path = FileSlotStorage::new(&root.0).image_path(Slot::B);
+    fs::create_dir_all(image_path.parent().unwrap()).unwrap();
+    write_executable(&image_path, "#!/bin/sh\nexit 0\n");
 
     let initialized = Command::new(env!("CARGO_BIN_EXE_sdv-fota"))
         .args([
@@ -436,6 +439,61 @@ fn init_cli_accepts_named_provisioning_options() {
     assert!(report.contains("active_slot: B"));
     assert!(report.contains("active_version: 2.3.0"));
     assert!(report.contains("highest_security_version: 7"));
+}
+
+#[test]
+fn init_cli_rejects_missing_or_nonexecutable_active_image() {
+    let root = TempRoot::new();
+    let image_path = FileSlotStorage::new(&root.0).image_path(Slot::A);
+    let initialize = || {
+        Command::new(env!("CARGO_BIN_EXE_sdv-fota"))
+            .args([
+                "init",
+                "--state-root",
+                root.0.to_str().unwrap(),
+                "--active-slot",
+                "a",
+                "--active-version",
+                "1.0.0",
+                "--security-version",
+                "1",
+            ])
+            .output()
+            .unwrap()
+    };
+
+    assert!(!initialize().status.success());
+    assert!(!root.0.join("bootctl.a").exists());
+    fs::create_dir_all(image_path.parent().unwrap()).unwrap();
+    fs::write(&image_path, "not executable").unwrap();
+    assert!(!initialize().status.success());
+    assert!(!root.0.join("bootctl.a").exists());
+}
+
+#[test]
+fn launcher_rolls_back_trial_with_nonexecutable_candidate_image() {
+    let root = TempRoot::new();
+    let mut boot = FileBootControl::new(&root.0);
+    boot.initialize(Slot::A, "1.0.0", 1).unwrap();
+    let candidate = FileSlotStorage::new(&root.0).image_path(Slot::B);
+    fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+    fs::write(&candidate, "not executable").unwrap();
+    boot.schedule_trial(TrialImage {
+        slot: Slot::B,
+        version: fixed_version("1.1.0"),
+        security_version: 2,
+        boots_left: 2,
+        trial_window_ms: 5_000,
+    })
+    .unwrap();
+
+    assert!(matches!(
+        run_selected_image(&root.0, Path::new("/bin/true"), &[]),
+        Err(sdv_fota::linux::Error::InvalidBootImage)
+    ));
+    let state = boot.state().unwrap();
+    assert_eq!(state.active, Slot::A);
+    assert!(state.trial.is_none());
 }
 
 #[test]

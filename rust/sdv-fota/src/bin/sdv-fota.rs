@@ -71,6 +71,9 @@ fn initialize(args: &[OsString]) -> Result<(), String> {
     let active_version = required_option(&mut options, "--active-version")?;
     let active_version = required_str(&active_version, "active version")?;
     let security_version = required_number(&mut options, "--security-version", "security version")?;
+    FileSlotStorage::new(&root)
+        .validate_executable_image(slot)
+        .map_err(|error| format!("initial vehicle image is not bootable: {error:?}"))?;
     FileBootControl::new(root)
         .initialize(slot, active_version, security_version)
         .map_err(|error| format!("boot metadata initialization failed: {error:?}"))
