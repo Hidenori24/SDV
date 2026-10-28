@@ -20,6 +20,7 @@ body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 system-ui,-app
 header{display:flex;align-items:baseline;gap:12px;padding:12px 16px}
 header h1{margin:0;font-size:18px}
 header span{color:var(--sub);font-size:12px}
+header a{margin-left:auto;color:var(--accent);font-size:13px}
 main{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:12px;padding:0 16px 16px;max-width:1200px;margin:0 auto}
 @media (max-width:820px){main{grid-template-columns:1fr}}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px}
@@ -103,7 +104,7 @@ h2{font-size:13px;margin:0 0 4px;color:var(--sub);font-weight:600}
 </style>
 </head>
 <body>
-<header><h1>SDV Simulator</h1><span>Rust(WASM) Model層 · 10ms固定ステップ · C++実装と同一ログ</span></header>
+<header><h1>SDV Simulator</h1><span>Rust(WASM) Model層 · 10ms固定ステップ · C++実装と同一ログ</span><a href="fota.html">FOTA（Pi 5/Linux）</a></header>
 <div id="err"></div>
 <main>
   <section class="card">

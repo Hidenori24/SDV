@@ -23,3 +23,5 @@ cd web && python3 -m http.server 8000   # http://localhost:8000
 ## GitHub Pages
 `.github/workflows/pages.yml` が `main` への push で WASM をビルドして公開します。
 初回のみ、リポジトリの Settings → Pages → Build and deployment → Source を **GitHub Actions** にしてください。
+
+トップページの「FOTA（Pi 5/Linux）」から、ホスト側FOTAの開発プレビューと初期セットアップ手順を確認できます。ブラウザシミュレータ内での更新機能ではなく、Pi 5/Linux向けのA/Bアプリ更新フローの説明です。

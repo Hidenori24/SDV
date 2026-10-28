@@ -102,7 +102,11 @@ and start an image, poll a configured health command during the manifest's trial
 healthy trial, and roll back an unhealthy one. Provisioning still needs to initialize boot
 metadata, install the launcher and health check, and provide an executable signed application
 image. The `sdv-fota` host command initializes boot metadata and streams a signed package file
-into the inactive slot; it accepts the ECU compatibility values and public trust key as inputs.
+into the inactive slot; it accepts the ECU compatibility values as inputs and verifies the
+signature against the root-provisioned `/etc/sdv-fota/trusted-keys` file. That file contains
+`<key-id> <64-hex-character-public-key>` per line and must be root-owned and not group/world
+writable. `SDV_FOTA_TEST_TRUST_STORE` is available to debug builds for isolated host tests only;
+release builds always use the fixed system path.
 The host-only `sdv-fota-sign` tool creates SDVF packages from image files using a protected
 32-byte seed file and streams the payload with a 4 KiB buffer. Build it with
 `cargo build --release --manifest-path rust/sdv-fota/Cargo.toml --features host-signing --bin sdv-fota-sign`;
