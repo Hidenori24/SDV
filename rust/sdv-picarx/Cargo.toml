@@ -7,3 +7,6 @@ description = "PiCar-X platform adapter for SDV virtual ECU tasks"
 
 [dependencies]
 sdv-core = { path = "../sdv-core" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gpiocdev = "0.8"
