@@ -136,6 +136,11 @@ sudo sdv-fota status --state-root /var/lib/sdv-fota
 sudo systemctl restart sdv-fota-launcher.service
 ```
 
+The Pi Linux trial health check does not currently read a vehicle-stopped interlock. On a real
+PiCar-X, restart the launcher only after the vehicle is fully stopped and the external driver-input
+peer is no longer requesting motion. The health check proves a recent control cycle and stable
+process; it does not prove that the vehicle is stationary.
+
 The `init` command refuses to record a slot without a non-empty regular executable image and
 records its SHA-256 digest. The installer records the digest of each staged image after writing it;
 the existing package readback check must also match the signed manifest before a trial is
