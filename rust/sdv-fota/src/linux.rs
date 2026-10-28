@@ -226,7 +226,10 @@ impl FileSlotStorage {
 
     pub fn validate_executable_image(&self, slot: Slot) -> Result<(), Error> {
         let metadata = fs::symlink_metadata(self.image_path(slot))?;
-        if !metadata.file_type().is_file() || metadata.permissions().mode() & 0o111 == 0 {
+        if !metadata.file_type().is_file()
+            || metadata.len() == 0
+            || metadata.permissions().mode() & 0o111 == 0
+        {
             return Err(Error::InvalidBootImage);
         }
         Ok(())

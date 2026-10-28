@@ -116,7 +116,7 @@ sudo sdv-fota status --state-root /var/lib/sdv-fota
 sudo systemctl restart sdv-fota-launcher.service
 ```
 
-The `init` command refuses to record a slot without a regular executable image. A restart selects
+The `init` command refuses to record a slot without a non-empty regular executable image. A restart selects
 the pending trial slot; the launcher checks the selected image is regular and executable, then
 repeatedly runs the configured health command until it succeeds or `trial_ms` expires. A trial
 image that is missing or not executable is rolled back. During a trial, the health command

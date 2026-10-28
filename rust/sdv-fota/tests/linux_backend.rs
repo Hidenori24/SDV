@@ -468,6 +468,12 @@ fn init_cli_rejects_missing_or_nonexecutable_active_image() {
     fs::write(&image_path, "not executable").unwrap();
     assert!(!initialize().status.success());
     assert!(!root.0.join("bootctl.a").exists());
+    fs::write(&image_path, "").unwrap();
+    let mut permissions = fs::metadata(&image_path).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&image_path, permissions).unwrap();
+    assert!(!initialize().status.success());
+    assert!(!root.0.join("bootctl.a").exists());
 }
 
 #[test]
