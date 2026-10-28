@@ -1,0 +1,9 @@
+[package]
+name = "sdv-picarx"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "PiCar-X platform adapter for SDV virtual ECU tasks"
+
+[dependencies]
+sdv-core = { path = "../sdv-core" }
