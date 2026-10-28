@@ -4,11 +4,23 @@ use sdv_fota::{
 use sdv_sec::{ed25519_public_key, ed25519_sign, Sha256Context};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+
+const MAX_SEED_FILE_BYTES: usize = 128;
 
 struct Seed([u8; 32]);
 
 impl Drop for Seed {
+    fn drop(&mut self) {
+        self.0.fill(0);
+    }
+}
+
+struct SeedText(Vec<u8>);
+
+impl Drop for SeedText {
     fn drop(&mut self) {
         self.0.fill(0);
     }
@@ -37,7 +49,7 @@ fn main() {
 
 fn run(args: Vec<String>) -> Result<(), String> {
     let options = parse_options(args)?;
-    let seed = Seed(read_seed(&options.seed_file)?);
+    let seed = read_seed(&options.seed_file)?;
     let (ecu, swc) = match options.target.as_str() {
         "engine" => (Ecu::Engine, "EngineSWC"),
         "brake" => (Ecu::Brake, "BrakeSWC"),
@@ -262,16 +274,48 @@ fn hash_file(path: &Path) -> Result<(u64, [u8; 32]), String> {
     Ok((size, digest.finalize()))
 }
 
-fn read_seed(path: &Path) -> Result<[u8; 32], String> {
-    let text =
-        fs::read_to_string(path).map_err(|error| format!("cannot read seed file: {error}"))?;
-    let text = text.trim();
-    if text.len() != 64 {
+fn read_seed(path: &Path) -> Result<Seed, String> {
+    let path_metadata =
+        fs::symlink_metadata(path).map_err(|error| format!("cannot inspect seed file: {error}"))?;
+    if !path_metadata.file_type().is_file() {
+        return Err("seed path must be a regular file".into());
+    }
+    let file = File::open(path).map_err(|error| format!("cannot read seed file: {error}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("cannot inspect seed file: {error}"))?;
+    if !metadata.is_file() {
+        return Err("seed path must be a regular file".into());
+    }
+    #[cfg(unix)]
+    if metadata.permissions().mode() & 0o077 != 0 {
+        return Err("seed file must not be accessible by group or other users".into());
+    }
+
+    let mut text = SeedText(Vec::with_capacity(MAX_SEED_FILE_BYTES));
+    file.take((MAX_SEED_FILE_BYTES + 1) as u64)
+        .read_to_end(&mut text.0)
+        .map_err(|error| format!("cannot read seed file: {error}"))?;
+    if text.0.len() > MAX_SEED_FILE_BYTES {
+        return Err("seed file is too large".into());
+    }
+    let start = text
+        .0
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(text.0.len());
+    let end = text
+        .0
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())
+        .map_or(start, |index| index + 1);
+    let bytes = &text.0[start..end];
+    if bytes.len() != 64 {
         return Err("seed file must contain exactly 64 hexadecimal characters".into());
     }
-    let mut seed = [0u8; 32];
-    for (index, pair) in text.as_bytes().chunks_exact(2).enumerate() {
-        seed[index] = (hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?;
+    let mut seed = Seed([0u8; 32]);
+    for (index, pair) in bytes.chunks_exact(2).enumerate() {
+        seed.0[index] = (hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?;
     }
     Ok(seed)
 }
