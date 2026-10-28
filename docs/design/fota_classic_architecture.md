@@ -36,7 +36,7 @@ Classic の FOTA 全体が単一の標準 AUTOSAR モジュールとして定義
 - Bootloaderはアプリケーションの更新サービスから独立して、起動時のイメージ選択、試行回数、確定、復帰を担う。アプリケーションが更新状態を書き換えても、Activeイメージを破壊しない契約にする。
 - 安全監視、車両停止条件、更新の許可判定は更新制御と分離し、既存Safetyのフェイルセーフを弱めない。
 
-共通Rust coreには固定長の `CampaignManager` を置いた。車両停止・Safety Normal・別ECU更新なしを開始条件とし、Request → Activate → Commit を一台ずつ発行する。VCU周期タスクから `recheck` を呼ぶと、車両が動いた場合やSafety状態が変わった場合に対象ECUへAbortを出す。呼び出し側所有の状態領域とC ABIも用意し、Classic C側から同じpolicyを呼べる。版管理付き16-byte checkpointをNvMへ保存でき、CRC32と状態検証で破損データを拒否する。VCU再起動後はcheckpointを復元し、対象ECUへ状態を問い合わせてから報告する。Activate/Commitは再送される場合があるため、ターゲット側アダプタは冪等に扱う。これはPolicy APIであり、DCM/Com/CANへの送信とVCUシミュレーションとの接続は別の統合作業である。
+共通Rust coreには固定長の `CampaignManager` を置いた。車両停止・Safety Normal・別ECU更新なしを開始条件とし、Request → Activate → Commit を一台ずつ発行する。VCU周期タスクから `recheck` を呼ぶと、車両が動いた場合やSafety状態が変わった場合に対象ECUへAbortを出す。呼び出し側所有の状態領域とC ABIも用意し、Classic C側から同じpolicyを呼べる。版管理付き16-byte checkpointをNvMへ保存でき、CRC32と状態検証で破損データを拒否する。VCU再起動後はcheckpointを復元し、対象ECUへ状態を問い合わせてから報告する。Activate/Commitは再送される場合があるため、ターゲット側アダプタは冪等に扱う。`sdv-core` のoptional `fota-simulator` featureはCampaignManagerを模擬車速とVCU Safety状態へ接続する。ターゲットECU向けDCM/Com/CAN送信はOEM診断仕様に合わせた別アダプタが必要である。
 
 ## 現行コードとの境界
 

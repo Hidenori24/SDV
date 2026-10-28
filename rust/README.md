@@ -6,6 +6,7 @@ SDV の Model 層（engine / brake / steering / vehicle dynamics）と 10ms 固�
 ```bash
 cd rust/sdv-core
 cargo test                                            # C++の参照ログとの照合を含む
+cargo test --features fota-simulator                  # FOTA campaign と Sim の条件連携
 cargo build --release --target wasm32-unknown-unknown # -> target/wasm32-unknown-unknown/release/sdv_core.wasm
 ```
 
@@ -19,6 +20,7 @@ cargo build --release --target wasm32-unknown-unknown # -> target/wasm32-unknown
 - `tests/bus_faults.rs` / `tests/wasm_api.rs`: 遅延・欠損・バス断・VCU停止とフェイルセーフ、C ABI
 - `tests/ecu_bus.rs` / `tests/bus.rs`: ECUごとのRTE、バスの配送・遅延・バスマトリクス
 - `tests/swc_rte.rs`: SWC単体と、RTEが独立していること
+- `fota.rs`（optional feature `fota-simulator`）: `sdv-fota` のClassic campaign policyをSimの車速・VCU Safety状態に結合。走行中、Degraded/EStop、別更新中の開始拒否と、走行開始/EStop時の中断を確認する。既定のWASM構成にはFOTA依存を含めない
 
 ## Config（車の諸元・物理・調整値・JSON）
 [ADR-0003](../docs/adr/ADR-0003-config-nvm.md)（改訂1: schema 2）の Config（`config.rs`）。4 つに分ける。
