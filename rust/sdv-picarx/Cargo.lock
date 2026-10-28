@@ -95,6 +95,7 @@ name = "sdv-picarx"
 version = "0.1.0"
 dependencies = [
  "gpiocdev",
+ "libc",
  "sdv-core",
  "serde",
  "serde_json",
