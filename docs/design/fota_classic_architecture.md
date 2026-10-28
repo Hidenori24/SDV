@@ -61,6 +61,8 @@ FOTA状態機械はサービス要求を発行し、Classic統合側が選定BSW
 
 Flash write/readbackは固定長block単位になり、readbackは増分SHA-256で処理する。SDVF受信は呼び出し側のmanifest領域を使い、イメージ全体をメモリに保持しない。マニフェストは固定容量JSON parserで解析し、入力は64 KiB、schema一覧は16要素までに制限する。共有FOTA状態、manifest、ポート、検証処理は `no_std` かつallocatorなしでビルドできる。Linux adapterとホスト向けpackage encoderは別featureで `std`/`alloc` を使う。Pi 5ホスト向けにはsystemdからスロット選択、起動、health check、trial commit/rollbackを実行するlauncherを用意する。`no_std` でビルドできることだけでは Classic 向け成立を意味しない。
 
+Rust coreをClassic CベースのSW-C／BSW統合から呼ぶため、`rust/sdv-fota/include/sdv_fota.h` に同期C ABIを用意した。コールバックは診断受信、NvM状態、MemIf/Fls書込み・readback、Bootloader trial制御、OEM health判定へ接続する。`sdv_fota_stage_package` は署名検証後にpayloadを逐次書込みし、readback照合後にtrialを予約する。`sdv_fota_resolve_trial` は保存済みtrial状態とhealth callbackに基づいてcommitまたはrollbackを要求する。これはSDVの接続契約であり、AUTOSAR標準APIではない。Rust static libraryのC smoke testはヘッダとABIのリンクを確認するが、BSW生成物・ターゲット適合・実機フラッシュ試験は採用製品ごとに必要になる。
+
 ## Raspberry Pi 5 の位置づけ
 
 Pi 5上のLinux実装は、FOTA状態機械とインターフェースを開発・検証するホスト環境として維持できる。Pi 5 + Linux自体をAUTOSAR Classic ECUとは呼ばない。実Classicターゲットには、対象ハードウェアをサポートするAUTOSAR Classic OS/BSW/MCAL製品とBootloaderが必要になる。Pi 5をそのまま量産Classic ECUにする場合は、供給元が対応するClassic stack/OS/driver構成の有無を別途確認する。
