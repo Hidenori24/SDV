@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FOTA | SDV</title>
+<style>
+:root{color-scheme:light dark;--bg:#f4f5f7;--panel:#fff;--ink:#1d2330;--sub:#626b7b;--line:#dfe3ea;--accent:#2563eb;--note:#fff7df}
+@media(prefers-color-scheme:dark){:root{--bg:#0f131a;--panel:#171c26;--ink:#e6e9f0;--sub:#a4adbf;--line:#303847;--accent:#85aaff;--note:#342d1a}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.65 system-ui,-apple-system,"Segoe UI","Hiragino Sans",sans-serif}
+header,main{max-width:900px;margin:auto;padding:18px}header{display:flex;justify-content:space-between;align-items:center}header h1{font-size:20px;margin:0}a{color:var(--accent)}main{padding-top:0}.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px;margin:12px 0}h2{font-size:17px;margin:0 0 8px}h3{font-size:14px;margin:20px 0 6px}p{margin:8px 0}.sub{color:var(--sub)}.note{background:var(--note);border-radius:8px;padding:12px 14px}pre{overflow:auto;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:12px;font-size:13px;line-height:1.5}ul{padding-left:22px}.pill{display:inline-block;border:1px solid var(--line);border-radius:99px;padding:2px 9px;font-size:12px;color:var(--sub)}
+</style>
+</head>
+<body>
+<header><h1>FOTA — Pi 5 / Linux ホスト試作</h1><a href="index.html">← シミュレータへ</a></header>
+<main>
+  <section class="card">
+    <span class="pill">開発プレビュー</span>
+    <p>署名済みアプリイメージをHTTPSまたはファイルから受け取り、署名と互換性を検証して非稼働スロットへ書き込みます。再起動後に試験起動し、ヘルスチェックに合格すれば確定、失敗すれば元のスロットへ戻ります。</p>
+    <p class="sub">このページは実装済みのPi 5/Linuxホスト経路を説明します。ブラウザ上のシミュレータ自体はFOTA更新しません。</p>
+  </section>
+  <section class="card">
+    <h2>Pi 5への初期セットアップ</h2>
+    <p>リポジトリからホスト用ツールをビルドします。署名ツールは別の保護されたリリース環境だけでビルドしてください。</p>
+<pre><code>cargo build --release --manifest-path rust/sdv-fota/Cargo.toml \
+  --bin sdv-fota --bin sdv-fota-launcher
+sudo install -m 0755 rust/sdv-fota/target/release/sdv-fota /usr/bin/
+sudo install -m 0755 rust/sdv-fota/target/release/sdv-fota-launcher /usr/bin/</code></pre>
+    <p>署名コマンドは保護されたリリースホストで別にビルドします。</p>
+<pre><code>cargo build --release --manifest-path rust/sdv-fota/Cargo.toml \
+  --features host-signing --bin sdv-fota-sign</code></pre>
+    <p>最初のアプリをslot Aへ配置し、空のデータ領域とboot metadataを初期化します。</p>
+<pre><code>sudo useradd --system --home-dir /var/lib/sdv-fota --no-create-home sdv
+sudo install -d -o sdv -g sdv -m 0750 /var/lib/sdv-fota/slots/a /var/lib/sdv-fota/slots/b
+sudo install -o sdv -g sdv -m 0755 initial-sdv-app /var/lib/sdv-fota/slots/a/sdv-image.bin
+sudo -u sdv sdv-fota init /var/lib/sdv-fota a 1.0.0 1</code></pre>
+  </section>
+  <section class="card">
+    <h2>署名鍵の信頼設定</h2>
+    <p>リリース環境の <code>sdv-fota-sign</code> が表示する公開鍵を、root所有の <code>/etc/sdv-fota/trusted-keys</code> に登録します。秘密鍵はPiへコピーしません。</p>
+<pre><code>sudo install -d -o root -g root -m 0755 /etc/sdv-fota
+PUBLIC_KEY_HEX='&lt;key printed by sdv-fota-sign&gt;'
+printf '%s %s\n' 'release-2026' "$PUBLIC_KEY_HEX" | sudo tee /etc/sdv-fota/trusted-keys
+sudo chown root:root /etc/sdv-fota/trusted-keys
+sudo chmod 0644 /etc/sdv-fota/trusted-keys</code></pre>
+    <p>ファイルは1行に <code>key-id public-key-hex</code> を記載します。installerはroot所有で、group/otherから書き込めない通常ファイルだけを受け付けます。</p>
+  </section>
+  <section class="card">
+    <h2>更新と試験起動</h2>
+    <p>リリース環境でパッケージを作成し、Piで署名済みパッケージを導入します。</p>
+<pre><code>sdv-fota-sign /secure/release.seed release-2026 engine 1.1.0 2 5000 1 1 sdv-app update.sdvf
+
+sudo -u sdv sdv-fota install-url /var/lib/sdv-fota \
+  https://updates.example/engine/update.sdvf engine 1 1
+sudo systemctl restart sdv-fota-launcher.service
+sudo -u sdv sdv-fota status /var/lib/sdv-fota</code></pre>
+    <p>launcherはmanifestの試験時間内にアプリを起動し、設定されたhealth commandが成功した場合だけtrial slotを確定します。サービス例は <code>deploy/systemd/sdv-fota-launcher.service</code> にあります。アプリ固有のhealth commandとsystemd unitの導入はセットアップ時に必要です。</p>
+  </section>
+  <section class="card">
+    <h2>適用範囲</h2>
+    <ul>
+      <li>A/B対象は <code>/var/lib/sdv-fota</code> 内のアプリイメージです。</li>
+      <li>Pi OS、EEPROM、boot partition、raw deviceは書き換えません。</li>
+      <li>Linux上の自動テストはありますが、実Pi 5での電源断・再起動・復旧試験はまだ必要です。</li>
+      <li>AUTOSAR Classic実機には、採用BSW/MCAL、DCM、NvM、Flash、Bootloaderへの個別接続が必要です。</li>
+    </ul>
+    <p class="sub">実装コードと詳細手順: <a href="https://github.com/Hidenori24/SDV/tree/main/rust/sdv-fota">rust/sdv-fota</a> · <a href="https://github.com/Hidenori24/SDV/blob/main/docs/design/fota-pi5-operations.md">Pi 5運用手順</a> · <a href="https://github.com/Hidenori24/SDV/blob/main/docs/design/fota_classic_architecture.md">Classic境界案</a></p>
+  </section>
+</main>
+</body>
+</html>

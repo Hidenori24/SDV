@@ -94,6 +94,18 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+fn write_trust_store(root: &TempRoot) -> PathBuf {
+    write_trust_store_with_seed(root, KEY_ID, &SIGNING_SEED)
+}
+
+fn write_trust_store_with_seed(root: &TempRoot, key_id: &str, seed: &[u8; 32]) -> PathBuf {
+    let path = root.0.join("trusted-keys");
+    let public_key = ed25519_public_key(seed);
+    fs::write(&path, format!("{key_id} {}\n", hex(&public_key))).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    path
+}
+
 fn fixed_version(version: &str) -> VersionString {
     VersionString::try_from_str(version).unwrap()
 }
@@ -336,20 +348,19 @@ fn install_cli_streams_signed_package_into_inactive_slot() {
     let package = encode_package(KEY_ID, &signature, &manifest_bytes, payload).unwrap();
     let package_path = root.0.join("update.sdvf");
     fs::write(&package_path, package).unwrap();
-    let public_key = ed25519_public_key(&SIGNING_SEED);
+    let trust_store = write_trust_store(&root);
 
     let result = Command::new(env!("CARGO_BIN_EXE_sdv-fota"))
         .args([
             "install",
             root.0.to_str().unwrap(),
             package_path.to_str().unwrap(),
-            KEY_ID,
-            &hex(&public_key),
             "engine",
             "1",
             "1",
             "2",
         ])
+        .env("SDV_FOTA_TEST_TRUST_STORE", trust_store)
         .output()
         .unwrap();
 
@@ -378,6 +389,50 @@ fn install_cli_streams_signed_package_into_inactive_slot() {
 }
 
 #[test]
+fn install_cli_rejects_package_signed_by_untrusted_key() {
+    let root = TempRoot::new();
+    let boot = FileBootControl::new(&root.0);
+    boot.initialize(Slot::A, "1.0.0", 1).unwrap();
+    let payload = b"candidate image";
+    let manifest = serde_json::json!({
+        "manifest_schema": 1,
+        "image": {
+            "target_ecu": "engine",
+            "swc": "EngineSWC",
+            "version": "1.1.0",
+            "security_version": 2,
+            "size_bytes": payload.len(),
+            "sha256": hex(&sha256(payload))
+        },
+        "requires": {"signal_if_version": 1, "config_schema": [1]},
+        "policy": {"allow_downgrade": false, "trial_ms": 5000}
+    });
+    let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+    let signature = ed25519_sign(&SIGNING_SEED, &manifest_bytes);
+    let package = encode_package(KEY_ID, &signature, &manifest_bytes, payload).unwrap();
+    let package_path = root.0.join("untrusted.sdvf");
+    fs::write(&package_path, package).unwrap();
+    let trust_store = write_trust_store_with_seed(&root, KEY_ID, &[9; 32]);
+
+    let result = Command::new(env!("CARGO_BIN_EXE_sdv-fota"))
+        .args([
+            "install",
+            root.0.to_str().unwrap(),
+            package_path.to_str().unwrap(),
+            "engine",
+            "1",
+            "1",
+        ])
+        .env("SDV_FOTA_TEST_TRUST_STORE", trust_store)
+        .output()
+        .unwrap();
+
+    assert!(!result.status.success());
+    assert!(boot.state().unwrap().trial.is_none());
+    assert!(!FileSlotStorage::new(&root.0).image_path(Slot::B).exists());
+}
+
+#[test]
 fn install_url_streams_https_package_through_curl_ingress() {
     let root = TempRoot::new();
     let boot = FileBootControl::new(&root.0);
@@ -401,6 +456,7 @@ fn install_url_streams_https_package_through_curl_ingress() {
     let package = encode_package(KEY_ID, &signature, &manifest_bytes, payload).unwrap();
     let package_path = root.0.join("network-response.sdvf");
     fs::write(&package_path, package).unwrap();
+    let trust_store = write_trust_store(&root);
 
     let fake_bin = root.0.join("bin");
     fs::create_dir_all(&fake_bin).unwrap();
@@ -415,14 +471,11 @@ fn install_url_streams_https_package_through_curl_ingress() {
             .unwrap_or_default()
             .to_string_lossy()
     );
-    let public_key = ed25519_public_key(&SIGNING_SEED);
     let result = Command::new(env!("CARGO_BIN_EXE_sdv-fota"))
         .args([
             "install-url",
             root.0.to_str().unwrap(),
             "https://updates.example.test/engine.sdvf",
-            KEY_ID,
-            &hex(&public_key),
             "engine",
             "1",
             "1",
@@ -430,6 +483,7 @@ fn install_url_streams_https_package_through_curl_ingress() {
         ])
         .env("PATH", path)
         .env("SDV_FOTA_TEST_PACKAGE", &package_path)
+        .env("SDV_FOTA_TEST_TRUST_STORE", trust_store)
         .output()
         .unwrap();
 
@@ -469,6 +523,7 @@ fn failed_https_transfer_aborts_candidate_and_does_not_schedule_trial() {
     let package = encode_package(KEY_ID, &signature, &manifest_bytes, payload).unwrap();
     let package_path = root.0.join("partial-network-response.sdvf");
     fs::write(&package_path, package).unwrap();
+    let trust_store = write_trust_store(&root);
 
     let fake_bin = root.0.join("bin");
     fs::create_dir_all(&fake_bin).unwrap();
@@ -483,14 +538,11 @@ fn failed_https_transfer_aborts_candidate_and_does_not_schedule_trial() {
             .unwrap_or_default()
             .to_string_lossy()
     );
-    let public_key = ed25519_public_key(&SIGNING_SEED);
     let result = Command::new(env!("CARGO_BIN_EXE_sdv-fota"))
         .args([
             "install-url",
             root.0.to_str().unwrap(),
             "https://updates.example.test/engine.sdvf",
-            KEY_ID,
-            &hex(&public_key),
             "engine",
             "1",
             "1",
@@ -498,6 +550,7 @@ fn failed_https_transfer_aborts_candidate_and_does_not_schedule_trial() {
         ])
         .env("PATH", path)
         .env("SDV_FOTA_TEST_PACKAGE", &package_path)
+        .env("SDV_FOTA_TEST_TRUST_STORE", trust_store)
         .output()
         .unwrap();
 
@@ -541,19 +594,18 @@ fn signing_and_install_commands_complete_a_host_update() {
         String::from_utf8_lossy(&signed.stderr)
     );
 
-    let public_key = ed25519_public_key(&SIGNING_SEED);
+    let trust_store = write_trust_store(&root);
     let installed = Command::new(env!("CARGO_BIN_EXE_sdv-fota"))
         .args([
             "install",
             root.0.to_str().unwrap(),
             package_path.to_str().unwrap(),
-            KEY_ID,
-            &hex(&public_key),
             "engine",
             "1",
             "1",
             "2",
         ])
+        .env("SDV_FOTA_TEST_TRUST_STORE", trust_store)
         .output()
         .unwrap();
     assert!(

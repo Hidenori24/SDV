@@ -34,8 +34,26 @@ sudo -u sdv sdv-fota init /var/lib/sdv-fota a 1.0.0 1
 ```
 
 Provision the matching Ed25519 public key through the ECU's trusted configuration. The FOTA CLI
-accepts the key ID and public key at installation time; the private signing seed stays on the
-release host.
+loads trusted keys from `/etc/sdv-fota/trusted-keys`. Provision the file as root, readable by
+the `sdv` account, and not writable by group or other users. The file contains one key per line:
+
+```text
+# key-id followed by the 32-byte Ed25519 public key in lowercase or uppercase hex
+release-2026 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+```
+
+For example, use the public key printed by `sdv-fota-sign` on the protected release host:
+
+```sh
+sudo install -d -o root -g root -m 0755 /etc/sdv-fota
+PUBLIC_KEY_HEX='<actual-public-key-hex>'
+printf '%s %s\n' 'release-2026' "$PUBLIC_KEY_HEX" | sudo tee /etc/sdv-fota/trusted-keys >/dev/null
+sudo chown root:root /etc/sdv-fota/trusted-keys
+sudo chmod 0644 /etc/sdv-fota/trusted-keys
+```
+
+The installer rejects a trust file that is not a regular root-owned file or is writable by group
+or other users. Keep signing seeds on the release host; only public keys belong on the Pi.
 
 ## Sign and install an update
 
@@ -50,9 +68,9 @@ Deliver `update.sdvf` through the deployment's chosen transport. On the Pi, inst
 provisioned public key and the active ECU compatibility values:
 
 ```sh
-sudo -u sdv sdv-fota install /var/lib/sdv-fota update.sdvf release-2026 <public-key-hex> engine 1 1
-# Or fetch and stream directly from an HTTPS artifact endpoint:
-sudo -u sdv sdv-fota install-url /var/lib/sdv-fota https://updates.example/engine/update.sdvf release-2026 <public-key-hex> engine 1 1
+# Install a local package or stream one from an HTTPS artifact endpoint:
+sudo -u sdv sdv-fota install /var/lib/sdv-fota update.sdvf engine 1 1
+sudo -u sdv sdv-fota install-url /var/lib/sdv-fota https://updates.example/engine/update.sdvf engine 1 1
 sdv-fota status /var/lib/sdv-fota
 sudo systemctl restart sdv-fota-launcher.service
 ```

@@ -14,6 +14,8 @@ mod model;
 mod package;
 mod ports;
 mod service;
+#[cfg(all(feature = "std", target_os = "linux"))]
+pub mod trust_store;
 
 pub use model::{
     BootDecision, BootState, Ecu, FixedString, FixedU32List, Image, Manifest, Package,

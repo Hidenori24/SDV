@@ -13,7 +13,7 @@ ADR-0003 で **Config（データ）の更新** は成立している（検証 �
 
 ### 実装状況（2026-10-26）
 
-`rust/sdv-fota` に署名済み SDVF の固定メモリ検証、共通 A/B 更新状態機械、Pi 5/Linux のファイル backend、ホスト用 package signer/installer、trial launcher が実装されている。署名→導入→trial起動→health check→commit/rollback はLinux統合テストで通している。実Pi 5上の動作確認、ネットワーク転送プロトコル、VCU UpdateManager/ECUキャンペーン、採用 AUTOSAR Classic BSW/MCAL/Bootloader binding は未完了であり、この実装を量産FOTAやAUTOSAR準拠とは扱わない。
+`rust/sdv-fota` に署名済み SDVF の固定メモリ検証、共通 A/B 更新状態機械、Pi 5/Linux のファイル backend、ホスト用 package signer/installer、HTTPS ingress、trial launcher が実装されている。Pi installer は root が管理する trust store の Ed25519 鍵だけを受け入れる。署名→導入→trial起動→health check→commit/rollback はLinux統合テストで通している。実Pi 5上の動作確認、実アプリのhealth check、VCU UpdateManager/ECUキャンペーン、採用 AUTOSAR Classic BSW/MCAL/Bootloader binding は未完了であり、この実装を量産FOTAやAUTOSAR準拠とは扱わない。
 
 本ADRで、ECU に載るソフトを **配信 → 検証 → 書き込み → 試験適用 → 確定 or 自動ロールバック** する仕組み（FOTA）を設計する。
 ADR-0002 で作った「ECU 分割・仮想バス・故障注入・Watchdog」が、そのまま FOTA の検証環境になる。
