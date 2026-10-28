@@ -253,6 +253,7 @@ impl BootControl for Ports<'_> {
             active_version,
             highest_security_version: state.highest_security_version,
             trial,
+            last_trial: None,
         })
     }
     fn schedule_trial(&mut self, trial: TrialImage) -> Result<(), ()> {

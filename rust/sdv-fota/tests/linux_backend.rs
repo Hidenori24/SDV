@@ -1,7 +1,9 @@
 #![cfg(target_os = "linux")]
 
 use sdv_fota::linux::{run_selected_image, FileBootControl, FileSlotStorage, HttpsPackageSource};
-use sdv_fota::{encode_package, BootControl, ImageStorage, Slot, TrialImage, VersionString};
+use sdv_fota::{
+    encode_package, BootControl, ImageStorage, Slot, TrialImage, TrialOutcome, VersionString,
+};
 use sdv_sec::{ed25519_public_key, ed25519_sign, sha256};
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -98,6 +100,32 @@ fn concurrent_trial_scheduling_keeps_one_consistent_boot_record() {
     ));
 }
 
+#[test]
+fn exhausted_trial_boot_attempts_record_a_rollback_outcome() {
+    let root = TempRoot::new();
+    let mut boot = FileBootControl::new(&root.0);
+    boot.initialize(Slot::A, "1.0.0", 1).unwrap();
+    boot.schedule_trial(TrialImage {
+        slot: Slot::B,
+        version: fixed_version("1.1.0"),
+        security_version: 2,
+        boots_left: 1,
+        trial_window_ms: 5_000,
+    })
+    .unwrap();
+
+    assert!(boot.select_for_boot().unwrap().trial);
+    let fallback = boot.select_for_boot().unwrap();
+    assert_eq!(fallback.slot, Slot::A);
+    assert!(!fallback.trial);
+
+    let state = boot.state().unwrap();
+    let result = state.last_trial.unwrap();
+    assert_eq!(result.slot, Slot::B);
+    assert_eq!(result.version, "1.1.0");
+    assert_eq!(result.outcome, TrialOutcome::RolledBack);
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
@@ -164,6 +192,7 @@ fn linux_backend_stages_image_and_commits_trial() {
     assert_eq!(state.active_version, "1.1.0");
     assert_eq!(state.highest_security_version, 2);
     assert!(state.trial.is_none());
+    assert_eq!(state.last_trial.unwrap().outcome, TrialOutcome::Committed);
 }
 
 #[test]
@@ -402,6 +431,7 @@ fn linux_launcher_rolls_back_trial_when_health_window_expires() {
     assert_eq!(state.active, Slot::A);
     assert_eq!(state.active_version, "1.0.0");
     assert!(state.trial.is_none());
+    assert_eq!(state.last_trial.unwrap().outcome, TrialOutcome::RolledBack);
 }
 
 #[test]
@@ -469,6 +499,7 @@ fn init_cli_accepts_named_provisioning_options() {
     assert!(report.contains("active_version: 2.3.0"));
     assert!(report.contains("highest_security_version: 7"));
     assert!(report.contains("active_image_integrity: verified"));
+    assert!(report.contains("last_trial_outcome: none"));
     FileSlotStorage::new(&root.0)
         .verify_executable_image(Slot::B)
         .unwrap();
@@ -505,6 +536,16 @@ fn rollback_trial_cli_clears_pending_candidate_and_rejects_empty_rollback() {
     assert_eq!(state.active, Slot::A);
     assert_eq!(state.active_version, "1.0.0");
     assert!(state.trial.is_none());
+    assert_eq!(state.last_trial.unwrap().outcome, TrialOutcome::RolledBack);
+
+    let status = Command::new(env!("CARGO_BIN_EXE_sdv-fota"))
+        .args(["status", "--state-root", root.0.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(status.status.success());
+    let report = String::from_utf8_lossy(&status.stdout);
+    assert!(report.contains("last_trial_outcome: rolled_back"));
+    assert!(report.contains("last_trial_version: 1.1.0"));
 
     let repeated = rollback();
     assert!(!repeated.status.success());

@@ -48,6 +48,14 @@ fn status(args: &[OsString]) -> Result<(), String> {
         "highest_security_version: {}",
         state.highest_security_version
     );
+    if let Some(result) = state.last_trial {
+        println!("last_trial_outcome: {}", trial_outcome_name(result.outcome));
+        println!("last_trial_slot: {}", slot_name(result.slot));
+        println!("last_trial_version: {}", result.version);
+        println!("last_trial_security_version: {}", result.security_version);
+    } else {
+        println!("last_trial_outcome: none");
+    }
     if let Some(trial) = state.trial {
         println!("trial_slot: {}", slot_name(trial.slot));
         println!("trial_version: {}", trial.version);
@@ -400,6 +408,13 @@ fn slot_name(slot: Slot) -> &'static str {
     match slot {
         Slot::A => "A",
         Slot::B => "B",
+    }
+}
+
+fn trial_outcome_name(outcome: sdv_fota::TrialOutcome) -> &'static str {
+    match outcome {
+        sdv_fota::TrialOutcome::Committed => "committed",
+        sdv_fota::TrialOutcome::RolledBack => "rolled_back",
     }
 }
 
