@@ -8,12 +8,14 @@ Ed25519 package signature as the release authorization check.
 
 ## Build
 
-On the Pi 5, build the Linux host commands from the repository:
+On the Pi 5, build the Linux FOTA tools and PiCar-X vehicle image from the repository:
 
 ```sh
 cargo build --release --manifest-path rust/sdv-fota/Cargo.toml --bin sdv-fota --bin sdv-fota-launcher
+cargo build --release --manifest-path rust/sdv-picarx/Cargo.toml --bin sdv-picarx --bin sdv-picarx-health
 sudo install -m 0755 rust/sdv-fota/target/release/sdv-fota /usr/bin/sdv-fota
 sudo install -m 0755 rust/sdv-fota/target/release/sdv-fota-launcher /usr/bin/sdv-fota-launcher
+sudo install -m 0755 rust/sdv-picarx/target/release/sdv-picarx-health /usr/bin/sdv-picarx-health
 ```
 
 The signing utility is built separately on a protected release host with
@@ -24,15 +26,19 @@ The `install-url` command requires `curl` at runtime; local-file `install` does 
 
 Create the unprivileged application account. The launcher and installer keep the slot images and
 boot metadata root-owned; candidate applications run as `sdv-app` and cannot replace the image or
-rewrite boot state. Put the trusted initial executable at
-`/var/lib/sdv-fota/slots/a/sdv-image.bin`, owned by root with mode `0755`:
+rewrite boot state. Start with the disabled commissioning config, edit the device paths, and keep
+forward power at zero until the motor and steering values are calibrated on the vehicle. Install
+the initial PiCar-X image at `/var/lib/sdv-fota/slots/a/sdv-image.bin`, owned by root with mode
+`0755`:
 
 ```sh
 sudo useradd --system --user-group --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin sdv-app
 sudo install -d -o root -g root -m 0755 /var/lib/sdv-fota/slots/a /var/lib/sdv-fota/slots/b
-sudo install -o root -g root -m 0755 initial-sdv-app /var/lib/sdv-fota/slots/a/sdv-image.bin
+sudo install -d -o root -g root -m 0755 /etc/sdv-picarx
+sudo install -o root -g root -m 0644 rust/sdv-picarx/config/pi5.fota.disabled.example.json /etc/sdv-picarx/vehicle.json
+sudo install -o root -g root -m 0755 rust/sdv-picarx/target/release/sdv-picarx /var/lib/sdv-fota/slots/a/sdv-image.bin
 sudo sdv-fota init /var/lib/sdv-fota a 1.0.0 1
-printf 'SDV_FOTA_APP_UID=%s\nSDV_FOTA_APP_GID=%s\n' "$(id -u sdv-app)" "$(id -g sdv-app)" | sudo tee /etc/default/sdv-fota-launcher >/dev/null
+printf 'SDV_FOTA_APP_UID=%s\nSDV_FOTA_APP_GID=%s\nSDV_PICARX_CONFIG=/etc/sdv-picarx/vehicle.json\n' "$(id -u sdv-app)" "$(id -g sdv-app)" | sudo tee /etc/default/sdv-fota-launcher >/dev/null
 sudo chown root:root /etc/default/sdv-fota-launcher
 sudo chmod 0644 /etc/default/sdv-fota-launcher
 ```
@@ -103,8 +109,11 @@ receives `SDV_TRIAL_SLOT` and `SDV_IMAGE_PATH`; it must exit promptly and return
 the application is healthy. A failed or expired trial is rolled back. A successful trial commits
 the slot and security version before the launcher waits for the application process.
 
-Install the example unit from `deploy/systemd/sdv-fota-launcher.service` after providing the
-`sdv-health-check` program:
+Install the example unit from `deploy/systemd/sdv-fota-launcher.service`. Its health command checks
+the vehicle runtime's Unix socket, which reports ready only after a successful control cycle. The
+vehicle image waits for a peer to send fresh driver and state-estimate packets to
+`/run/sdv-picarx/input.sock`; that peer must run as `sdv-app` or have permission to write to the
+socket:
 
 ```sh
 sudo install -m 0644 deploy/systemd/sdv-fota-launcher.service /etc/systemd/system/
@@ -112,21 +121,22 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now sdv-fota-launcher.service
 ```
 
-The health check is application-specific; the repository does not assume a particular SDV process
-readiness protocol.
+`sdv-picarx-health` reports ready only after the vehicle application completes a recent ECU cycle
+and actuator write. Keep the external input and vehicle-state process available during the trial;
+the FOTA trial fails when it cannot provide fresh snapshots.
 
 ## Current boundary
 
-The planned PiCar-X deployment uses the complete Rust Linux runtime as one `vehicle` FOTA image.
+The PiCar-X deployment uses the complete Rust Linux runtime as one `vehicle` FOTA image.
 `sdv-core::runtime::VehicleRuntime` runs VCU, Engine, Brake, and Steering as separate virtual ECU
 tasks with their own RTE state and the same virtual bus contract as the Rust simulator; this does not
 require separate physical CPUs. This initial FOTA unit replaces the whole runtime, not an individual
 task. The Pi path can sign a
 package on a separate host, verify and stage it incrementally, and exercise
 A/B trial boot and rollback on Linux. HTTPS artifact transfer uses the device's system CA store;
-mutual TLS, private repository credentials, remote campaign orchestration, the PiCar-X runtime and
-hardware adapter, actual Pi 5 hardware validation, and a production health-check implementation
-still belong to deployment integration.
+mutual TLS, private repository credentials, remote campaign orchestration, a real vehicle-state
+estimator/input peer, actual Pi 5 hardware validation, and calibrated PiCar-X output remain
+deployment work.
 AUTOSAR Classic integration additionally requires the chosen
 DCM/Csm/NvM/MemIf/Fls/Bootloader bindings described in
 [the Classic architecture proposal](fota_classic_architecture.md).

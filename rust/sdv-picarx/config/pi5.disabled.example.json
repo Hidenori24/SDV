@@ -5,6 +5,7 @@
   "left_direction_line": 23,
   "right_direction_line": 24,
   "input_socket": "/tmp/sdv-picarx-input.sock",
+  "health_socket": "/tmp/sdv-picarx-health.sock",
   "input_max_age_ms": 100,
   "motor": {
     "left_forward_high": true,
