@@ -94,6 +94,14 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+#[cfg(feature = "host-signing")]
+fn write_seed_file(path: &Path, seed: &[u8; 32], mode: u32) {
+    fs::write(path, hex(seed)).unwrap();
+    let mut permissions = fs::metadata(path).unwrap().permissions();
+    permissions.set_mode(mode);
+    fs::set_permissions(path, permissions).unwrap();
+}
+
 fn write_trust_store(root: &TempRoot) -> PathBuf {
     write_trust_store_with_seed(root, KEY_ID, &SIGNING_SEED)
 }
@@ -723,7 +731,7 @@ fn failed_https_transfer_aborts_candidate_and_does_not_schedule_trial() {
 fn signing_command_rejects_metadata_the_installer_will_not_accept() {
     let root = TempRoot::new();
     let seed_path = root.0.join("signing.seed");
-    fs::write(&seed_path, hex(&SIGNING_SEED)).unwrap();
+    write_seed_file(&seed_path, &SIGNING_SEED, 0o600);
     let image_path = root.0.join("candidate.bin");
     fs::write(&image_path, b"candidate image").unwrap();
 
@@ -770,12 +778,53 @@ fn signing_command_rejects_metadata_the_installer_will_not_accept() {
 
 #[cfg(feature = "host-signing")]
 #[test]
+fn signing_command_rejects_group_or_world_accessible_seed_files() {
+    let root = TempRoot::new();
+    let seed_path = root.0.join("signing.seed");
+    write_seed_file(&seed_path, &SIGNING_SEED, 0o644);
+    let image_path = root.0.join("candidate.bin");
+    fs::write(&image_path, b"candidate image").unwrap();
+    let package_path = root.0.join("candidate.sdvf");
+
+    let result = Command::new(env!("CARGO_BIN_EXE_sdv-fota-sign"))
+        .args([
+            "--seed",
+            seed_path.to_str().unwrap(),
+            "--key-id",
+            KEY_ID,
+            "--target",
+            "vehicle",
+            "--version",
+            "1.1.0",
+            "--security-version",
+            "2",
+            "--trial-ms",
+            "5000",
+            "--config-schema",
+            "1",
+            "--signal-if-version",
+            "1",
+            "--image",
+            image_path.to_str().unwrap(),
+            "--output",
+            package_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("group or other users"));
+    assert!(!package_path.exists());
+}
+
+#[cfg(feature = "host-signing")]
+#[test]
 fn signing_and_install_commands_complete_a_host_update() {
     let root = TempRoot::new();
     let boot = FileBootControl::new(&root.0);
     boot.initialize(Slot::A, "1.0.0", 1).unwrap();
     let seed_path = root.0.join("signing.seed");
-    fs::write(&seed_path, hex(&SIGNING_SEED)).unwrap();
+    write_seed_file(&seed_path, &SIGNING_SEED, 0o600);
     let image_path = root.0.join("candidate.bin");
     let payload = b"#!/bin/sh\nexec sleep 1\n";
     fs::write(&image_path, payload).unwrap();

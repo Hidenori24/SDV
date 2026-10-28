@@ -24,7 +24,9 @@ GPIO chip labels, and GPIO line offsets on that Pi. It does not request or chang
 
 The signing utility is built separately on a protected release host with
 `--features host-signing --bin sdv-fota-sign`. Do not build or provision a signing seed on the Pi.
-The `install-url` command requires `curl` at runtime; local-file `install` does not.
+Keep the seed in a regular file with Unix mode `0600`; the signer rejects group/other access and
+zeroes both its decoded key and temporary file buffer. The `install-url` command requires `curl`
+at runtime; local-file `install` does not.
 
 ## Provision the first image
 
@@ -94,6 +96,7 @@ On the release host, sign an application image. The tool prints the key ID and p
 release process can verify which trust key is needed on the target:
 
 ```sh
+chmod 0600 /secure/release.seed
 sdv-fota-sign --seed /secure/release.seed --key-id release-2026 --target vehicle \
   --version 1.1.0 --security-version 2 --trial-ms 5000 --config-schema 1 \
   --signal-if-version 1 --image sdv-image.bin --output update.sdvf
