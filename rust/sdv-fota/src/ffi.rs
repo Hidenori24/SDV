@@ -802,31 +802,33 @@ pub unsafe extern "C" fn sdv_fota_campaign_dispatch(
     if transport.is_null() || command.is_null() {
         return SDV_FOTA_INVALID_ARG;
     }
-    // SAFETY: caller guarantees readable transport and command structures.
-    let transport = unsafe { &*transport };
-    let command = unsafe { &*command };
-    if command.command == SDV_FOTA_CAMPAIGN_NONE {
-        return if command.ecu == SDV_FOTA_ECU_NONE {
+    // Copy fields before invoking the callback so its context may safely refer to the input
+    // structures without any Rust references remaining live across the external call.
+    let command_id = unsafe { (*command).command };
+    let ecu_id = unsafe { (*command).ecu };
+    if command_id == SDV_FOTA_CAMPAIGN_NONE {
+        return if ecu_id == SDV_FOTA_ECU_NONE {
             SDV_FOTA_OK
         } else {
             SDV_FOTA_INVALID_ARG
         };
     }
-    if campaign_ecu_from_id(command.ecu).is_none() {
+    if campaign_ecu_from_id(ecu_id).is_none() {
         return SDV_FOTA_INVALID_ARG;
     }
-    let callback = match command.command {
-        SDV_FOTA_CAMPAIGN_REQUEST => transport.request_update,
-        SDV_FOTA_CAMPAIGN_ACTIVATE => transport.activate_trial,
-        SDV_FOTA_CAMPAIGN_COMMIT => transport.commit_trial,
-        SDV_FOTA_CAMPAIGN_ABORT => transport.abort_update,
+    let callback = match command_id {
+        SDV_FOTA_CAMPAIGN_REQUEST => unsafe { (*transport).request_update },
+        SDV_FOTA_CAMPAIGN_ACTIVATE => unsafe { (*transport).activate_trial },
+        SDV_FOTA_CAMPAIGN_COMMIT => unsafe { (*transport).commit_trial },
+        SDV_FOTA_CAMPAIGN_ABORT => unsafe { (*transport).abort_update },
         _ => return SDV_FOTA_INVALID_ARG,
     };
     let Some(callback) = callback else {
         return SDV_FOTA_INVALID_ARG;
     };
-    // SAFETY: callback and context validity are part of the caller's transport contract.
-    if unsafe { callback(transport.context, command.ecu) } == 0 {
+    // SAFETY: caller guarantees the copied context and selected callback are valid.
+    let context = unsafe { (*transport).context };
+    if unsafe { callback(context, ecu_id) } == 0 {
         SDV_FOTA_OK
     } else {
         SDV_FOTA_CALLBACK_ERROR
