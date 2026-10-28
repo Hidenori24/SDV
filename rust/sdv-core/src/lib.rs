@@ -9,6 +9,7 @@ pub mod fota;
 pub mod model;
 pub mod nvm;
 pub mod rte;
+pub mod runtime;
 pub mod scenario;
 pub mod safety;
 pub mod sim;

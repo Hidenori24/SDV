@@ -117,10 +117,11 @@ readiness protocol.
 
 ## Current boundary
 
-The planned PiCar-X deployment uses the complete Rust Linux runtime as one `vehicle` FOTA image. Within
-that process, VCU, Engine, Brake, and Steering remain separate virtual ECU tasks with their own
-RTE state, matching the Rust simulation architecture; they do not require separate physical CPUs.
-This initial FOTA unit replaces the whole runtime, not an individual task. The Pi path can sign a
+The planned PiCar-X deployment uses the complete Rust Linux runtime as one `vehicle` FOTA image.
+`sdv-core::runtime::VehicleRuntime` runs VCU, Engine, Brake, and Steering as separate virtual ECU
+tasks with their own RTE state and the same virtual bus contract as the Rust simulator; this does not
+require separate physical CPUs. This initial FOTA unit replaces the whole runtime, not an individual
+task. The Pi path can sign a
 package on a separate host, verify and stage it incrementally, and exercise
 A/B trial boot and rollback on Linux. HTTPS artifact transfer uses the device's system CA store;
 mutual TLS, private repository credentials, remote campaign orchestration, the PiCar-X runtime and

@@ -214,12 +214,13 @@ flowchart LR
 ## 10. Raspberry Pi 5 での実行形態
 
 実車ランタイムでは Engine / Brake / Steering / VCU を、Pi 5 上の一つの Rust Linux
-プロセス内で独立した仮想ECUタスクとして実行する。各タスクは専用のRTEを持ち、信号は
-同じECU境界を通して受け渡す。シミュレーションでは仮想バスとVehicleDynamics plantを
-使い、実車ではPiCar-X用Platform adapterがアクチュエータ指令をRobot HATへ送り、利用
-可能なセンサ値を入力する。共有するのはECUの制御ロジックと信号契約であり、Plantと
-Platform adapterは実行先ごとに差し替える。
+プロセス内で独立した仮想ECUタスクとして実行する。`rust/sdv-core/src/runtime.rs` の
+`VehicleRuntime` がこのタスク境界を提供し、各タスクは専用RTEを持つ。Pi側の周期ループは
+10msごとに `step_10ms` を呼び、ドライバー入力・車両状態・platform生存状態を渡して、
+アクチュエータ指令とSafety状態を受け取る。シミュレーションと実車ランタイムは同じSWC・
+仮想バスを使う。シミュレーションではVehicleDynamics plantを動かし、実車ではPiCar-X用
+Platform adapterがRobot HATへ指令を送り、利用可能なセンサ値を入力する。
 
 当面のFOTA単位はRustプロセス全体とし、仮想ECUタスクごとの個別イメージ更新は行わない。
 プロセス内でECUの責務を分けることと、ECUごとの独立した更新ライフサイクルは別の段階である。
-これは目標構成であり、Pi 5用実車ランタイム、Robot HAT adapter、実車確認は未実装。
+`VehicleRuntime` は追加済みだが、Pi 5用の実行バイナリ、Robot HAT adapter、実車確認は未実装。

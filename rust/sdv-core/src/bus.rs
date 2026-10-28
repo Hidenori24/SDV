@@ -18,6 +18,10 @@ pub enum Node {
 }
 
 /// Index of a supervised node in the alive-counter array (same order as `sim::Component`).
+pub const ALIVE_ENGINE_INDEX: usize = 0;
+pub const ALIVE_BRAKE_INDEX: usize = 1;
+pub const ALIVE_STEERING_INDEX: usize = 2;
+pub const ALIVE_PLANT_INDEX: usize = 3;
 pub const ALIVE_NODES: [Node; 4] = [Node::Engine, Node::Brake, Node::Steering, Node::Plant];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
