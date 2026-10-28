@@ -23,6 +23,50 @@ extern "C" {
 #define SDV_FOTA_ECU_STEERING 2
 #define SDV_FOTA_VERSION_CAPACITY 32
 #define SDV_FOTA_MAX_MANIFEST_BYTES (64u * 1024u)
+#define SDV_FOTA_MAX_CAMPAIGN_ECUS 3
+#define SDV_FOTA_ECU_NONE 0xff
+
+#define SDV_FOTA_SAFETY_NORMAL 0
+#define SDV_FOTA_SAFETY_DEGRADED 1
+#define SDV_FOTA_SAFETY_ESTOP 2
+
+#define SDV_FOTA_ECU_STATUS_STAGED 0
+#define SDV_FOTA_ECU_STATUS_TRIAL_HEALTHY 1
+#define SDV_FOTA_ECU_STATUS_COMMITTED 2
+#define SDV_FOTA_ECU_STATUS_ROLLED_BACK 3
+#define SDV_FOTA_ECU_STATUS_REJECTED 4
+#define SDV_FOTA_ECU_STATUS_FAILED 5
+
+#define SDV_FOTA_CAMPAIGN_NONE 0
+#define SDV_FOTA_CAMPAIGN_REQUEST 1
+#define SDV_FOTA_CAMPAIGN_ACTIVATE 2
+#define SDV_FOTA_CAMPAIGN_COMMIT 3
+#define SDV_FOTA_CAMPAIGN_ABORT 4
+
+#define SDV_FOTA_CAMPAIGN_STATE_IDLE 0
+#define SDV_FOTA_CAMPAIGN_STATE_UPDATING 1
+#define SDV_FOTA_CAMPAIGN_STATE_COMPLETED 2
+#define SDV_FOTA_CAMPAIGN_STATE_FAILED 3
+
+/* Caller-owned fixed storage. Initialize with sdv_fota_campaign_init; do not edit its fields. */
+typedef struct {
+    uint8_t targets[SDV_FOTA_MAX_CAMPAIGN_ECUS];
+    uint8_t target_count;
+    uint8_t target_index;
+    uint8_t phase;
+    uint8_t state;
+} sdv_fota_campaign_t;
+
+typedef struct {
+    uint8_t stopped;
+    uint8_t safety_state;
+    uint8_t other_update_active;
+} sdv_fota_vehicle_conditions_t;
+
+typedef struct {
+    uint8_t command;
+    uint8_t ecu;
+} sdv_fota_campaign_command_t;
 
 typedef struct {
     uint8_t active_slot;
@@ -90,6 +134,31 @@ int32_t sdv_fota_resolve_trial(const sdv_fota_callbacks_t *callbacks);
 int32_t sdv_fota_select_for_boot(const sdv_fota_callbacks_t *callbacks,
                                  uint8_t *out_slot,
                                  uint8_t *out_is_trial);
+
+/*
+ * VCU-side, allocator-free sequential campaign policy. This emits logical actions; a target
+ * adapter maps them to its diagnostic/Com transport. The caller owns the state and rechecks
+ * vehicle conditions from its periodic task while an ECU update is active.
+ */
+int32_t sdv_fota_campaign_init(sdv_fota_campaign_t *manager);
+int32_t sdv_fota_campaign_start(sdv_fota_campaign_t *manager,
+                                const uint8_t *targets,
+                                uint8_t target_count,
+                                const sdv_fota_vehicle_conditions_t *conditions,
+                                sdv_fota_campaign_command_t *out_command);
+int32_t sdv_fota_campaign_report(sdv_fota_campaign_t *manager,
+                                 uint8_t ecu,
+                                 uint8_t status,
+                                 const sdv_fota_vehicle_conditions_t *conditions,
+                                 sdv_fota_campaign_command_t *out_command);
+int32_t sdv_fota_campaign_recheck(sdv_fota_campaign_t *manager,
+                                  const sdv_fota_vehicle_conditions_t *conditions,
+                                  sdv_fota_campaign_command_t *out_command);
+int32_t sdv_fota_campaign_cancel(sdv_fota_campaign_t *manager,
+                                 sdv_fota_campaign_command_t *out_command);
+int32_t sdv_fota_campaign_state(const sdv_fota_campaign_t *manager,
+                                uint8_t *out_state,
+                                uint8_t *out_ecu);
 
 #ifdef __cplusplus
 }

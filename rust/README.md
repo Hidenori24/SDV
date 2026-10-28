@@ -128,6 +128,9 @@ campaign on vehicle-stopped, normal-Safety, and no-other-update conditions, then
 Activate → Commit actions for one ECU at a time. The VCU must call `recheck` from its periodic
 task so a newly moving vehicle or changed Safety state promptly emits Abort. This is a policy
 model; diagnostic/CAN transport and integration into the simulator VCU remain separate work.
+For Classic C integration, the same policy is exposed through caller-owned campaign state and
+`sdv_fota_campaign_*` functions in `rust/sdv-fota/include/sdv_fota.h`; C smoke coverage exercises
+the Request/Activate/Commit sequence and a safety-triggered Abort.
 See [the Classic architecture proposal](../docs/design/fota_classic_architecture.md). `SIGNAL_IF_VERSION` is currently 1.
 See the [Pi 5 host operation workflow](../docs/design/fota-pi5-operations.md) for initial provisioning,
 package signing, staging, and trial activation.
