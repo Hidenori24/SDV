@@ -73,7 +73,7 @@ sudo sdv-fota install-url --state-root /var/lib/sdv-fota \
 sudo sdv-fota status --state-root /var/lib/sdv-fota
 sudo sdv-fota verify-images --state-root /var/lib/sdv-fota
 sudo systemctl restart sdv-fota-launcher.service</code></pre>
-    <p>launcherは起動対象のSHA-256を照合し、manifestの試験時間内に車両イメージを <code>sdv-app</code> として起動します。同じユーザーで動く <code>sdv-picarx-health</code> が最近の制御周期成功を確認した後も、最大2秒間health成功とプロセス稼働が続いてからtrial slotを確定します。候補イメージの欠落、digest不一致、health途絶、早期終了はrollbackします。<code>status</code>はactive/trial両slotのdigest照合状態も表示します。サービス例は <code>deploy/systemd/sdv-fota-launcher.service</code> にあります。launcherはUID/GID切替に必要な2つのcapabilityだけを持ちます。</p>
+    <p>launcherは起動対象のSHA-256を照合し、manifestの試験時間内に車両イメージを <code>sdv-app</code> として起動します。同じユーザーで動く <code>sdv-picarx-health</code> が最近の制御周期成功を確認した後も、最大2秒間health成功とプロセス稼働が続いてからtrial slotを確定します。候補イメージの欠落、digest不一致、health途絶、早期終了はrollbackします。<code>status</code>はactive/trial両slotのdigest照合状態と直近trialの結果・slot・versionを表示します。サービス例は <code>deploy/systemd/sdv-fota-launcher.service</code> にあります。launcherはUID/GID切替に必要な2つのcapabilityだけを持ちます。</p>
     <p><code>status</code>は診断表示なのでdigest不一致でも終了コード0です。監視や更新前ゲートで検証結果を終了コードに反映する場合は <code>sudo sdv-fota verify-images --state-root /var/lib/sdv-fota</code> を使ってください。activeイメージとpending trialイメージのdigestがすべて一致するときだけ成功します。</p>
     <p class="note">実車のhealth checkは停車状態を判定しません。PiCar-Xを完全に停止し、外部の運転入力peerが走行要求を出していないことを確認してからlauncherを再起動してください。</p>
     <p>launcherの自動復旧が動かない状態でtrialが残った場合は、管理者が <code>sudo sdv-fota rollback-trial --state-root /var/lib/sdv-fota</code> を実行できます。現在のactive slotは維持され、次回launcher起動時に使われます。このコマンドは稼働中プロセスを停止しないため、実車を止めてから実行し、その後launcherを再起動してください。</p>

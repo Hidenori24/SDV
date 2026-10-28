@@ -5,7 +5,10 @@
 //! launcher should call `select_for_boot`, start the returned slot's image, then call
 //! `commit_trial` only after the SDV service passes its health checks.
 
-use super::{BootControl, BootDecision, BootState, ImageStorage, Slot, TrialImage, VersionString};
+use super::{
+    BootControl, BootDecision, BootState, ImageStorage, LastTrialResult, Slot, TrialImage,
+    TrialOutcome, VersionString,
+};
 use crate::package::decode_sha256;
 use serde::Serialize;
 use std::fs::{self, File, OpenOptions};
@@ -756,6 +759,7 @@ impl FileBootControl {
                     .ok_or(Error::InvalidRecord)?,
                 highest_security_version,
                 trial: None,
+                last_trial: None,
             },
         )
     }
@@ -827,6 +831,7 @@ impl BootControl for FileBootControl {
         };
         if trial.boots_left == 0 {
             state.trial = None;
+            state.last_trial = Some(LastTrialResult::from_trial(trial, TrialOutcome::RolledBack));
             self.save(sequence.checked_add(1).ok_or(Error::InvalidRecord)?, &state)?;
             return Ok(BootDecision {
                 slot: state.active,
@@ -847,15 +852,15 @@ impl BootControl for FileBootControl {
         state.active = trial.slot;
         state.active_version = trial.version;
         state.highest_security_version = state.highest_security_version.max(trial.security_version);
+        state.last_trial = Some(LastTrialResult::from_trial(trial, TrialOutcome::Committed));
         self.save(sequence.checked_add(1).ok_or(Error::InvalidRecord)?, &state)
     }
 
     fn rollback_trial(&mut self) -> Result<(), Self::Error> {
         let _lock = BootRecordLock::acquire(&self.root)?;
         let (sequence, mut state) = self.load()?;
-        if state.trial.take().is_none() {
-            return Err(Error::NoTrialPending);
-        }
+        let trial = state.trial.take().ok_or(Error::NoTrialPending)?;
+        state.last_trial = Some(LastTrialResult::from_trial(trial, TrialOutcome::RolledBack));
         self.save(sequence.checked_add(1).ok_or(Error::InvalidRecord)?, &state)
     }
 }
