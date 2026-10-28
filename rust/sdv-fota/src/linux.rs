@@ -42,6 +42,7 @@ pub enum Error {
     ImageWriteInProgress,
     InvalidImageWrite,
     InvalidRecord,
+    InvalidBootImage,
     TrialImageExited,
     TrialHealthTimeout,
     TrailingPackageData,
@@ -221,6 +222,14 @@ impl FileSlotStorage {
             .join("slots")
             .join(slot_name(slot))
             .join(IMAGE_FILE)
+    }
+
+    pub fn validate_executable_image(&self, slot: Slot) -> Result<(), Error> {
+        let metadata = fs::symlink_metadata(self.image_path(slot))?;
+        if !metadata.file_type().is_file() || metadata.permissions().mode() & 0o111 == 0 {
+            return Err(Error::InvalidBootImage);
+        }
+        Ok(())
     }
 }
 
@@ -439,7 +448,14 @@ fn run_selected_image_with_identity(
 ) -> Result<ExitStatus, Error> {
     let mut boot = FileBootControl::new(&root);
     let decision = boot.select_for_boot()?;
-    let image = FileSlotStorage::new(&root).image_path(decision.slot);
+    let storage = FileSlotStorage::new(&root);
+    if let Err(error) = storage.validate_executable_image(decision.slot) {
+        if decision.trial {
+            boot.rollback_trial()?;
+        }
+        return Err(error);
+    }
+    let image = storage.image_path(decision.slot);
     let trial_window_ms = if decision.trial {
         boot.state()?
             .trial

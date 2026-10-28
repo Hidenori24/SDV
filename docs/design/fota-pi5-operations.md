@@ -116,8 +116,10 @@ sudo sdv-fota status --state-root /var/lib/sdv-fota
 sudo systemctl restart sdv-fota-launcher.service
 ```
 
-The restart selects the pending trial slot. The launcher starts the image and repeatedly runs the
-configured health command until it succeeds or `trial_ms` expires. During a trial, that command
+The `init` command refuses to record a slot without a regular executable image. A restart selects
+the pending trial slot; the launcher checks the selected image is regular and executable, then
+repeatedly runs the configured health command until it succeeds or `trial_ms` expires. A trial
+image that is missing or not executable is rolled back. During a trial, the health command
 receives `SDV_TRIAL_SLOT` and `SDV_IMAGE_PATH`; it must exit promptly and return success only when
 the application is healthy. A failed or expired trial is rolled back. A successful trial commits
 the slot and security version before the launcher waits for the application process.
