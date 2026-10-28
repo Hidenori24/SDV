@@ -4,12 +4,15 @@ After=local-fs.target
 
 [Service]
 Type=simple
-User=sdv
-Group=sdv
+User=root
+Group=root
+SupplementaryGroups=
+EnvironmentFile=/etc/default/sdv-fota-launcher
 ExecStart=/usr/bin/sdv-fota-launcher /var/lib/sdv-fota /usr/bin/sdv-health-check
 Restart=always
 RestartSec=2
 NoNewPrivileges=true
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/lib/sdv-fota

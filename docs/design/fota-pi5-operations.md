@@ -22,16 +22,24 @@ The `install-url` command requires `curl` at runtime; local-file `install` does 
 
 ## Provision the first image
 
-Create the service account and data directories, then put the trusted initial executable at
-`/var/lib/sdv-fota/slots/a/sdv-image.bin`. Set its owner to `sdv:sdv` and mode to `0755`. Initialize
-boot metadata with the initial image's version and security version:
+Create the unprivileged application account. The launcher and installer keep the slot images and
+boot metadata root-owned; candidate applications run as `sdv-app` and cannot replace the image or
+rewrite boot state. Put the trusted initial executable at
+`/var/lib/sdv-fota/slots/a/sdv-image.bin`, owned by root with mode `0755`:
 
 ```sh
-sudo useradd --system --home-dir /var/lib/sdv-fota --no-create-home sdv
-sudo install -d -o sdv -g sdv -m 0750 /var/lib/sdv-fota/slots/a /var/lib/sdv-fota/slots/b
-sudo install -o sdv -g sdv -m 0755 initial-sdv-app /var/lib/sdv-fota/slots/a/sdv-image.bin
-sudo -u sdv sdv-fota init /var/lib/sdv-fota a 1.0.0 1
+sudo useradd --system --user-group --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin sdv-app
+sudo install -d -o root -g root -m 0755 /var/lib/sdv-fota/slots/a /var/lib/sdv-fota/slots/b
+sudo install -o root -g root -m 0755 initial-sdv-app /var/lib/sdv-fota/slots/a/sdv-image.bin
+sudo sdv-fota init /var/lib/sdv-fota a 1.0.0 1
+printf 'SDV_FOTA_APP_UID=%s\nSDV_FOTA_APP_GID=%s\n' "$(id -u sdv-app)" "$(id -g sdv-app)" | sudo tee /etc/default/sdv-fota-launcher >/dev/null
+sudo chown root:root /etc/default/sdv-fota-launcher
+sudo chmod 0644 /etc/default/sdv-fota-launcher
 ```
+
+The systemd launcher retains only `CAP_SETUID` and `CAP_SETGID` so it can drop privileges before
+starting either the application or its health command. It is otherwise restricted to writing
+under `/var/lib/sdv-fota`.
 
 Provision the matching Ed25519 public key through the ECU's trusted configuration. The FOTA CLI
 loads trusted keys from `/etc/sdv-fota/trusted-keys`. Provision the file as root, readable by
@@ -69,9 +77,9 @@ provisioned public key and the active ECU compatibility values:
 
 ```sh
 # Install a local package or stream one from an HTTPS artifact endpoint:
-sudo -u sdv sdv-fota install /var/lib/sdv-fota update.sdvf engine 1 1
-sudo -u sdv sdv-fota install-url /var/lib/sdv-fota https://updates.example/engine/update.sdvf engine 1 1
-sdv-fota status /var/lib/sdv-fota
+sudo sdv-fota install /var/lib/sdv-fota update.sdvf engine 1 1
+sudo sdv-fota install-url /var/lib/sdv-fota https://updates.example/engine/update.sdvf engine 1 1
+sudo sdv-fota status /var/lib/sdv-fota
 sudo systemctl restart sdv-fota-launcher.service
 ```
 
@@ -82,8 +90,16 @@ the application is healthy. A failed or expired trial is rolled back. A successf
 the slot and security version before the launcher waits for the application process.
 
 Install the example unit from `deploy/systemd/sdv-fota-launcher.service` after providing the
-`sdv-health-check` program. The health check is application-specific; the repository does not
-assume a particular SDV process readiness protocol.
+`sdv-health-check` program:
+
+```sh
+sudo install -m 0644 deploy/systemd/sdv-fota-launcher.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now sdv-fota-launcher.service
+```
+
+The health check is application-specific; the repository does not assume a particular SDV process
+readiness protocol.
 
 ## Current boundary
 

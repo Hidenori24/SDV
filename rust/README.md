@@ -107,6 +107,9 @@ signature against the root-provisioned `/etc/sdv-fota/trusted-keys` file. That f
 `<key-id> <64-hex-character-public-key>` per line and must be root-owned and not group/world
 writable. `SDV_FOTA_TEST_TRUST_STORE` is available to debug builds for isolated host tests only;
 release builds always use the fixed system path.
+The example launcher unit runs as root with only the UID/GID switching capabilities needed to
+start the candidate image and health command as `sdv-app`. Keep the slot tree and boot metadata
+root-owned so the application cannot replace its own trusted image or rewrite the boot state.
 The host-only `sdv-fota-sign` tool creates SDVF packages from image files using a protected
 32-byte seed file and streams the payload with a 4 KiB buffer. Build it with
 `cargo build --release --manifest-path rust/sdv-fota/Cargo.toml --features host-signing --bin sdv-fota-sign`;

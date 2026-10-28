@@ -4,7 +4,7 @@ use sdv_fota::linux::{run_selected_image, FileBootControl, FileSlotStorage, Http
 use sdv_fota::{encode_package, BootControl, ImageStorage, Slot, TrialImage, VersionString};
 use sdv_sec::{ed25519_public_key, ed25519_sign, sha256};
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -261,6 +261,59 @@ fn linux_launcher_commits_trial_after_health_command_succeeds() {
     assert_eq!(state.active, Slot::B);
     assert_eq!(state.active_version, "1.1.0");
     assert!(state.trial.is_none());
+}
+
+#[test]
+fn linux_launcher_runs_trial_image_and_health_check_as_configured_user() {
+    let root = TempRoot::new();
+    let mut boot = FileBootControl::new(&root.0);
+    boot.initialize(Slot::A, "1.0.0", 1).unwrap();
+    let run_as = fs::metadata("/proc/self").unwrap();
+    let uid_record = root.0.join("candidate-uid");
+    let candidate = root.0.join("slots/b/sdv-image.bin");
+    fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+    write_executable(
+        &candidate,
+        &format!(
+            "#!/bin/sh\nid -u > {}\nexec sleep 2\n",
+            uid_record.display()
+        ),
+    );
+    let health = root.0.join("health-check");
+    write_executable(
+        &health,
+        &format!("#!/bin/sh\ntest \"$(id -u)\" = {}\n", run_as.uid()),
+    );
+    boot.schedule_trial(TrialImage {
+        slot: Slot::B,
+        version: fixed_version("1.1.0"),
+        security_version: 2,
+        boots_left: 2,
+        trial_window_ms: 2_000,
+    })
+    .unwrap();
+
+    let status =
+        sdv_fota::linux::run_selected_image_as(&root.0, &health, &[], run_as.uid(), run_as.gid())
+            .unwrap();
+
+    assert!(status.success());
+    assert_eq!(
+        fs::read_to_string(uid_record).unwrap().trim(),
+        run_as.uid().to_string()
+    );
+    assert_eq!(boot.state().unwrap().active, Slot::B);
+}
+
+#[test]
+fn linux_launcher_refuses_root_as_application_identity() {
+    let root = TempRoot::new();
+    let result = sdv_fota::linux::run_selected_image_as(&root.0, Path::new("/bin/true"), &[], 0, 0);
+    assert!(matches!(
+        result,
+        Err(sdv_fota::linux::Error::InvalidRunIdentity)
+    ));
+    assert!(!root.0.join("bootctl.a").exists());
 }
 
 #[test]
