@@ -23,6 +23,7 @@ fn run(args: Vec<OsString>) -> Result<(), String> {
         Some("init") => initialize(command_args),
         Some("install") => install(command_args),
         Some("install-url") => install_url(command_args),
+        Some("record-active-integrity") => record_active_integrity(command_args),
         Some("status") => status(command_args),
         _ => Err(usage()),
     }
@@ -51,6 +52,29 @@ fn status(args: &[OsString]) -> Result<(), String> {
     Ok(())
 }
 
+fn record_active_integrity(args: &[OsString]) -> Result<(), String> {
+    let mut options = parse_named_options(args, &["--state-root", "--slot"])?;
+    let root = PathBuf::from(required_option(&mut options, "--state-root")?);
+    let slot = parse_slot(&required_option(&mut options, "--slot")?)?;
+    let storage = FileSlotStorage::new(&root);
+    FileBootControl::new(root)
+        .record_active_image_integrity(&storage, slot)
+        .map_err(|error| match error {
+            sdv_fota::linux::Error::TrialAlreadyPending => {
+                "cannot record active image integrity while a trial is pending".into()
+            }
+            sdv_fota::linux::Error::SlotIsNotActive => {
+                "selected slot is not the active boot slot".into()
+            }
+            error => format!("cannot record active image integrity: {error:?}"),
+        })?;
+    println!(
+        "recorded active image integrity for slot {}",
+        slot_name(slot)
+    );
+    Ok(())
+}
+
 fn initialize(args: &[OsString]) -> Result<(), String> {
     let mut options = parse_named_options(
         args,
@@ -63,19 +87,16 @@ fn initialize(args: &[OsString]) -> Result<(), String> {
     )?;
     let root = PathBuf::from(required_option(&mut options, "--state-root")?);
     let active_slot = required_option(&mut options, "--active-slot")?;
-    let slot = match required_str(&active_slot, "active slot")? {
-        "a" => Slot::A,
-        "b" => Slot::B,
-        _ => return Err("active slot must be `a` or `b`".into()),
-    };
+    let slot = parse_slot(&active_slot)?;
     let active_version = required_option(&mut options, "--active-version")?;
     let active_version = required_str(&active_version, "active version")?;
     let security_version = required_number(&mut options, "--security-version", "security version")?;
-    FileSlotStorage::new(&root)
+    let storage = FileSlotStorage::new(&root);
+    storage
         .validate_executable_image(slot)
         .map_err(|error| format!("initial vehicle image is not bootable: {error:?}"))?;
     FileBootControl::new(root)
-        .initialize(slot, active_version, security_version)
+        .initialize_with_image(&storage, slot, active_version, security_version)
         .map_err(|error| format!("boot metadata initialization failed: {error:?}"))
 }
 
@@ -282,6 +303,14 @@ fn parse_vehicle_target(value: &OsStr) -> Result<Ecu, String> {
     }
 }
 
+fn parse_slot(value: &OsStr) -> Result<Slot, String> {
+    match required_str(value, "slot")? {
+        "a" => Ok(Slot::A),
+        "b" => Ok(Slot::B),
+        _ => Err("slot must be `a` or `b`".into()),
+    }
+}
+
 fn load_trust_keys() -> Result<Vec<sdv_fota::trust_store::TrustedKey>, String> {
     #[cfg(debug_assertions)]
     if let Some(path) = std::env::var_os("SDV_FOTA_TEST_TRUST_STORE") {
@@ -312,7 +341,7 @@ fn slot_name(slot: Slot) -> &'static str {
 }
 
 fn usage() -> String {
-    "usage:\n  sdv-fota init --state-root <dir> --active-slot <a|b> --active-version <version> --security-version <n>\n  sdv-fota install --state-root <dir> --package <file> --target vehicle --config-schema <n> --signal-if-version <n> [--trial-boots <n>]\n  sdv-fota install-url --state-root <dir> --url <https-url> --target vehicle --config-schema <n> --signal-if-version <n> [--trial-boots <n>]\n  sdv-fota status --state-root <dir>".into()
+    "usage:\n  sdv-fota init --state-root <dir> --active-slot <a|b> --active-version <version> --security-version <n>\n  sdv-fota record-active-integrity --state-root <dir> --slot <a|b>\n  sdv-fota install --state-root <dir> --package <file> --target vehicle --config-schema <n> --signal-if-version <n> [--trial-boots <n>]\n  sdv-fota install-url --state-root <dir> --url <https-url> --target vehicle --config-schema <n> --signal-if-version <n> [--trial-boots <n>]\n  sdv-fota status --state-root <dir>".into()
 }
 
 #[cfg(test)]

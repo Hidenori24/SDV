@@ -56,6 +56,20 @@ be writable by group or other users. The tools never follow symlinked state root
 images, boot records, or lock files. Update images and boot records are created through unique, exclusive
 temporary files before being atomically renamed into place.
 
+When upgrading a Pi provisioned by an earlier version without image digests, first replace the
+`sdv-fota` binary while the existing launcher is still running. Verify the active slot image against
+the approved release, then record its digest before installing/restarting the new launcher:
+
+```sh
+# Read active_slot with `sudo sdv-fota status --state-root /var/lib/sdv-fota`;
+# use its lowercase value (`a` or `b`) below.
+sudo sdv-fota record-active-integrity --state-root /var/lib/sdv-fota --slot a
+```
+
+This migration command hashes the current active executable; it does not establish the image's
+release provenance. Do not run it until the active image has been checked against a trusted build
+or release record. It refuses to run when the selected slot is not active or a trial is pending.
+
 The systemd launcher retains only `CAP_SETUID` and `CAP_SETGID` so it can drop privileges before
 starting either the application or its health command. It is otherwise restricted to writing
 under `/var/lib/sdv-fota`.
@@ -122,10 +136,13 @@ sudo sdv-fota status --state-root /var/lib/sdv-fota
 sudo systemctl restart sdv-fota-launcher.service
 ```
 
-The `init` command refuses to record a slot without a non-empty regular executable image. A restart selects
-the pending trial slot; the launcher checks the selected image is regular and executable, then
-repeatedly runs the configured health command until it succeeds or `trial_ms` expires. A trial
-image that is missing or not executable is rolled back. During a trial, the health command
+The `init` command refuses to record a slot without a non-empty regular executable image and
+records its SHA-256 digest. The installer records the digest of each staged image after writing it;
+the existing package readback check must also match the signed manifest before a trial is
+scheduled. On restart, the launcher checks the selected image against its recorded digest before
+starting it, then repeatedly runs the configured health command until it succeeds or `trial_ms`
+expires. A trial image that is missing, not executable, or has a mismatched digest is rolled back.
+During a trial, the health command
 receives `SDV_TRIAL_SLOT` and `SDV_IMAGE_PATH`; it must exit promptly and return success only when
 the application is healthy. A failed or expired trial is rolled back. A successful trial commits
 the slot and security version before the launcher waits for the application process.
