@@ -2,8 +2,9 @@
 
 This is the development workflow for the Linux application-image backend. It updates only files
 under `/var/lib/sdv-fota`; it does not write the Pi OS, EEPROM, boot partition, or raw devices.
-Package delivery (for example HTTPS download or SCP) is external to this prototype. The installer
-verifies the signed package after delivery.
+The host CLI can install from a local package file or stream a package from an HTTPS URL. HTTPS
+uses the system CA store through `curl`, rejects HTTP URLs and HTTP redirects, and keeps the
+Ed25519 package signature as the release authorization check.
 
 ## Build
 
@@ -17,6 +18,7 @@ sudo install -m 0755 rust/sdv-fota/target/release/sdv-fota-launcher /usr/bin/sdv
 
 The signing utility is built separately on a protected release host with
 `--features host-signing --bin sdv-fota-sign`. Do not build or provision a signing seed on the Pi.
+The `install-url` command requires `curl` at runtime; local-file `install` does not.
 
 ## Provision the first image
 
@@ -49,6 +51,8 @@ provisioned public key and the active ECU compatibility values:
 
 ```sh
 sudo -u sdv sdv-fota install /var/lib/sdv-fota update.sdvf release-2026 <public-key-hex> engine 1 1
+# Or fetch and stream directly from an HTTPS artifact endpoint:
+sudo -u sdv sdv-fota install-url /var/lib/sdv-fota https://updates.example/engine/update.sdvf release-2026 <public-key-hex> engine 1 1
 sdv-fota status /var/lib/sdv-fota
 sudo systemctl restart sdv-fota-launcher.service
 ```
@@ -66,8 +70,9 @@ assume a particular SDV process readiness protocol.
 ## Current boundary
 
 The Pi path can sign a package on a separate host, verify and stage it incrementally, and exercise
-A/B trial boot and rollback on Linux. Network transfer, TLS credentials, remote campaign
-orchestration, actual Pi 5 hardware validation, and a production health-check implementation still
-belong to deployment integration. AUTOSAR Classic integration additionally requires the chosen
+A/B trial boot and rollback on Linux. HTTPS artifact transfer uses the device's system CA store;
+mutual TLS, private repository credentials, remote campaign orchestration, actual Pi 5 hardware
+validation, and a production health-check implementation still belong to deployment integration.
+AUTOSAR Classic integration additionally requires the chosen
 DCM/Csm/NvM/MemIf/Fls/Bootloader bindings described in
 [the Classic architecture proposal](fota_classic_architecture.md).
