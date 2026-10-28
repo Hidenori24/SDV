@@ -20,11 +20,32 @@ pub const SDV_FOTA_IO_ERROR: i32 = 4;
 
 const VERSION_CAPACITY: usize = 32;
 
+pub const SDV_FOTA_ECU_ENGINE: u8 = 0;
+pub const SDV_FOTA_ECU_BRAKE: u8 = 1;
+pub const SDV_FOTA_ECU_STEERING: u8 = 2;
+pub const SDV_FOTA_ECU_NONE: u8 = 0xff;
+
+pub const SDV_FOTA_SAFETY_NORMAL: u8 = 0;
+pub const SDV_FOTA_SAFETY_DEGRADED: u8 = 1;
+pub const SDV_FOTA_SAFETY_ESTOP: u8 = 2;
+
+pub const SDV_FOTA_ECU_STATUS_STAGED: u8 = 0;
+pub const SDV_FOTA_ECU_STATUS_TRIAL_HEALTHY: u8 = 1;
+pub const SDV_FOTA_ECU_STATUS_COMMITTED: u8 = 2;
+pub const SDV_FOTA_ECU_STATUS_ROLLED_BACK: u8 = 3;
+pub const SDV_FOTA_ECU_STATUS_REJECTED: u8 = 4;
+pub const SDV_FOTA_ECU_STATUS_FAILED: u8 = 5;
+
 pub const SDV_FOTA_CAMPAIGN_NONE: u8 = 0;
 pub const SDV_FOTA_CAMPAIGN_REQUEST: u8 = 1;
 pub const SDV_FOTA_CAMPAIGN_ACTIVATE: u8 = 2;
 pub const SDV_FOTA_CAMPAIGN_COMMIT: u8 = 3;
 pub const SDV_FOTA_CAMPAIGN_ABORT: u8 = 4;
+
+pub const SDV_FOTA_CAMPAIGN_STATE_IDLE: u8 = 0;
+pub const SDV_FOTA_CAMPAIGN_STATE_UPDATING: u8 = 1;
+pub const SDV_FOTA_CAMPAIGN_STATE_COMPLETED: u8 = 2;
+pub const SDV_FOTA_CAMPAIGN_STATE_FAILED: u8 = 3;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -452,30 +473,30 @@ pub unsafe extern "C" fn sdv_fota_select_for_boot(
 
 fn campaign_ecu_from_id(id: u8) -> Option<Ecu> {
     match id {
-        0 => Some(Ecu::Engine),
-        1 => Some(Ecu::Brake),
-        2 => Some(Ecu::Steering),
+        SDV_FOTA_ECU_ENGINE => Some(Ecu::Engine),
+        SDV_FOTA_ECU_BRAKE => Some(Ecu::Brake),
+        SDV_FOTA_ECU_STEERING => Some(Ecu::Steering),
         _ => None,
     }
 }
 
 fn campaign_safety_from_id(id: u8) -> Option<VehicleSafety> {
     match id {
-        0 => Some(VehicleSafety::Normal),
-        1 => Some(VehicleSafety::Degraded),
-        2 => Some(VehicleSafety::EStop),
+        SDV_FOTA_SAFETY_NORMAL => Some(VehicleSafety::Normal),
+        SDV_FOTA_SAFETY_DEGRADED => Some(VehicleSafety::Degraded),
+        SDV_FOTA_SAFETY_ESTOP => Some(VehicleSafety::EStop),
         _ => None,
     }
 }
 
 fn campaign_status_from_id(id: u8) -> Option<EcuUpdateStatus> {
     match id {
-        0 => Some(EcuUpdateStatus::Staged),
-        1 => Some(EcuUpdateStatus::TrialHealthy),
-        2 => Some(EcuUpdateStatus::Committed),
-        3 => Some(EcuUpdateStatus::RolledBack),
-        4 => Some(EcuUpdateStatus::Rejected),
-        5 => Some(EcuUpdateStatus::Failed),
+        SDV_FOTA_ECU_STATUS_STAGED => Some(EcuUpdateStatus::Staged),
+        SDV_FOTA_ECU_STATUS_TRIAL_HEALTHY => Some(EcuUpdateStatus::TrialHealthy),
+        SDV_FOTA_ECU_STATUS_COMMITTED => Some(EcuUpdateStatus::Committed),
+        SDV_FOTA_ECU_STATUS_ROLLED_BACK => Some(EcuUpdateStatus::RolledBack),
+        SDV_FOTA_ECU_STATUS_REJECTED => Some(EcuUpdateStatus::Rejected),
+        SDV_FOTA_ECU_STATUS_FAILED => Some(EcuUpdateStatus::Failed),
         _ => None,
     }
 }
@@ -514,9 +535,9 @@ fn campaign_command_id(command: Option<CampaignCommand>) -> (u8, u8) {
 
 fn campaign_ecu_id(ecu: Ecu) -> u8 {
     match ecu {
-        Ecu::Engine => 0,
-        Ecu::Brake => 1,
-        Ecu::Steering => 2,
+        Ecu::Engine => SDV_FOTA_ECU_ENGINE,
+        Ecu::Brake => SDV_FOTA_ECU_BRAKE,
+        Ecu::Steering => SDV_FOTA_ECU_STEERING,
     }
 }
 
@@ -680,7 +701,8 @@ pub unsafe extern "C" fn sdv_fota_campaign_cancel(
 /// Read the campaign lifecycle and active target (0xff when no ECU is active).
 ///
 /// # Safety
-/// `manager`, `out_state`, and `out_ecu` must point to valid readable/writable regions.
+/// `manager`, `out_state`, and `out_ecu` must point to valid readable/writable regions. The
+/// output regions must not overlap the manager storage.
 #[no_mangle]
 pub unsafe extern "C" fn sdv_fota_campaign_state(
     manager: *const CampaignManager,
@@ -693,10 +715,10 @@ pub unsafe extern "C" fn sdv_fota_campaign_state(
     // SAFETY: manager is caller-owned readable CampaignManager storage.
     let state = unsafe { &*manager }.state();
     let (state_id, ecu) = match state {
-        CampaignState::Idle => (0, 0xff),
-        CampaignState::Updating { ecu } => (1, campaign_ecu_id(ecu)),
-        CampaignState::Completed => (2, 0xff),
-        CampaignState::Failed { ecu } => (3, campaign_ecu_id(ecu)),
+        CampaignState::Idle => (SDV_FOTA_CAMPAIGN_STATE_IDLE, SDV_FOTA_ECU_NONE),
+        CampaignState::Updating { ecu } => (SDV_FOTA_CAMPAIGN_STATE_UPDATING, campaign_ecu_id(ecu)),
+        CampaignState::Completed => (SDV_FOTA_CAMPAIGN_STATE_COMPLETED, SDV_FOTA_ECU_NONE),
+        CampaignState::Failed { ecu } => (SDV_FOTA_CAMPAIGN_STATE_FAILED, campaign_ecu_id(ecu)),
     };
     // SAFETY: both output pointers were checked non-null above.
     unsafe {
