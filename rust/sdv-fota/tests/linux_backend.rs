@@ -477,6 +477,87 @@ fn init_cli_rejects_missing_or_nonexecutable_active_image() {
 }
 
 #[test]
+fn boot_metadata_refuses_group_or_other_writable_state_root() {
+    let root = TempRoot::new();
+    fs::set_permissions(&root.0, fs::Permissions::from_mode(0o777)).unwrap();
+
+    let result = FileBootControl::new(&root.0).initialize(Slot::A, "1.0.0", 1);
+
+    assert!(matches!(
+        result,
+        Err(sdv_fota::linux::Error::UnsafeStatePath)
+    ));
+    assert!(!root.0.join("bootctl.a").exists());
+}
+
+#[test]
+fn boot_metadata_rejects_a_symlinked_state_root() {
+    let root = TempRoot::new();
+    let target = root.0.join("target");
+    let state_root = root.0.join("state-root");
+    fs::create_dir(&target).unwrap();
+    std::os::unix::fs::symlink(&target, &state_root).unwrap();
+
+    assert!(matches!(
+        FileBootControl::new(state_root).state(),
+        Err(sdv_fota::linux::Error::UnsafeStatePath)
+    ));
+}
+
+#[test]
+fn boot_metadata_lock_does_not_follow_a_symlink() {
+    let root = TempRoot::new();
+    let outside = root.0.join("outside");
+    fs::write(&outside, b"preserve").unwrap();
+    std::os::unix::fs::symlink(&outside, root.0.join(".fota-bootctl.lock")).unwrap();
+
+    let result = FileBootControl::new(&root.0).initialize(Slot::A, "1.0.0", 1);
+
+    assert!(result.is_err());
+    assert_eq!(fs::read(outside).unwrap(), b"preserve");
+    assert!(!root.0.join("bootctl.a").exists());
+}
+
+#[test]
+fn boot_image_validation_rejects_group_writable_image_and_slot_directory() {
+    let root = TempRoot::new();
+    let storage = FileSlotStorage::new(&root.0);
+    let image = storage.image_path(Slot::A);
+    fs::create_dir_all(image.parent().unwrap()).unwrap();
+    write_executable(&image, "#!/bin/sh\nexit 0\n");
+    fs::set_permissions(&image, fs::Permissions::from_mode(0o775)).unwrap();
+
+    assert!(matches!(
+        storage.validate_executable_image(Slot::A),
+        Err(sdv_fota::linux::Error::UnsafeStatePath)
+    ));
+
+    fs::set_permissions(&image, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(image.parent().unwrap(), fs::Permissions::from_mode(0o775)).unwrap();
+    assert!(matches!(
+        storage.validate_executable_image(Slot::A),
+        Err(sdv_fota::linux::Error::UnsafeStatePath)
+    ));
+}
+
+#[test]
+fn boot_image_validation_rejects_a_symlinked_slot_directory() {
+    let root = TempRoot::new();
+    let storage = FileSlotStorage::new(&root.0);
+    let slots = root.0.join("slots");
+    let target = root.0.join("external-slot");
+    fs::create_dir(&slots).unwrap();
+    fs::create_dir(&target).unwrap();
+    write_executable(&target.join("sdv-image.bin"), "#!/bin/sh\nexit 0\n");
+    std::os::unix::fs::symlink(target, slots.join("a")).unwrap();
+
+    assert!(matches!(
+        storage.validate_executable_image(Slot::A),
+        Err(sdv_fota::linux::Error::UnsafeStatePath)
+    ));
+}
+
+#[test]
 fn launcher_rolls_back_trial_with_nonexecutable_candidate_image() {
     let root = TempRoot::new();
     let mut boot = FileBootControl::new(&root.0);

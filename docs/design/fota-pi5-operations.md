@@ -50,6 +50,12 @@ sudo chown root:root /etc/default/sdv-fota-launcher
 sudo chmod 0644 /etc/default/sdv-fota-launcher
 ```
 
+The configured state root, `slots` directory, slot directories, image files, and boot records must
+be owned by the account running the FOTA tools (root in this setup). Directories and files must not
+be writable by group or other users. The tools never follow symlinked state roots, slot directories,
+images, boot records, or lock files. Update images and boot records are created through unique, exclusive
+temporary files before being atomically renamed into place.
+
 The systemd launcher retains only `CAP_SETUID` and `CAP_SETGID` so it can drop privileges before
 starting either the application or its health command. It is otherwise restricted to writing
 under `/var/lib/sdv-fota`.
