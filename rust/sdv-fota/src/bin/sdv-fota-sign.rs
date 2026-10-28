@@ -1,4 +1,6 @@
-use sdv_fota::{encode_package, Ecu, MAX_MANIFEST_BYTES};
+use sdv_fota::{
+    encode_package, validate_signed_manifest, Ecu, TrustKey, ValidationContext, MAX_MANIFEST_BYTES,
+};
 use sdv_sec::{ed25519_public_key, ed25519_sign, Sha256Context};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -51,6 +53,11 @@ fn run(args: Vec<String>) -> Result<(), String> {
     let image_path = options.image_path;
     let output_path = options.output_path;
 
+    let config_schema = u32::try_from(config_schema)
+        .map_err(|_| "config schema must fit an unsigned 32-bit integer".to_owned())?;
+    let signal_if_version = u32::try_from(signal_if_version)
+        .map_err(|_| "signal interface version must fit an unsigned 32-bit integer".to_owned())?;
+
     let (payload_size, payload_digest) = hash_file(&image_path)?;
     if payload_size == 0 || payload_size > u64::from(u32::MAX) {
         return Err("image must be between 1 byte and 4 GiB - 1".into());
@@ -83,6 +90,26 @@ fn run(args: Vec<String>) -> Result<(), String> {
     }
     let signature = ed25519_sign(&seed.0, &manifest_bytes);
     let public_key = ed25519_public_key(&seed.0);
+    let validation_key = TrustKey {
+        key_id: &options.key_id,
+        public_key: &public_key,
+    };
+    let validation_context = ValidationContext {
+        target_ecu: ecu,
+        current_version: "0.0.0",
+        highest_security_version: 0,
+        config_schema,
+        signal_if_version,
+    };
+    validate_signed_manifest(
+        &options.key_id,
+        &signature,
+        &manifest_bytes,
+        payload_size,
+        &[validation_key],
+        &validation_context,
+    )
+    .map_err(|error| format!("release metadata is invalid: {error:?}"))?;
     let result = write_package(
         &options.key_id,
         &signature,

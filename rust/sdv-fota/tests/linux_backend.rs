@@ -720,6 +720,56 @@ fn failed_https_transfer_aborts_candidate_and_does_not_schedule_trial() {
 
 #[cfg(feature = "host-signing")]
 #[test]
+fn signing_command_rejects_metadata_the_installer_will_not_accept() {
+    let root = TempRoot::new();
+    let seed_path = root.0.join("signing.seed");
+    fs::write(&seed_path, hex(&SIGNING_SEED)).unwrap();
+    let image_path = root.0.join("candidate.bin");
+    fs::write(&image_path, b"candidate image").unwrap();
+
+    for (index, (key_id, version, config_schema, signal_if_version)) in [
+        ("bad$key", "1.1.0", "1", "1"),
+        (KEY_ID, "1.0", "1", "1"),
+        (KEY_ID, "1.1.0", "4294967296", "1"),
+        (KEY_ID, "1.1.0", "1", "4294967296"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let package_path = root.0.join(format!("invalid-{index}.sdvf"));
+        let result = Command::new(env!("CARGO_BIN_EXE_sdv-fota-sign"))
+            .args([
+                "--seed",
+                seed_path.to_str().unwrap(),
+                "--key-id",
+                key_id,
+                "--target",
+                "vehicle",
+                "--version",
+                version,
+                "--security-version",
+                "2",
+                "--trial-ms",
+                "5000",
+                "--config-schema",
+                config_schema,
+                "--signal-if-version",
+                signal_if_version,
+                "--image",
+                image_path.to_str().unwrap(),
+                "--output",
+                package_path.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+
+        assert!(!result.status.success());
+        assert!(!package_path.exists());
+    }
+}
+
+#[cfg(feature = "host-signing")]
+#[test]
 fn signing_and_install_commands_complete_a_host_update() {
     let root = TempRoot::new();
     let boot = FileBootControl::new(&root.0);
