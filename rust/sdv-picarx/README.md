@@ -26,8 +26,18 @@ image.
 
 On Linux, `linux_i2c::I2cTransport` opens an explicitly configured i2c-dev path and MCU address,
 then sends each PWM register message as one I2C transaction. The current crate still needs a fresh
-input source and an executable that composes these ports. These bindings have passed unit and
-aarch64 compile checks; they have not been run on a physical PiCar-X.
+`linux_input::UnixDatagramInputSource` receives driver input, E-stop, and vehicle state estimates
+over a local Unix datagram socket. It accepts only increasing sequence numbers and returns an error
+when no sample has arrived within the configured freshness limit; `VehicleExecutor` then requests
+a motor stop. Vehicle state must come from a sensor or estimator process. The packet shape is:
+
+```json
+{"sequence":1,"throttle":0.4,"brake":0.0,"steer":-0.1,"estop":false,"vehicle":{"t":1.0,"x":2.0,"y":3.0,"yaw":0.2,"v":0.5,"yaw_rate":0.1,"wheel_omega":5.0}}
+```
+
+An executable that composes the I2C, GPIO, input, and ECU runtime ports is the next integration
+step. These bindings have passed unit and aarch64 compile checks; they have not been run on a
+physical PiCar-X.
 
 ```sh
 cargo test --manifest-path rust/sdv-picarx/Cargo.toml

@@ -4,6 +4,8 @@
 pub mod linux_i2c;
 #[cfg(target_os = "linux")]
 pub mod linux_gpio;
+#[cfg(target_os = "linux")]
+pub mod linux_input;
 pub mod pwm;
 pub mod robothat;
 
