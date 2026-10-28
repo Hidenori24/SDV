@@ -29,11 +29,13 @@ sudo install -m 0755 rust/sdv-fota/target/release/sdv-fota-launcher /usr/bin/</c
     <p>署名コマンドは保護されたリリースホストで別にビルドします。</p>
 <pre><code>cargo build --release --manifest-path rust/sdv-fota/Cargo.toml \
   --features host-signing --bin sdv-fota-sign</code></pre>
-    <p>最初のアプリをslot Aへ配置し、空のデータ領域とboot metadataを初期化します。</p>
-<pre><code>sudo useradd --system --home-dir /var/lib/sdv-fota --no-create-home sdv
-sudo install -d -o sdv -g sdv -m 0750 /var/lib/sdv-fota/slots/a /var/lib/sdv-fota/slots/b
-sudo install -o sdv -g sdv -m 0755 initial-sdv-app /var/lib/sdv-fota/slots/a/sdv-image.bin
-sudo -u sdv sdv-fota init /var/lib/sdv-fota a 1.0.0 1</code></pre>
+    <p>アプリ実行用の非特権ユーザーを作成します。スロットとboot metadataはroot所有にし、アプリ自身から更新イメージや起動状態を書き換えられないようにします。</p>
+<pre><code>sudo useradd --system --user-group --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin sdv-app
+sudo install -d -o root -g root -m 0755 /var/lib/sdv-fota/slots/a /var/lib/sdv-fota/slots/b
+sudo install -o root -g root -m 0755 initial-sdv-app /var/lib/sdv-fota/slots/a/sdv-image.bin
+sudo sdv-fota init /var/lib/sdv-fota a 1.0.0 1
+printf 'SDV_FOTA_APP_UID=%s\nSDV_FOTA_APP_GID=%s\n' "$(id -u sdv-app)" "$(id -g sdv-app)" | sudo tee /etc/default/sdv-fota-launcher
+sudo chmod 0644 /etc/default/sdv-fota-launcher</code></pre>
   </section>
   <section class="card">
     <h2>署名鍵の信頼設定</h2>
@@ -50,11 +52,14 @@ sudo chmod 0644 /etc/sdv-fota/trusted-keys</code></pre>
     <p>リリース環境でパッケージを作成し、Piで署名済みパッケージを導入します。</p>
 <pre><code>sdv-fota-sign /secure/release.seed release-2026 engine 1.1.0 2 5000 1 1 sdv-app update.sdvf
 
-sudo -u sdv sdv-fota install-url /var/lib/sdv-fota \
+sudo sdv-fota install-url /var/lib/sdv-fota \
   https://updates.example/engine/update.sdvf engine 1 1
 sudo systemctl restart sdv-fota-launcher.service
-sudo -u sdv sdv-fota status /var/lib/sdv-fota</code></pre>
-    <p>launcherはmanifestの試験時間内にアプリを起動し、設定されたhealth commandが成功した場合だけtrial slotを確定します。サービス例は <code>deploy/systemd/sdv-fota-launcher.service</code> にあります。アプリ固有のhealth commandとsystemd unitの導入はセットアップ時に必要です。</p>
+sudo sdv-fota status /var/lib/sdv-fota</code></pre>
+    <p>launcherはmanifestの試験時間内にアプリを <code>sdv-app</code> として起動し、同じユーザーで動くhealth commandが成功した場合だけtrial slotを確定します。サービス例は <code>deploy/systemd/sdv-fota-launcher.service</code> にあります。launcherはUID/GID切替に必要な2つのcapabilityだけを持ちます。アプリ固有のhealth commandはセットアップ時に必要です。</p>
+<pre><code>sudo install -m 0644 deploy/systemd/sdv-fota-launcher.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now sdv-fota-launcher.service</code></pre>
   </section>
   <section class="card">
     <h2>適用範囲</h2>

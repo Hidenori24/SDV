@@ -11,6 +11,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
 use std::thread;
@@ -44,6 +45,7 @@ pub enum Error {
     UpdateInProgress,
     InvalidHttpsUrl,
     DownloadFailed,
+    InvalidRunIdentity,
 }
 
 impl From<io::Error> for Error {
@@ -362,7 +364,41 @@ pub fn run_selected_image(
     health_program: &Path,
     health_args: &[std::ffi::OsString],
 ) -> Result<ExitStatus, Error> {
-    let root = root.into();
+    run_selected_image_with_identity(root.into(), health_program, health_args, None)
+}
+
+/// Select and run an image and its health command under the configured unprivileged identity.
+///
+/// The launcher must run with permission to switch to `uid` and `gid` (normally through a
+/// systemd unit with only CAP_SETUID and CAP_SETGID). Update metadata and image files remain owned
+/// by the launcher account, so the application process cannot replace its own trusted image.
+pub fn run_selected_image_as(
+    root: impl Into<PathBuf>,
+    health_program: &Path,
+    health_args: &[std::ffi::OsString],
+    uid: u32,
+    gid: u32,
+) -> Result<ExitStatus, Error> {
+    if uid == 0 || gid == 0 {
+        return Err(Error::InvalidRunIdentity);
+    }
+    run_selected_image_with_identity(root.into(), health_program, health_args, Some((uid, gid)))
+}
+
+fn command_with_identity(program: &Path, identity: Option<(u32, u32)>) -> Command {
+    let mut command = Command::new(program);
+    if let Some((uid, gid)) = identity {
+        command.uid(uid).gid(gid);
+    }
+    command
+}
+
+fn run_selected_image_with_identity(
+    root: PathBuf,
+    health_program: &Path,
+    health_args: &[std::ffi::OsString],
+    identity: Option<(u32, u32)>,
+) -> Result<ExitStatus, Error> {
     let mut boot = FileBootControl::new(&root);
     let decision = boot.select_for_boot()?;
     let image = FileSlotStorage::new(&root).image_path(decision.slot);
@@ -374,7 +410,7 @@ pub fn run_selected_image(
     } else {
         0
     };
-    let mut child = match Command::new(&image).spawn() {
+    let mut child = match command_with_identity(&image, identity).spawn() {
         Ok(child) => child,
         Err(error) => {
             if decision.trial {
@@ -393,6 +429,7 @@ pub fn run_selected_image(
             health_program,
             health_args,
             Duration::from_millis(u64::from(trial_window_ms)),
+            identity,
         ) {
             let _ = child.kill();
             let _ = child.wait();
@@ -415,6 +452,7 @@ fn wait_for_trial_health(
     health_program: &Path,
     health_args: &[std::ffi::OsString],
     timeout: Duration,
+    identity: Option<(u32, u32)>,
 ) -> Result<(), Error> {
     let started = Instant::now();
     loop {
@@ -429,12 +467,12 @@ fn wait_for_trial_health(
                 return Err(Error::Io(error));
             }
         }
-        let mut health = match Command::new(health_program)
+        let mut health_command = command_with_identity(health_program, identity);
+        health_command
             .args(health_args)
             .env("SDV_TRIAL_SLOT", slot_name(slot))
-            .env("SDV_IMAGE_PATH", image)
-            .spawn()
-        {
+            .env("SDV_IMAGE_PATH", image);
+        let mut health = match health_command.spawn() {
             Ok(child) => child,
             Err(error) => {
                 boot.rollback_trial()?;
