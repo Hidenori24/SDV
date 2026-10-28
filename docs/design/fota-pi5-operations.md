@@ -146,6 +146,9 @@ During a trial, the health command
 receives `SDV_TRIAL_SLOT` and `SDV_IMAGE_PATH`; it must exit promptly and return success only when
 the application is healthy. A failed or expired trial is rolled back. A successful trial commits
 the slot and security version before the launcher waits for the application process.
+`sdv-fota status` reports `active_image_integrity` and `trial_image_integrity` as `verified`,
+`missing`, `mismatch_or_unbootable`, `unsafe_path`, or `unavailable` so operators can diagnose
+why a slot was rejected.
 
 Install the example unit from `deploy/systemd/sdv-fota-launcher.service`. Its health command checks
 the vehicle runtime's Unix socket, which reports ready only after a successful control cycle. The

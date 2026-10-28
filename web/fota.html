@@ -72,7 +72,7 @@ sudo sdv-fota install-url --state-root /var/lib/sdv-fota \
   --config-schema 1 --signal-if-version 1
 sudo systemctl restart sdv-fota-launcher.service
 sudo sdv-fota status --state-root /var/lib/sdv-fota</code></pre>
-    <p>launcherは起動対象が通常の実行可能ファイルか確認し、manifestの試験時間内に車両イメージを <code>sdv-app</code> として起動します。同じユーザーで動く <code>sdv-picarx-health</code> が最近の制御周期成功を確認した場合だけtrial slotを確定し、候補イメージの欠落や実行不可はrollbackします。サービス例は <code>deploy/systemd/sdv-fota-launcher.service</code> にあります。launcherはUID/GID切替に必要な2つのcapabilityだけを持ちます。</p>
+    <p>launcherは起動対象のSHA-256を照合し、manifestの試験時間内に車両イメージを <code>sdv-app</code> として起動します。同じユーザーで動く <code>sdv-picarx-health</code> が最近の制御周期成功を確認した場合だけtrial slotを確定し、候補イメージの欠落、digest不一致、実行不可はrollbackします。<code>status</code>はactive/trial両slotのdigest照合状態も表示します。サービス例は <code>deploy/systemd/sdv-fota-launcher.service</code> にあります。launcherはUID/GID切替に必要な2つのcapabilityだけを持ちます。</p>
     <p>試験起動中は外部の入力・車両状態推定プロセスが <code>/run/sdv-picarx/input.sock</code> へ継続送信する必要があります。各センサ取得時に <code>time.monotonic_ns()</code> の時刻と増加するsequenceを付け、古い状態や過剰な入力は安全停止とヘルス失敗になります。</p>
 <pre><code>sudo install -m 0644 deploy/systemd/sdv-fota-launcher.service /etc/systemd/system/
 sudo systemctl daemon-reload
