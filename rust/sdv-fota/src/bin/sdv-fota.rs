@@ -1,5 +1,7 @@
-use sdv_fota::linux::{FileBootControl, FilePackageSource, FileSlotStorage};
-use sdv_fota::{BootControl, Ecu, FotaInstaller, TrustKey, ValidationContext, MAX_MANIFEST_BYTES};
+use sdv_fota::linux::{FileBootControl, FilePackageSource, FileSlotStorage, HttpsPackageSource};
+use sdv_fota::{
+    BootControl, Ecu, FotaInstaller, PackageSource, TrustKey, ValidationContext, MAX_MANIFEST_BYTES,
+};
 use std::ffi::OsString;
 use std::path::PathBuf;
 
@@ -14,6 +16,7 @@ fn run(args: Vec<OsString>) -> Result<(), String> {
     match args.first().and_then(|value| value.to_str()) {
         Some("init") => initialize(&args[1..]),
         Some("install") => install(&args[1..]),
+        Some("install-url") => install_url(&args[1..]),
         Some("status") => status(&args[1..]),
         _ => Err(usage()),
     }
@@ -64,8 +67,30 @@ fn install(args: &[OsString]) -> Result<(), String> {
     if args.len() < 7 || args.len() > 8 {
         return Err(usage());
     }
-    let root = PathBuf::from(&args[0]);
     let package_path = PathBuf::from(&args[1]);
+    let source = FilePackageSource::open(package_path)
+        .map_err(|error| format!("cannot open package: {error:?}"))?;
+    install_from_source(args, source)
+}
+
+fn install_url(args: &[OsString]) -> Result<(), String> {
+    if args.len() < 7 || args.len() > 8 {
+        return Err(usage());
+    }
+    let url = required_str(&args[1], "HTTPS package URL")?;
+    let source = HttpsPackageSource::open(url)
+        .map_err(|error| format!("cannot start HTTPS package download: {error:?}"))?;
+    install_from_source(args, source)
+}
+
+fn install_from_source<P: PackageSource<Error = sdv_fota::linux::Error>>(
+    args: &[OsString],
+    mut source: P,
+) -> Result<(), String> {
+    if args.len() < 7 || args.len() > 8 {
+        return Err(usage());
+    }
+    let root = PathBuf::from(&args[0]);
     let key_id = required_str(&args[2], "key ID")?;
     let public_key = parse_public_key(required_str(&args[3], "public key")?)?;
     let target_ecu = match required_str(&args[4], "target ECU")? {
@@ -105,8 +130,6 @@ fn install(args: &[OsString]) -> Result<(), String> {
         boot_control,
         trial_boots,
     };
-    let mut source = FilePackageSource::open(package_path)
-        .map_err(|error| format!("cannot open package: {error:?}"))?;
     let mut manifest_buffer = vec![0u8; MAX_MANIFEST_BYTES];
     let slot = installer
         .stage_package_from_source(&mut source, &mut manifest_buffer, &[trust_key], &context)
@@ -155,5 +178,5 @@ fn slot_name(slot: sdv_fota::Slot) -> &'static str {
 }
 
 fn usage() -> String {
-    "usage:\n  sdv-fota init <state-root> <active-slot:a|b> <active-version> <security-version>\n  sdv-fota install <state-root> <package-file> <key-id> <public-key-hex> <ecu> <config-schema> <signal-if-version> [trial-boots]\n  sdv-fota status <state-root>".into()
+    "usage:\n  sdv-fota init <state-root> <active-slot:a|b> <active-version> <security-version>\n  sdv-fota install <state-root> <package-file> <key-id> <public-key-hex> <ecu> <config-schema> <signal-if-version> [trial-boots]\n  sdv-fota install-url <state-root> <https-url> <key-id> <public-key-hex> <ecu> <config-schema> <signal-if-version> [trial-boots]\n  sdv-fota status <state-root>".into()
 }
