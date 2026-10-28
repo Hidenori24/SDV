@@ -30,6 +30,7 @@ pub enum InstallError<StorageError, BootError> {
     ImageTooLarge,
     Downgrade,
     SecurityVersionRollback,
+    StorageSlotMismatch,
     ReadbackMismatch,
 }
 
@@ -42,6 +43,7 @@ pub enum StreamInstallError<SourceError, StorageError, BootError> {
     TrialAlreadyPending,
     Downgrade,
     SecurityVersionRollback,
+    StorageSlotMismatch,
     ImageTooLarge,
     ReadbackMismatch,
 }
@@ -92,6 +94,10 @@ impl<S: ImageStorage, B: BootControl> FotaInstaller<S, B> {
             .storage
             .begin_inactive_image(state.active, image_size)
             .map_err(InstallError::Storage)?;
+        if slot != state.active.other() {
+            self.storage.abort_inactive_image(slot);
+            return Err(InstallError::StorageSlotMismatch);
+        }
         let mut offset = 0u32;
         for chunk in package.payload().chunks(IMAGE_IO_CHUNK_BYTES) {
             if let Err(error) = self.storage.write_image_chunk(slot, offset, chunk) {
@@ -190,6 +196,10 @@ impl<S: ImageStorage, B: BootControl> FotaInstaller<S, B> {
             .storage
             .begin_inactive_image(state.active, image_size)
             .map_err(StreamInstallError::Storage)?;
+        if slot != state.active.other() {
+            self.storage.abort_inactive_image(slot);
+            return Err(StreamInstallError::StorageSlotMismatch);
+        }
 
         let mut offset = 0u32;
         let mut digest = Sha256Context::new();
