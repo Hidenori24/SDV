@@ -122,6 +122,12 @@ adapter and host package encoding use `std`/`alloc`; they are excluded from that
 heap-free common core is a stronger Classic boundary, but does not by itself make the crate
 AUTOSAR Classic compliant. Classic integration still needs adapters for the selected DCM,
 Csm/Crypto, NvM, MemIf/Fls, and bootloader.
+
+The allocator-free `CampaignManager` coordinates a fixed plan of up to three ECUs. It gates a
+campaign on vehicle-stopped, normal-Safety, and no-other-update conditions, then emits Request →
+Activate → Commit actions for one ECU at a time. The VCU must call `recheck` from its periodic
+task so a newly moving vehicle or changed Safety state promptly emits Abort. This is a policy
+model; diagnostic/CAN transport and integration into the simulator VCU remain separate work.
 See [the Classic architecture proposal](../docs/design/fota_classic_architecture.md). `SIGNAL_IF_VERSION` is currently 1.
 See the [Pi 5 host operation workflow](../docs/design/fota-pi5-operations.md) for initial provisioning,
 package signing, staging, and trial activation.

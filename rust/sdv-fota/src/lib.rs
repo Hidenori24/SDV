@@ -8,6 +8,7 @@
 #[cfg(feature = "std")]
 extern crate alloc;
 
+mod campaign;
 mod ffi;
 mod manifest_parser;
 mod model;
@@ -17,6 +18,10 @@ mod service;
 #[cfg(all(feature = "std", target_os = "linux"))]
 pub mod trust_store;
 
+pub use campaign::{
+    CampaignCommand, CampaignError, CampaignManager, CampaignPlan, CampaignState, EcuUpdateStatus,
+    VehicleConditions, VehicleSafety, MAX_CAMPAIGN_ECUS,
+};
 pub use model::{
     BootDecision, BootState, Ecu, FixedString, FixedU32List, Image, Manifest, Package,
     Requirements, Slot, TrialImage, TrustKey, UpdatePolicy, ValidatedPackage, ValidationContext,
