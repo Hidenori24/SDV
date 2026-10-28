@@ -124,6 +124,9 @@ pub struct CampaignManager {
 }
 
 const EMPTY_ECU_ID: u8 = 0xff;
+const ECU_ID_ENGINE: u8 = 0;
+const ECU_ID_BRAKE: u8 = 1;
+const ECU_ID_STEERING: u8 = 2;
 const PHASE_AWAITING_STAGE: u8 = 0;
 const PHASE_AWAITING_TRIAL_HEALTH: u8 = 1;
 const PHASE_AWAITING_COMMIT: u8 = 2;
@@ -134,17 +137,17 @@ const STATE_FAILED: u8 = 3;
 
 fn ecu_id(ecu: Ecu) -> u8 {
     match ecu {
-        Ecu::Engine => 0,
-        Ecu::Brake => 1,
-        Ecu::Steering => 2,
+        Ecu::Engine => ECU_ID_ENGINE,
+        Ecu::Brake => ECU_ID_BRAKE,
+        Ecu::Steering => ECU_ID_STEERING,
     }
 }
 
 fn ecu_from_id(id: u8) -> Option<Ecu> {
     match id {
-        0 => Some(Ecu::Engine),
-        1 => Some(Ecu::Brake),
-        2 => Some(Ecu::Steering),
+        ECU_ID_ENGINE => Some(Ecu::Engine),
+        ECU_ID_BRAKE => Some(Ecu::Brake),
+        ECU_ID_STEERING => Some(Ecu::Steering),
         _ => None,
     }
 }
