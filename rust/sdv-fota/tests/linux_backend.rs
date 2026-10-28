@@ -396,6 +396,70 @@ fn linux_launcher_rolls_back_if_trial_image_exits_before_health_check() {
 }
 
 #[test]
+fn init_cli_accepts_named_provisioning_options() {
+    let root = TempRoot::new();
+
+    let initialized = Command::new(env!("CARGO_BIN_EXE_sdv-fota"))
+        .args([
+            "init",
+            "--security-version",
+            "7",
+            "--active-version",
+            "2.3.0",
+            "--state-root",
+            root.0.to_str().unwrap(),
+            "--active-slot",
+            "b",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        initialized.status.success(),
+        "{}",
+        String::from_utf8_lossy(&initialized.stderr)
+    );
+
+    let status = Command::new(env!("CARGO_BIN_EXE_sdv-fota"))
+        .args(["status", "--state-root", root.0.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(status.status.success());
+    let report = String::from_utf8_lossy(&status.stdout);
+    assert!(report.contains("active_slot: B"));
+    assert!(report.contains("active_version: 2.3.0"));
+    assert!(report.contains("highest_security_version: 7"));
+}
+
+#[test]
+fn linux_vehicle_installer_rejects_per_ecu_target() {
+    let root = TempRoot::new();
+    let boot = FileBootControl::new(&root.0);
+    boot.initialize(Slot::A, "1.0.0", 1).unwrap();
+
+    let result = Command::new(env!("CARGO_BIN_EXE_sdv-fota"))
+        .args([
+            "install",
+            "--state-root",
+            root.0.to_str().unwrap(),
+            "--package",
+            "missing.sdvf",
+            "--target",
+            "engine",
+            "--config-schema",
+            "1",
+            "--signal-if-version",
+            "1",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("per-ECU slots are not configured"));
+    assert!(boot.state().unwrap().trial.is_none());
+    assert!(!FileSlotStorage::new(&root.0).image_path(Slot::B).exists());
+}
+
+#[test]
 fn install_cli_streams_signed_package_into_inactive_slot() {
     let root = TempRoot::new();
     let boot = FileBootControl::new(&root.0);
@@ -404,8 +468,8 @@ fn install_cli_streams_signed_package_into_inactive_slot() {
     let manifest = serde_json::json!({
         "manifest_schema": 1,
         "image": {
-            "target_ecu": "engine",
-            "swc": "EngineSWC",
+            "target_ecu": "vehicle",
+            "swc": "VehicleControlApp",
             "version": "1.1.0",
             "security_version": 2,
             "size_bytes": payload.len(),
@@ -424,11 +488,17 @@ fn install_cli_streams_signed_package_into_inactive_slot() {
     let result = Command::new(env!("CARGO_BIN_EXE_sdv-fota"))
         .args([
             "install",
+            "--state-root",
             root.0.to_str().unwrap(),
+            "--package",
             package_path.to_str().unwrap(),
-            "engine",
+            "--target",
+            "vehicle",
+            "--config-schema",
             "1",
+            "--signal-if-version",
             "1",
+            "--trial-boots",
             "2",
         ])
         .env("SDV_FOTA_TEST_TRUST_STORE", trust_store)
@@ -446,7 +516,7 @@ fn install_cli_streams_signed_package_into_inactive_slot() {
     assert_eq!(trial.version, "1.1.0");
     assert_eq!(trial.trial_window_ms, 5_000);
     let reported = Command::new(env!("CARGO_BIN_EXE_sdv-fota"))
-        .args(["status", root.0.to_str().unwrap()])
+        .args(["status", "--state-root", root.0.to_str().unwrap()])
         .output()
         .unwrap();
     assert!(reported.status.success());
@@ -468,8 +538,8 @@ fn install_cli_rejects_package_signed_by_untrusted_key() {
     let manifest = serde_json::json!({
         "manifest_schema": 1,
         "image": {
-            "target_ecu": "engine",
-            "swc": "EngineSWC",
+            "target_ecu": "vehicle",
+            "swc": "VehicleControlApp",
             "version": "1.1.0",
             "security_version": 2,
             "size_bytes": payload.len(),
@@ -488,10 +558,15 @@ fn install_cli_rejects_package_signed_by_untrusted_key() {
     let result = Command::new(env!("CARGO_BIN_EXE_sdv-fota"))
         .args([
             "install",
+            "--state-root",
             root.0.to_str().unwrap(),
+            "--package",
             package_path.to_str().unwrap(),
-            "engine",
+            "--target",
+            "vehicle",
+            "--config-schema",
             "1",
+            "--signal-if-version",
             "1",
         ])
         .env("SDV_FOTA_TEST_TRUST_STORE", trust_store)
@@ -512,8 +587,8 @@ fn install_url_streams_https_package_through_curl_ingress() {
     let manifest = serde_json::json!({
         "manifest_schema": 1,
         "image": {
-            "target_ecu": "engine",
-            "swc": "EngineSWC",
+            "target_ecu": "vehicle",
+            "swc": "VehicleControlApp",
             "version": "1.1.0",
             "security_version": 2,
             "size_bytes": payload.len(),
@@ -545,11 +620,17 @@ fn install_url_streams_https_package_through_curl_ingress() {
     let result = Command::new(env!("CARGO_BIN_EXE_sdv-fota"))
         .args([
             "install-url",
+            "--state-root",
             root.0.to_str().unwrap(),
-            "https://updates.example.test/engine.sdvf",
-            "engine",
+            "--url",
+            "https://updates.example.test/vehicle.sdvf",
+            "--target",
+            "vehicle",
+            "--config-schema",
             "1",
+            "--signal-if-version",
             "1",
+            "--trial-boots",
             "2",
         ])
         .env("PATH", path)
@@ -579,8 +660,8 @@ fn failed_https_transfer_aborts_candidate_and_does_not_schedule_trial() {
     let manifest = serde_json::json!({
         "manifest_schema": 1,
         "image": {
-            "target_ecu": "engine",
-            "swc": "EngineSWC",
+            "target_ecu": "vehicle",
+            "swc": "VehicleControlApp",
             "version": "1.1.0",
             "security_version": 2,
             "size_bytes": payload.len(),
@@ -612,11 +693,17 @@ fn failed_https_transfer_aborts_candidate_and_does_not_schedule_trial() {
     let result = Command::new(env!("CARGO_BIN_EXE_sdv-fota"))
         .args([
             "install-url",
+            "--state-root",
             root.0.to_str().unwrap(),
-            "https://updates.example.test/engine.sdvf",
-            "engine",
+            "--url",
+            "https://updates.example.test/vehicle.sdvf",
+            "--target",
+            "vehicle",
+            "--config-schema",
             "1",
+            "--signal-if-version",
             "1",
+            "--trial-boots",
             "2",
         ])
         .env("PATH", path)
@@ -651,7 +738,7 @@ fn signing_and_install_commands_complete_a_host_update() {
             "--key-id",
             KEY_ID,
             "--target",
-            "engine",
+            "vehicle",
             "--version",
             "1.1.0",
             "--security-version",
@@ -679,11 +766,17 @@ fn signing_and_install_commands_complete_a_host_update() {
     let installed = Command::new(env!("CARGO_BIN_EXE_sdv-fota"))
         .args([
             "install",
+            "--state-root",
             root.0.to_str().unwrap(),
+            "--package",
             package_path.to_str().unwrap(),
-            "engine",
+            "--target",
+            "vehicle",
+            "--config-schema",
             "1",
+            "--signal-if-version",
             "1",
+            "--trial-boots",
             "2",
         ])
         .env("SDV_FOTA_TEST_TRUST_STORE", trust_store)
