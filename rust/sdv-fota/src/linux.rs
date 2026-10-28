@@ -5,15 +5,27 @@
 //! launcher should call `select_for_boot`, start the returned slot's image, then call
 //! `commit_trial` only after the SDV service passes its health checks.
 
-use super::{BootControl, BootDecision, BootState, ImageStorage, Slot, TrialImage};
+use super::{BootControl, BootDecision, BootState, ImageStorage, Slot, TrialImage, VersionString};
 use serde::Serialize;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, ExitStatus};
+use std::thread;
+use std::time::{Duration, Instant};
 
 const RECORD_MAGIC: &[u8; 4] = b"SDVB";
 const RECORD_HEADER_BYTES: usize = 16;
+const MAX_BOOT_RECORD_BYTES: usize = 4096;
 const IMAGE_FILE: &str = "sdv-image.bin";
+const LOCK_EX: i32 = 2;
+const LOCK_NB: i32 = 4;
+
+extern "C" {
+    fn flock(fd: i32, operation: i32) -> i32;
+}
 
 #[derive(Debug)]
 pub enum Error {
@@ -25,6 +37,10 @@ pub enum Error {
     ImageWriteInProgress,
     InvalidImageWrite,
     InvalidRecord,
+    TrialImageExited,
+    TrialHealthTimeout,
+    TrailingPackageData,
+    UpdateInProgress,
 }
 
 impl From<io::Error> for Error {
@@ -33,10 +49,41 @@ impl From<io::Error> for Error {
     }
 }
 
+/// File-backed package ingress for bounded streaming installation.
+pub struct FilePackageSource {
+    file: File,
+}
+
+impl FilePackageSource {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
+        Ok(Self {
+            file: File::open(path)?,
+        })
+    }
+}
+
+impl super::PackageSource for FilePackageSource {
+    type Error = Error;
+
+    fn read_exact(&mut self, buffer: &mut [u8]) -> Result<(), Self::Error> {
+        Read::read_exact(&mut self.file, buffer).map_err(Error::Io)
+    }
+
+    fn finish(&mut self) -> Result<(), Self::Error> {
+        let mut trailing = [0u8; 1];
+        if self.file.read(&mut trailing)? == 0 {
+            Ok(())
+        } else {
+            Err(Error::TrailingPackageData)
+        }
+    }
+}
+
 /// Image payloads stored in versioned directories beneath the configured application-data root.
 pub struct FileSlotStorage {
     root: PathBuf,
     pending: Option<PendingImage>,
+    update_lock: Option<File>,
 }
 
 struct PendingImage {
@@ -54,6 +101,7 @@ impl FileSlotStorage {
         Self {
             root: root.into(),
             pending: None,
+            update_lock: None,
         }
     }
 
@@ -75,6 +123,11 @@ impl ImageStorage for FileSlotStorage {
         if image_size == 0 {
             return Err(Error::InvalidImageWrite);
         }
+        let new_lock = if self.update_lock.is_none() {
+            Some(acquire_update_lock(&self.root)?)
+        } else {
+            None
+        };
         let slot = active.other();
         let directory = self.root.join("slots").join(slot_name(slot));
         fs::create_dir_all(&directory)?;
@@ -94,6 +147,9 @@ impl ImageStorage for FileSlotStorage {
             expected_size: image_size,
             written: 0,
         });
+        if let Some(lock) = new_lock {
+            self.update_lock = Some(lock);
+        }
         Ok(slot)
     }
 
@@ -122,9 +178,22 @@ impl ImageStorage for FileSlotStorage {
             self.pending = Some(pending);
             return Err(Error::InvalidImageWrite);
         }
-        pending.file.sync_all()?;
+        if let Err(error) = pending
+            .file
+            .set_permissions(fs::Permissions::from_mode(0o755))
+        {
+            discard_temp_file(&pending.temporary);
+            return Err(Error::Io(error));
+        }
+        if let Err(error) = pending.file.sync_all() {
+            discard_temp_file(&pending.temporary);
+            return Err(Error::Io(error));
+        }
         drop(pending.file);
-        fs::rename(&pending.temporary, &pending.destination)?;
+        if let Err(error) = fs::rename(&pending.temporary, &pending.destination) {
+            discard_temp_file(&pending.temporary);
+            return Err(Error::Io(error));
+        }
         sync_directory(&pending.directory)?;
         Ok(())
     }
@@ -134,9 +203,12 @@ impl ImageStorage for FileSlotStorage {
             if pending.slot == slot {
                 drop(pending.file);
                 let _ = fs::remove_file(pending.temporary);
+                self.update_lock = None;
             } else {
                 self.pending = Some(pending);
             }
+        } else {
+            self.update_lock = None;
         }
     }
 
@@ -149,6 +221,172 @@ impl ImageStorage for FileSlotStorage {
         let mut file = File::open(self.image_path(slot))?;
         file.seek(SeekFrom::Start(u64::from(offset)))?;
         Ok(file.read(buffer)?)
+    }
+}
+
+fn acquire_update_lock(root: &Path) -> Result<File, Error> {
+    fs::create_dir_all(root)?;
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(root.join(".fota-update.lock"))?;
+    // SAFETY: `file` owns a valid descriptor; flock does not retain the descriptor pointer.
+    if unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) } == 0 {
+        Ok(file)
+    } else {
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::WouldBlock {
+            Err(Error::UpdateInProgress)
+        } else {
+            Err(Error::Io(error))
+        }
+    }
+}
+
+fn discard_temp_file(path: &Path) {
+    let _ = fs::remove_file(path);
+}
+
+/// Select and run the configured A/B image. A trial image is committed only after the supplied
+/// health command exits successfully before the manifest's trial window expires.
+pub fn run_selected_image(
+    root: impl Into<PathBuf>,
+    health_program: &Path,
+    health_args: &[std::ffi::OsString],
+) -> Result<ExitStatus, Error> {
+    let root = root.into();
+    let mut boot = FileBootControl::new(&root);
+    let decision = boot.select_for_boot()?;
+    let image = FileSlotStorage::new(&root).image_path(decision.slot);
+    let trial_window_ms = if decision.trial {
+        boot.state()?
+            .trial
+            .ok_or(Error::NoTrialPending)?
+            .trial_window_ms
+    } else {
+        0
+    };
+    let mut child = match Command::new(&image).spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            if decision.trial {
+                boot.rollback_trial()?;
+            }
+            return Err(Error::Io(error));
+        }
+    };
+
+    if decision.trial {
+        if let Err(error) = wait_for_trial_health(
+            &mut child,
+            &mut boot,
+            decision.slot,
+            &image,
+            health_program,
+            health_args,
+            Duration::from_millis(u64::from(trial_window_ms)),
+        ) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+        if let Err(error) = boot.commit_trial() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+    }
+    child.wait().map_err(Error::Io)
+}
+
+fn wait_for_trial_health(
+    child: &mut Child,
+    boot: &mut FileBootControl,
+    slot: Slot,
+    image: &Path,
+    health_program: &Path,
+    health_args: &[std::ffi::OsString],
+    timeout: Duration,
+) -> Result<(), Error> {
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                boot.rollback_trial()?;
+                return Err(Error::TrialImageExited);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                boot.rollback_trial()?;
+                return Err(Error::Io(error));
+            }
+        }
+        let mut health = match Command::new(health_program)
+            .args(health_args)
+            .env("SDV_TRIAL_SLOT", slot_name(slot))
+            .env("SDV_IMAGE_PATH", image)
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) => {
+                boot.rollback_trial()?;
+                return Err(Error::Io(error));
+            }
+        };
+        loop {
+            match health.try_wait() {
+                Ok(Some(status)) if status.success() => match child.try_wait() {
+                    Ok(Some(_)) => {
+                        boot.rollback_trial()?;
+                        return Err(Error::TrialImageExited);
+                    }
+                    Ok(None) => return Ok(()),
+                    Err(error) => {
+                        boot.rollback_trial()?;
+                        return Err(Error::Io(error));
+                    }
+                },
+                Ok(Some(_)) => break,
+                Ok(None) => {}
+                Err(error) => {
+                    let _ = health.kill();
+                    let _ = health.wait();
+                    boot.rollback_trial()?;
+                    return Err(Error::Io(error));
+                }
+            }
+            match child.try_wait() {
+                Ok(Some(_)) => {
+                    let _ = health.kill();
+                    let _ = health.wait();
+                    boot.rollback_trial()?;
+                    return Err(Error::TrialImageExited);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    let _ = health.kill();
+                    let _ = health.wait();
+                    boot.rollback_trial()?;
+                    return Err(Error::Io(error));
+                }
+            }
+            let elapsed = started.elapsed();
+            if elapsed >= timeout {
+                let _ = health.kill();
+                let _ = health.wait();
+                boot.rollback_trial()?;
+                return Err(Error::TrialHealthTimeout);
+            }
+            thread::sleep(Duration::from_millis(10).min(timeout - elapsed));
+        }
+        let elapsed = started.elapsed();
+        if elapsed >= timeout {
+            boot.rollback_trial()?;
+            return Err(Error::TrialHealthTimeout);
+        }
+        thread::sleep(Duration::from_millis(100).min(timeout - elapsed));
     }
 }
 
@@ -166,7 +404,7 @@ impl FileBootControl {
     pub fn initialize(
         &self,
         active: Slot,
-        active_version: String,
+        active_version: &str,
         highest_security_version: u64,
     ) -> Result<(), Error> {
         fs::create_dir_all(&self.root)?;
@@ -177,7 +415,8 @@ impl FileBootControl {
             0,
             &BootState {
                 active,
-                active_version,
+                active_version: VersionString::try_from_str(active_version)
+                    .ok_or(Error::InvalidRecord)?,
                 highest_security_version,
                 trial: None,
             },
@@ -238,7 +477,7 @@ impl BootControl for FileBootControl {
 
     fn select_for_boot(&mut self) -> Result<BootDecision, Self::Error> {
         let (sequence, mut state) = self.load()?;
-        let Some(mut trial) = state.trial.clone() else {
+        let Some(mut trial) = state.trial else {
             return Ok(BootDecision {
                 slot: state.active,
                 trial: false,
@@ -287,11 +526,24 @@ fn encode_record(sequence: u64, state: &impl Serialize) -> Result<Vec<u8>, Error
     bytes.extend_from_slice(&body);
     let checksum = crc32(&bytes[4..]);
     bytes.extend_from_slice(&checksum.to_be_bytes());
+    if bytes.len() > MAX_BOOT_RECORD_BYTES {
+        return Err(Error::InvalidRecord);
+    }
     Ok(bytes)
 }
 
 fn read_record(path: &Path) -> Option<(u64, BootState)> {
-    let bytes = fs::read(path).ok()?;
+    let mut file = File::open(path).ok()?;
+    let size = usize::try_from(file.metadata().ok()?.len()).ok()?;
+    if !(RECORD_HEADER_BYTES + 4..=MAX_BOOT_RECORD_BYTES).contains(&size) {
+        return None;
+    }
+    let mut bytes = vec![0u8; size];
+    file.read_exact(&mut bytes).ok()?;
+    let mut trailing = [0u8; 1];
+    if file.read(&mut trailing).ok()? != 0 {
+        return None;
+    }
     if bytes.len() < RECORD_HEADER_BYTES + 4 || &bytes[..4] != RECORD_MAGIC {
         return None;
     }

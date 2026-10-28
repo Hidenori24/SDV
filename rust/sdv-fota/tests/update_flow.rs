@@ -1,7 +1,7 @@
 use sdv_fota::{
     encode_package, parse_package, resolve_trial, validate_package, BootControl, BootDecision,
     BootState, Ecu, FotaInstaller, HealthMonitor, ImageStorage, InstallError, PackageSource, Slot,
-    TrialImage, TrustKey, ValidationContext, ValidationError,
+    TrialImage, TrustKey, ValidationContext, ValidationError, VersionString,
 };
 use sdv_sec::{ed25519_public_key, ed25519_sign, sha256};
 use std::convert::Infallible;
@@ -123,7 +123,7 @@ impl MemoryBootControl {
         Self {
             state: BootState {
                 active: Slot::A,
-                active_version: "1.0.0".into(),
+                active_version: fixed_version("1.0.0"),
                 highest_security_version: 1,
                 trial: None,
             },
@@ -226,6 +226,10 @@ fn slot_index(slot: Slot) -> usize {
         Slot::A => 0,
         Slot::B => 1,
     }
+}
+
+fn fixed_version(version: &str) -> VersionString {
+    VersionString::try_from_str(version).unwrap()
 }
 
 #[test]
@@ -541,9 +545,10 @@ fn failed_health_check_rolls_back_trial() {
     let mut boot = MemoryBootControl::current();
     boot.schedule_trial(TrialImage {
         slot: Slot::B,
-        version: "1.1.0".into(),
+        version: fixed_version("1.1.0"),
         security_version: 2,
         boots_left: 1,
+        trial_window_ms: 5_000,
     })
     .unwrap();
 

@@ -1,0 +1,18 @@
+[Unit]
+Description=SDV A/B application slot launcher
+After=local-fs.target
+
+[Service]
+Type=simple
+User=sdv
+Group=sdv
+ExecStart=/usr/bin/sdv-fota-launcher /var/lib/sdv-fota /usr/bin/sdv-health-check
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/sdv-fota
+
+[Install]
+WantedBy=multi-user.target

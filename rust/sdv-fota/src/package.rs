@@ -3,8 +3,10 @@
 use crate::model::{
     Manifest, Package, TrustKey, ValidatedPackage, ValidationContext, ValidationError,
 };
-use alloc::vec::Vec;
 use sdv_sec::{ed25519_verify, sha256, ED25519_SIGNATURE_LEN};
+
+#[cfg(feature = "std")]
+use alloc::vec::Vec;
 
 pub const MANIFEST_SCHEMA: u32 = 1;
 pub const SIGNAL_IF_VERSION: u32 = 1;
@@ -61,6 +63,7 @@ pub fn parse_package(bytes: &[u8]) -> Result<Package<'_>, ValidationError> {
 }
 
 /// Encode the v1 envelope. The caller supplies the signature over the exact manifest bytes.
+#[cfg(feature = "std")]
 pub fn encode_package(
     key_id: &str,
     signature: &[u8; ED25519_SIGNATURE_LEN],
@@ -149,8 +152,7 @@ pub fn validate_signed_manifest(
     ed25519_verify(key.public_key, manifest_bytes, signature)
         .map_err(|_| ValidationError::InvalidSignature)?;
 
-    let manifest: Manifest =
-        serde_json::from_slice(manifest_bytes).map_err(|_| ValidationError::InvalidManifest)?;
+    let manifest: Manifest = crate::manifest_parser::parse_manifest(manifest_bytes)?;
     validate_manifest_metadata(&manifest, payload_size, context)?;
     Ok(manifest)
 }

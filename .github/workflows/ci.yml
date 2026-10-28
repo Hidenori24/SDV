@@ -55,6 +55,10 @@ jobs:
         run: cargo test
       - name: cargo test (FOTA service and Pi 5/Linux backend)
         run: cargo test --manifest-path ../sdv-fota/Cargo.toml
+      - name: cargo test (host-only FOTA signing tools)
+        run: cargo test --manifest-path ../sdv-fota/Cargo.toml --features host-signing
+      - name: cargo check (allocator-free FOTA core)
+        run: cargo check --manifest-path ../sdv-fota/Cargo.toml --no-default-features
       - name: WASM build
         run: cargo build --release --target wasm32-unknown-unknown
 

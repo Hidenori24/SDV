@@ -6,8 +6,8 @@ description = "Platform-independent FOTA package validation and update interface
 license = "MIT"
 
 [dependencies]
-serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
-serde_json = { version = "1", default-features = false, features = ["alloc"] }
+serde = { version = "1", default-features = false, features = ["derive"] }
+serde_json = { version = "1", default-features = false, features = ["std"], optional = true }
 sdv-sec = { path = "../sdv-sec" }
 
 [dev-dependencies]
@@ -15,7 +15,23 @@ sdv-sec = { path = "../sdv-sec", features = ["sign"] }
 
 [features]
 default = ["std"]
-std = ["serde/std", "serde_json/std", "sdv-sec/std"]
+std = ["serde/std", "dep:serde_json", "sdv-sec/std"]
+host-signing = ["sdv-sec/sign"]
 
 [lib]
 crate-type = ["rlib"]
+
+[[bin]]
+name = "sdv-fota-launcher"
+path = "src/bin/sdv-fota-launcher.rs"
+required-features = ["std"]
+
+[[bin]]
+name = "sdv-fota"
+path = "src/bin/sdv-fota.rs"
+required-features = ["std"]
+
+[[bin]]
+name = "sdv-fota-sign"
+path = "src/bin/sdv-fota-sign.rs"
+required-features = ["std", "host-signing"]
