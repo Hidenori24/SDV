@@ -32,7 +32,7 @@ sudo install -m 0755 rust/sdv-picarx/target/release/sdv-picarx-discover /usr/bin
     <p>署名コマンドは保護されたリリースホストで別にビルドします。</p>
 <pre><code>cargo build --release --manifest-path rust/sdv-fota/Cargo.toml \
   --features host-signing --bin sdv-fota-sign</code></pre>
-    <p>アプリ実行用の非特権ユーザーを作成します。スロットとboot metadataはroot所有にし、アプリ自身から更新イメージや起動状態を書き換えられないようにします。初期イメージにはPiCar-X用Rustホストを配置し、設定はスロット外に置きます。</p>
+    <p>アプリ実行用の非特権ユーザーを作成します。状態ディレクトリ、スロット、イメージ、boot metadataはroot所有にし、group/otherから書き込めないようにします。ツールはsymlinkの状態パスを拒否し、更新データと起動記録は排他的な一時ファイルからatomic renameで配置します。初期イメージにはPiCar-X用Rustホストを配置し、設定はスロット外に置きます。</p>
 <pre><code>sudo useradd --system --user-group --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin sdv-app
 sudo install -d -o root -g root -m 0755 /var/lib/sdv-fota/slots/a /var/lib/sdv-fota/slots/b
 sudo install -d -o root -g root -m 0755 /etc/sdv-picarx
