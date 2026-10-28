@@ -1,7 +1,7 @@
 # 実機（Raspberry Pi の車）の検討メモ
 
 **採用: SunFounder PiCar-X + Raspberry Pi 5**（実機での動作確認はこれから）。
-最初のFOTA対象は、Pi上で車両全体を動かす一つの`vehicle`アプリとする。論理ECUを分割してもよいが、物理ECUや個別更新を前提にしない。ハードウェアI/OはPlatform APIの下に置く。
+Pi上の一つのRustプロセス内で、VCU・Engine・Brake・Steeringを仮想ECUタスクとして分ける。各タスクは専用RTEを持ち、信号契約はシミュレーションと共通にする。初期FOTA対象は`vehicle`ランタイム全体で、仮想ECU単位の独立更新は後段にする。ハードウェアI/OはPlatform APIの下に置く。
 
 ## 前提
 - 計算機は Raspberry Pi 5、**64bit OS**（Raspberry Pi OS Lite 64bit）
