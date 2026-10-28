@@ -138,6 +138,9 @@ the target NvM adapter. Persist it after each state transition. After a VCU rest
 checkpoint, query the active ECU's authoritative status, and report it to the campaign manager;
 the manager may reissue Activate or Commit, so the target adapter must make these operations
 idempotent. CRC32 detects accidental corruption and does not authenticate the record.
+The `CampaignTransport` port and C `sdv_fota_campaign_transport_t` callback table dispatch these
+logical actions to the OEM-specific diagnostic client. The callbacks submit work; the VCU later
+reports ECU status through `sdv_fota_campaign_report`.
 See [the Classic architecture proposal](../docs/design/fota_classic_architecture.md). `SIGNAL_IF_VERSION` is currently 1.
 See the [Pi 5 host operation workflow](../docs/design/fota-pi5-operations.md) for initial provisioning,
 package signing, staging, and trial activation.

@@ -62,6 +62,18 @@ pub struct SdvFotaCampaignCommand {
     pub ecu: u8,
 }
 
+pub type SdvFotaCampaignAction = unsafe extern "C" fn(*mut c_void, u8) -> i32;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SdvFotaCampaignTransport {
+    pub context: *mut c_void,
+    pub request_update: Option<SdvFotaCampaignAction>,
+    pub activate_trial: Option<SdvFotaCampaignAction>,
+    pub commit_trial: Option<SdvFotaCampaignAction>,
+    pub abort_update: Option<SdvFotaCampaignAction>,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct SdvFotaState {
@@ -775,6 +787,52 @@ pub unsafe extern "C" fn sdv_fota_campaign_restore(
     // SAFETY: caller supplies writable CampaignManager storage that does not overlap checkpoint.
     unsafe { manager.write(restored) };
     SDV_FOTA_OK
+}
+
+/// Dispatch a logical campaign action to a target-owned diagnostic transport callback.
+///
+/// # Safety
+/// `transport` and `command` must point to readable values. The selected callback and its
+/// context must remain valid for the duration of the call.
+#[no_mangle]
+pub unsafe extern "C" fn sdv_fota_campaign_dispatch(
+    transport: *const SdvFotaCampaignTransport,
+    command: *const SdvFotaCampaignCommand,
+) -> i32 {
+    if transport.is_null() || command.is_null() {
+        return SDV_FOTA_INVALID_ARG;
+    }
+    // Copy fields before invoking the callback so its context may safely refer to the input
+    // structures without any Rust references remaining live across the external call.
+    let command_id = unsafe { (*command).command };
+    let ecu_id = unsafe { (*command).ecu };
+    if command_id == SDV_FOTA_CAMPAIGN_NONE {
+        return if ecu_id == SDV_FOTA_ECU_NONE {
+            SDV_FOTA_OK
+        } else {
+            SDV_FOTA_INVALID_ARG
+        };
+    }
+    if campaign_ecu_from_id(ecu_id).is_none() {
+        return SDV_FOTA_INVALID_ARG;
+    }
+    let callback = match command_id {
+        SDV_FOTA_CAMPAIGN_REQUEST => unsafe { (*transport).request_update },
+        SDV_FOTA_CAMPAIGN_ACTIVATE => unsafe { (*transport).activate_trial },
+        SDV_FOTA_CAMPAIGN_COMMIT => unsafe { (*transport).commit_trial },
+        SDV_FOTA_CAMPAIGN_ABORT => unsafe { (*transport).abort_update },
+        _ => return SDV_FOTA_INVALID_ARG,
+    };
+    let Some(callback) = callback else {
+        return SDV_FOTA_INVALID_ARG;
+    };
+    // SAFETY: caller guarantees the copied context and selected callback are valid.
+    let context = unsafe { (*transport).context };
+    if unsafe { callback(context, ecu_id) } == 0 {
+        SDV_FOTA_OK
+    } else {
+        SDV_FOTA_CALLBACK_ERROR
+    }
 }
 
 #[cfg(test)]
