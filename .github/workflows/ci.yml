@@ -53,6 +53,8 @@ jobs:
           targets: wasm32-unknown-unknown
       - name: cargo test (includes C++ golden log cross-check)
         run: cargo test
+      - name: cargo test (FOTA campaign against simulated vehicle state)
+        run: cargo test --features fota-simulator
       - name: cargo test (FOTA service and Pi 5/Linux backend)
         run: cargo test --manifest-path ../sdv-fota/Cargo.toml
       - name: cargo test (host-only FOTA signing tools)
