@@ -17,6 +17,7 @@ cargo build --release --target wasm32-unknown-unknown # -> target/wasm32-unknown
 - `sim.rs`: ECU構成（ADR-0002 案A）。VCU（DriverInput + Safety）/ Engine ECU / Brake ECU / Steering ECU / Plant（VehicleDynamics）がそれぞれ自分の `Rte` を持ち、バスで信号をやり取りする。10ms固定ステップの順序: VCU送信 → 各ECU実行 → Plant実行 → VCUタスク（各段の間でバス配送）。遅延0・欠損0では1プロセス版と同じログになる（C++ golden と一致）
 - `runtime.rs`: Platform向けの `VehicleRuntime`。VCU / Engine / Brake / Steeringを独立した仮想ECUタスクとして10ms周期で実行し、センサ状態と生存状態を受け取り、アクチュエータ指令とSafety状態を返す。シミュレータと同じSWC・RTE・仮想バスを使う。PiCar-Xの実I/Oアダプターは別途実装が必要
 - `platform.rs` / `runtime_host.rs`: 車両I/OとECU実行を接続し、単調時計に基づく10ms周期を提供する。I/Oエラー、無効な入力、周期超過、正常終了時にはPlatformへ停止を要求する。プロセス停止や電源断時の物理停止は別途ハードウェア側で必要
+- `platform_sim.rs`: 同じPlatform APIにVehicleDynamics plantをつなぐアダプター。`VehicleExecutor`を通した走行軌跡を既存 `Sim` と照合する
 - `failsafe.rs`: ECUの受信側フェイルセーフ。DriverInput が200ms超途絶 → 入力を0扱い、Safety が100ms超途絶 → そのECUが自律的に EStop 相当の動作に入る（VCU停止・バス断でも止まる）。フレームが戻れば自動復帰
 - バス障害: `Sim::set_bus_delay_ticks` / `set_bus_loss_permille`（決定的な疑似乱数で再現可能）/ `set_bus_down`、VCU停止: `set_vcu_stall`。**ECU→Plant のアクチュエータ線は直結**で障害の影響を受けない
 - `tests/bus_faults.rs` / `tests/wasm_api.rs`: 遅延・欠損・バス断・VCU停止とフェイルセーフ、C ABI

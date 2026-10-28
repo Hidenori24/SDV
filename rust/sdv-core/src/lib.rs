@@ -9,6 +9,7 @@ pub mod fota;
 pub mod model;
 pub mod nvm;
 pub mod platform;
+pub mod platform_sim;
 pub mod rte;
 pub mod runtime;
 pub mod runtime_host;
