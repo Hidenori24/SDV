@@ -12,6 +12,20 @@ impl Drop for Seed {
     }
 }
 
+#[derive(Debug, PartialEq)]
+struct SignOptions {
+    seed_file: PathBuf,
+    key_id: String,
+    target: String,
+    version: String,
+    security_version: u64,
+    trial_ms: u64,
+    config_schema: u64,
+    signal_if_version: u64,
+    image_path: PathBuf,
+    output_path: PathBuf,
+}
+
 fn main() {
     if let Err(error) = run(std::env::args().skip(1).collect()) {
         eprintln!("sdv-fota-sign: {error}");
@@ -20,25 +34,22 @@ fn main() {
 }
 
 fn run(args: Vec<String>) -> Result<(), String> {
-    if args.len() != 10 {
-        return Err(usage());
-    }
-    let seed = Seed(read_seed(&args[0])?);
-    let key_id = &args[1];
-    let (ecu, swc) = match args[2].as_str() {
+    let options = parse_options(args)?;
+    let seed = Seed(read_seed(&options.seed_file)?);
+    let (ecu, swc) = match options.target.as_str() {
         "engine" => (Ecu::Engine, "EngineSWC"),
         "brake" => (Ecu::Brake, "BrakeSWC"),
         "steering" => (Ecu::Steering, "SteeringSWC"),
         "vehicle" => (Ecu::Vehicle, "VehicleControlApp"),
-        _ => return Err("ECU must be engine, brake, steering, or vehicle".into()),
+        _ => return Err("target must be engine, brake, steering, or vehicle".into()),
     };
-    let version = &args[3];
-    let security_version = parse_number(&args[4], "security version")?;
-    let trial_ms = parse_number(&args[5], "trial window")?;
-    let config_schema = parse_number(&args[6], "config schema")?;
-    let signal_if_version = parse_number(&args[7], "signal interface version")?;
-    let image_path = PathBuf::from(&args[8]);
-    let output_path = PathBuf::from(&args[9]);
+    let version = &options.version;
+    let security_version = options.security_version;
+    let trial_ms = options.trial_ms;
+    let config_schema = options.config_schema;
+    let signal_if_version = options.signal_if_version;
+    let image_path = options.image_path;
+    let output_path = options.output_path;
 
     let (payload_size, payload_digest) = hash_file(&image_path)?;
     if payload_size == 0 || payload_size > u64::from(u32::MAX) {
@@ -73,7 +84,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
     let signature = ed25519_sign(&seed.0, &manifest_bytes);
     let public_key = ed25519_public_key(&seed.0);
     let result = write_package(
-        key_id,
+        &options.key_id,
         &signature,
         &manifest_bytes,
         payload_size,
@@ -83,9 +94,75 @@ fn run(args: Vec<String>) -> Result<(), String> {
     );
     result?;
     println!("package: {}", output_path.display());
-    println!("key_id: {key_id}");
+    println!("key_id: {}", options.key_id);
     println!("public_key: {}", hex(&public_key));
     Ok(())
+}
+
+fn parse_options(args: Vec<String>) -> Result<SignOptions, String> {
+    let mut seed_file = None;
+    let mut key_id = None;
+    let mut target = None;
+    let mut version = None;
+    let mut security_version = None;
+    let mut trial_ms = None;
+    let mut config_schema = None;
+    let mut signal_if_version = None;
+    let mut image_path = None;
+    let mut output_path = None;
+
+    let mut args = args.into_iter();
+    while let Some(option) = args.next() {
+        let value = args
+            .next()
+            .ok_or_else(|| format!("missing value for {option}\n{}", usage()))?;
+        match option.as_str() {
+            "--seed" => set_once(&mut seed_file, PathBuf::from(value), &option)?,
+            "--key-id" => set_once(&mut key_id, value, &option)?,
+            "--target" => set_once(&mut target, value, &option)?,
+            "--version" => set_once(&mut version, value, &option)?,
+            "--security-version" => set_once(&mut security_version, value, &option)?,
+            "--trial-ms" => set_once(&mut trial_ms, value, &option)?,
+            "--config-schema" => set_once(&mut config_schema, value, &option)?,
+            "--signal-if-version" => set_once(&mut signal_if_version, value, &option)?,
+            "--image" => set_once(&mut image_path, PathBuf::from(value), &option)?,
+            "--output" => set_once(&mut output_path, PathBuf::from(value), &option)?,
+            _ => return Err(format!("unknown option: {option}\n{}", usage())),
+        }
+    }
+
+    Ok(SignOptions {
+        seed_file: required(seed_file, "--seed")?,
+        key_id: required(key_id, "--key-id")?,
+        target: required(target, "--target")?,
+        version: required(version, "--version")?,
+        security_version: parse_number(
+            &required(security_version, "--security-version")?,
+            "security version",
+        )?,
+        trial_ms: parse_number(&required(trial_ms, "--trial-ms")?, "trial window")?,
+        config_schema: parse_number(
+            &required(config_schema, "--config-schema")?,
+            "config schema",
+        )?,
+        signal_if_version: parse_number(
+            &required(signal_if_version, "--signal-if-version")?,
+            "signal interface version",
+        )?,
+        image_path: required(image_path, "--image")?,
+        output_path: required(output_path, "--output")?,
+    })
+}
+
+fn set_once<T>(slot: &mut Option<T>, value: T, option: &str) -> Result<(), String> {
+    if slot.replace(value).is_some() {
+        return Err(format!("option supplied more than once: {option}"));
+    }
+    Ok(())
+}
+
+fn required<T>(value: Option<T>, option: &str) -> Result<T, String> {
+    value.ok_or_else(|| format!("missing required option {option}\n{}", usage()))
 }
 
 fn write_package(
@@ -158,7 +235,7 @@ fn hash_file(path: &Path) -> Result<(u64, [u8; 32]), String> {
     Ok((size, digest.finalize()))
 }
 
-fn read_seed(path: &str) -> Result<[u8; 32], String> {
+fn read_seed(path: &Path) -> Result<[u8; 32], String> {
     let text =
         fs::read_to_string(path).map_err(|error| format!("cannot read seed file: {error}"))?;
     let text = text.trim();
@@ -199,5 +276,53 @@ fn ecu_name(ecu: Ecu) -> &'static str {
 }
 
 fn usage() -> String {
-    "usage: sdv-fota-sign <seed-file> <key-id> <ecu> <version> <security-version> <trial-ms> <config-schema> <signal-if-version> <image-file> <output.sdvf>".into()
+    "usage: sdv-fota-sign --seed <file> --key-id <id> --target <ecu> --version <version> --security-version <n> --trial-ms <n> --config-schema <n> --signal-if-version <n> --image <file> --output <package.sdvf>".into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_named_options_independent_of_order() {
+        let options = parse_options(vec![
+            "--image".into(),
+            "image.bin".into(),
+            "--target".into(),
+            "vehicle".into(),
+            "--seed".into(),
+            "release.seed".into(),
+            "--key-id".into(),
+            "release-1".into(),
+            "--version".into(),
+            "1.2.0".into(),
+            "--security-version".into(),
+            "3".into(),
+            "--trial-ms".into(),
+            "5000".into(),
+            "--config-schema".into(),
+            "1".into(),
+            "--signal-if-version".into(),
+            "1".into(),
+            "--output".into(),
+            "update.sdvf".into(),
+        ])
+        .unwrap();
+        assert_eq!(options.target, "vehicle");
+        assert_eq!(options.security_version, 3);
+        assert_eq!(options.image_path, PathBuf::from("image.bin"));
+    }
+
+    #[test]
+    fn rejects_duplicate_unknown_and_positional_arguments() {
+        assert!(parse_options(vec!["image.bin".into()]).is_err());
+        assert!(parse_options(vec!["--unknown".into(), "value".into()]).is_err());
+        assert!(parse_options(vec![
+            "--seed".into(),
+            "a".into(),
+            "--seed".into(),
+            "b".into()
+        ])
+        .is_err());
+    }
 }

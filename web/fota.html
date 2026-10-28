@@ -58,7 +58,9 @@ sudo chmod 0644 /etc/sdv-fota/trusted-keys</code></pre>
   <section class="card">
     <h2>更新と試験起動</h2>
     <p>リリース環境でパッケージを作成し、Piで署名済みパッケージを導入します。</p>
-<pre><code>sdv-fota-sign /secure/release.seed release-2026 vehicle 1.1.0 2 5000 1 1 sdv-app update.sdvf
+<pre><code>sdv-fota-sign --seed /secure/release.seed --key-id release-2026 --target vehicle \
+  --version 1.1.0 --security-version 2 --trial-ms 5000 --config-schema 1 \
+  --signal-if-version 1 --image sdv-image.bin --output update.sdvf
 
 sudo sdv-fota install-url /var/lib/sdv-fota \
   https://updates.example/vehicle/update.sdvf vehicle 1 1
