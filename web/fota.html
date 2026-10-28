@@ -21,7 +21,7 @@ header,main{max-width:900px;margin:auto;padding:18px}header{display:flex;justify
   </section>
   <section class="card">
     <h2>Pi 5への初期セットアップ</h2>
-    <p>リポジトリからFOTAランチャーとPiCar-X車両イメージをビルドします。署名ツールは別の保護されたリリース環境だけでビルドしてください。<code>sdv-fota init</code> は初期active slotに通常の実行可能ファイルがあることを確認してから起動状態を記録します。</p>
+    <p>リポジトリからFOTAランチャーとPiCar-X車両イメージをビルドします。署名ツールは別の保護されたリリース環境だけでビルドしてください。<code>sdv-fota init</code> は初期active slotに空でない通常の実行可能ファイルがあることを確認してから起動状態を記録します。</p>
 <pre><code>cargo build --release --manifest-path rust/sdv-fota/Cargo.toml \
   --bin sdv-fota --bin sdv-fota-launcher
 sudo install -m 0755 rust/sdv-fota/target/release/sdv-fota /usr/bin/
