@@ -1,5 +1,7 @@
 #include "sdv_fota.h"
 
+_Static_assert(sizeof(sdv_fota_campaign_t) == 7, "campaign state ABI size changed");
+
 int main(void) {
     /* Null arguments must fail before any callback or memory access. */
     if (sdv_fota_stage_package(NULL, NULL, 0, NULL, NULL, 0,
@@ -24,6 +26,50 @@ int main(void) {
     }
     if (sdv_fota_select_for_boot(NULL, &slot, &is_trial) != SDV_FOTA_INVALID_ARG) {
         return 5;
+    }
+
+    sdv_fota_campaign_t campaign;
+    sdv_fota_campaign_command_t command = {0};
+    sdv_fota_vehicle_conditions_t conditions = {
+        .stopped = 1,
+        .safety_state = SDV_FOTA_SAFETY_NORMAL,
+        .other_update_active = 0,
+    };
+    const uint8_t targets[] = {SDV_FOTA_ECU_ENGINE, SDV_FOTA_ECU_BRAKE};
+    if (sdv_fota_campaign_init(NULL) != SDV_FOTA_INVALID_ARG ||
+        sdv_fota_campaign_init(&campaign) != SDV_FOTA_OK) {
+        return 6;
+    }
+    if (sdv_fota_campaign_start(&campaign, targets, 2, &conditions, &command) != SDV_FOTA_OK ||
+        command.command != SDV_FOTA_CAMPAIGN_REQUEST || command.ecu != SDV_FOTA_ECU_ENGINE) {
+        return 7;
+    }
+    if (sdv_fota_campaign_report(&campaign, SDV_FOTA_ECU_ENGINE,
+                                SDV_FOTA_ECU_STATUS_STAGED, &conditions, &command) != SDV_FOTA_OK ||
+        command.command != SDV_FOTA_CAMPAIGN_ACTIVATE || command.ecu != SDV_FOTA_ECU_ENGINE) {
+        return 8;
+    }
+    if (sdv_fota_campaign_report(&campaign, SDV_FOTA_ECU_ENGINE,
+                                SDV_FOTA_ECU_STATUS_TRIAL_HEALTHY, &conditions, &command) != SDV_FOTA_OK ||
+        command.command != SDV_FOTA_CAMPAIGN_COMMIT) {
+        return 9;
+    }
+    if (sdv_fota_campaign_report(&campaign, SDV_FOTA_ECU_ENGINE,
+                                SDV_FOTA_ECU_STATUS_COMMITTED, &conditions, &command) != SDV_FOTA_OK ||
+        command.command != SDV_FOTA_CAMPAIGN_REQUEST || command.ecu != SDV_FOTA_ECU_BRAKE) {
+        return 10;
+    }
+    conditions.stopped = 0;
+    if (sdv_fota_campaign_recheck(&campaign, &conditions, &command) != SDV_FOTA_OK ||
+        command.command != SDV_FOTA_CAMPAIGN_ABORT || command.ecu != SDV_FOTA_ECU_BRAKE) {
+        return 11;
+    }
+    uint8_t campaign_state = 0xff;
+    uint8_t campaign_ecu = 0xff;
+    if (sdv_fota_campaign_state(&campaign, &campaign_state, &campaign_ecu) != SDV_FOTA_OK ||
+        campaign_state != SDV_FOTA_CAMPAIGN_STATE_FAILED ||
+        campaign_ecu != SDV_FOTA_ECU_BRAKE) {
+        return 12;
     }
     return 0;
 }

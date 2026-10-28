@@ -110,38 +110,95 @@ pub enum CampaignError {
 }
 
 /// Serial campaign controller. It never has more than one ECU request outstanding.
+///
+/// This plain-byte layout is also exposed in `sdv_fota.h` so Classic C integration can allocate
+/// the state statically and pass it to the campaign C ABI.
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CampaignManager {
-    plan: Option<CampaignPlan>,
+    targets: [u8; MAX_CAMPAIGN_ECUS],
+    target_count: u8,
     target_index: u8,
-    phase: Phase,
-    state: CampaignState,
+    phase: u8,
+    state: u8,
+}
+
+const EMPTY_ECU_ID: u8 = 0xff;
+const PHASE_AWAITING_STAGE: u8 = 0;
+const PHASE_AWAITING_TRIAL_HEALTH: u8 = 1;
+const PHASE_AWAITING_COMMIT: u8 = 2;
+const STATE_IDLE: u8 = 0;
+const STATE_UPDATING: u8 = 1;
+const STATE_COMPLETED: u8 = 2;
+const STATE_FAILED: u8 = 3;
+
+fn ecu_id(ecu: Ecu) -> u8 {
+    match ecu {
+        Ecu::Engine => 0,
+        Ecu::Brake => 1,
+        Ecu::Steering => 2,
+    }
+}
+
+fn ecu_from_id(id: u8) -> Option<Ecu> {
+    match id {
+        0 => Some(Ecu::Engine),
+        1 => Some(Ecu::Brake),
+        2 => Some(Ecu::Steering),
+        _ => None,
+    }
 }
 
 impl CampaignManager {
     pub const fn new() -> Self {
         Self {
-            plan: None,
+            targets: [EMPTY_ECU_ID; MAX_CAMPAIGN_ECUS],
+            target_count: 0,
             target_index: 0,
-            phase: Phase::AwaitingStage,
-            state: CampaignState::Idle,
+            phase: PHASE_AWAITING_STAGE,
+            state: STATE_IDLE,
         }
     }
 
     pub fn state(&self) -> CampaignState {
-        self.state
+        match self.state {
+            STATE_UPDATING => self
+                .target_at(self.target_index)
+                .map_or(CampaignState::Idle, |ecu| CampaignState::Updating { ecu }),
+            STATE_COMPLETED => CampaignState::Completed,
+            STATE_FAILED => self
+                .target_at(self.target_index)
+                .map_or(CampaignState::Idle, |ecu| CampaignState::Failed { ecu }),
+            _ => CampaignState::Idle,
+        }
+    }
+
+    fn target_at(&self, index: u8) -> Option<Ecu> {
+        if index >= self.target_count || index as usize >= MAX_CAMPAIGN_ECUS {
+            return None;
+        }
+        ecu_from_id(self.targets[index as usize])
+    }
+
+    fn phase(&self) -> Option<Phase> {
+        match self.phase {
+            PHASE_AWAITING_STAGE => Some(Phase::AwaitingStage),
+            PHASE_AWAITING_TRIAL_HEALTH => Some(Phase::AwaitingTrialHealth),
+            PHASE_AWAITING_COMMIT => Some(Phase::AwaitingCommit),
+            _ => None,
+        }
     }
 
     /// Recheck vehicle preconditions from the VCU's periodic task and abort an active target as
     /// soon as the vehicle moves, Safety leaves Normal, or another update becomes active.
     pub fn recheck(&mut self, conditions: VehicleConditions) -> Option<CampaignCommand> {
-        let CampaignState::Updating { ecu } = self.state else {
+        let CampaignState::Updating { ecu } = self.state() else {
             return None;
         };
         if conditions.permits_update() {
             return None;
         }
-        self.state = CampaignState::Failed { ecu };
+        self.state = STATE_FAILED;
         Some(CampaignCommand::Abort(ecu))
     }
 
@@ -151,15 +208,21 @@ impl CampaignManager {
         plan: CampaignPlan,
         conditions: VehicleConditions,
     ) -> Result<CampaignCommand, CampaignError> {
-        if matches!(self.state, CampaignState::Updating { .. }) {
+        if matches!(self.state(), CampaignState::Updating { .. }) {
             return Err(CampaignError::CampaignInProgress);
         }
         check_conditions(conditions)?;
         let first = plan.target(0).ok_or(CampaignError::EmptyPlan)?;
-        self.plan = Some(plan);
+        self.targets = [EMPTY_ECU_ID; MAX_CAMPAIGN_ECUS];
+        for index in 0..plan.len {
+            if let Some(target) = plan.target(index) {
+                self.targets[index as usize] = ecu_id(target);
+            }
+        }
+        self.target_count = plan.len;
         self.target_index = 0;
-        self.phase = Phase::AwaitingStage;
-        self.state = CampaignState::Updating { ecu: first };
+        self.phase = PHASE_AWAITING_STAGE;
+        self.state = STATE_UPDATING;
         Ok(CampaignCommand::Request(first))
     }
 
@@ -170,7 +233,7 @@ impl CampaignManager {
         status: EcuUpdateStatus,
         conditions: VehicleConditions,
     ) -> Result<Option<CampaignCommand>, CampaignError> {
-        let CampaignState::Updating { ecu: expected } = self.state else {
+        let CampaignState::Updating { ecu: expected } = self.state() else {
             return Err(CampaignError::NoCampaign);
         };
         if ecu != expected {
@@ -180,27 +243,24 @@ impl CampaignManager {
             return Ok(Some(command));
         }
 
-        match (self.phase, status) {
-            (Phase::AwaitingStage, EcuUpdateStatus::Staged) => {
-                self.phase = Phase::AwaitingTrialHealth;
+        match (self.phase(), status) {
+            (Some(Phase::AwaitingStage), EcuUpdateStatus::Staged) => {
+                self.phase = PHASE_AWAITING_TRIAL_HEALTH;
                 Ok(Some(CampaignCommand::Activate(ecu)))
             }
-            (Phase::AwaitingTrialHealth, EcuUpdateStatus::TrialHealthy) => {
-                self.phase = Phase::AwaitingCommit;
+            (Some(Phase::AwaitingTrialHealth), EcuUpdateStatus::TrialHealthy) => {
+                self.phase = PHASE_AWAITING_COMMIT;
                 Ok(Some(CampaignCommand::Commit(ecu)))
             }
-            (Phase::AwaitingCommit, EcuUpdateStatus::Committed) => {
+            (Some(Phase::AwaitingCommit), EcuUpdateStatus::Committed) => {
                 let next_index = self.target_index + 1;
-                let Some(plan) = self.plan else {
-                    return Err(CampaignError::NoCampaign);
-                };
-                if let Some(next) = plan.target(next_index) {
+                if let Some(next) = self.target_at(next_index) {
                     self.target_index = next_index;
-                    self.phase = Phase::AwaitingStage;
-                    self.state = CampaignState::Updating { ecu: next };
+                    self.phase = PHASE_AWAITING_STAGE;
+                    self.state = STATE_UPDATING;
                     Ok(Some(CampaignCommand::Request(next)))
                 } else {
-                    self.state = CampaignState::Completed;
+                    self.state = STATE_COMPLETED;
                     Ok(None)
                 }
             }
@@ -208,7 +268,7 @@ impl CampaignManager {
                 _,
                 EcuUpdateStatus::Rejected | EcuUpdateStatus::RolledBack | EcuUpdateStatus::Failed,
             ) => {
-                self.state = CampaignState::Failed { ecu };
+                self.state = STATE_FAILED;
                 Ok(Some(CampaignCommand::Abort(ecu)))
             }
             _ => Err(CampaignError::UnexpectedStatus),
@@ -217,10 +277,10 @@ impl CampaignManager {
 
     /// Cancel the active ECU update and stop the campaign.
     pub fn cancel(&mut self) -> Result<CampaignCommand, CampaignError> {
-        let CampaignState::Updating { ecu } = self.state else {
+        let CampaignState::Updating { ecu } = self.state() else {
             return Err(CampaignError::NoCampaign);
         };
-        self.state = CampaignState::Failed { ecu };
+        self.state = STATE_FAILED;
         Ok(CampaignCommand::Abort(ecu))
     }
 }

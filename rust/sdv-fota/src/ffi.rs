@@ -4,9 +4,10 @@
 //! memory, NvM, crypto and boot-manager APIs. This is an SDV integration ABI, not AUTOSAR API.
 
 use crate::{
-    resolve_trial, BootControl, BootDecision, BootState, Ecu, FotaInstaller, HealthMonitor,
-    ImageStorage, PackageSource, Slot, TrialImage, TrustKey, ValidationContext, VersionString,
-    MAX_MANIFEST_BYTES,
+    resolve_trial, BootControl, BootDecision, BootState, CampaignCommand, CampaignManager,
+    CampaignPlan, CampaignState, Ecu, EcuUpdateStatus, FotaInstaller, HealthMonitor, ImageStorage,
+    PackageSource, Slot, TrialImage, TrustKey, ValidationContext, VehicleConditions, VehicleSafety,
+    VersionString, MAX_CAMPAIGN_ECUS, MAX_MANIFEST_BYTES,
 };
 use core::{ffi::c_void, slice};
 
@@ -18,6 +19,27 @@ pub const SDV_FOTA_UPDATE_PENDING: i32 = 3;
 pub const SDV_FOTA_IO_ERROR: i32 = 4;
 
 const VERSION_CAPACITY: usize = 32;
+
+pub const SDV_FOTA_CAMPAIGN_NONE: u8 = 0;
+pub const SDV_FOTA_CAMPAIGN_REQUEST: u8 = 1;
+pub const SDV_FOTA_CAMPAIGN_ACTIVATE: u8 = 2;
+pub const SDV_FOTA_CAMPAIGN_COMMIT: u8 = 3;
+pub const SDV_FOTA_CAMPAIGN_ABORT: u8 = 4;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SdvFotaVehicleConditions {
+    pub stopped: u8,
+    pub safety_state: u8,
+    pub other_update_active: u8,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SdvFotaCampaignCommand {
+    pub command: u8,
+    pub ecu: u8,
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -426,6 +448,262 @@ pub unsafe extern "C" fn sdv_fota_select_for_boot(
         }
         Err(()) => SDV_FOTA_CALLBACK_ERROR,
     }
+}
+
+fn campaign_ecu_from_id(id: u8) -> Option<Ecu> {
+    match id {
+        0 => Some(Ecu::Engine),
+        1 => Some(Ecu::Brake),
+        2 => Some(Ecu::Steering),
+        _ => None,
+    }
+}
+
+fn campaign_safety_from_id(id: u8) -> Option<VehicleSafety> {
+    match id {
+        0 => Some(VehicleSafety::Normal),
+        1 => Some(VehicleSafety::Degraded),
+        2 => Some(VehicleSafety::EStop),
+        _ => None,
+    }
+}
+
+fn campaign_status_from_id(id: u8) -> Option<EcuUpdateStatus> {
+    match id {
+        0 => Some(EcuUpdateStatus::Staged),
+        1 => Some(EcuUpdateStatus::TrialHealthy),
+        2 => Some(EcuUpdateStatus::Committed),
+        3 => Some(EcuUpdateStatus::RolledBack),
+        4 => Some(EcuUpdateStatus::Rejected),
+        5 => Some(EcuUpdateStatus::Failed),
+        _ => None,
+    }
+}
+
+unsafe fn campaign_conditions(
+    conditions: *const SdvFotaVehicleConditions,
+) -> Option<VehicleConditions> {
+    // SAFETY: the caller supplies a valid pointer for the duration of this synchronous call.
+    let conditions = unsafe { conditions.as_ref() }?;
+    let stopped = match conditions.stopped {
+        0 => false,
+        1 => true,
+        _ => return None,
+    };
+    let other_update_active = match conditions.other_update_active {
+        0 => false,
+        1 => true,
+        _ => return None,
+    };
+    Some(VehicleConditions {
+        stopped,
+        safety: campaign_safety_from_id(conditions.safety_state)?,
+        other_update_active,
+    })
+}
+
+fn campaign_command_id(command: Option<CampaignCommand>) -> (u8, u8) {
+    match command {
+        None => (SDV_FOTA_CAMPAIGN_NONE, 0xff),
+        Some(CampaignCommand::Request(ecu)) => (SDV_FOTA_CAMPAIGN_REQUEST, campaign_ecu_id(ecu)),
+        Some(CampaignCommand::Activate(ecu)) => (SDV_FOTA_CAMPAIGN_ACTIVATE, campaign_ecu_id(ecu)),
+        Some(CampaignCommand::Commit(ecu)) => (SDV_FOTA_CAMPAIGN_COMMIT, campaign_ecu_id(ecu)),
+        Some(CampaignCommand::Abort(ecu)) => (SDV_FOTA_CAMPAIGN_ABORT, campaign_ecu_id(ecu)),
+    }
+}
+
+fn campaign_ecu_id(ecu: Ecu) -> u8 {
+    match ecu {
+        Ecu::Engine => 0,
+        Ecu::Brake => 1,
+        Ecu::Steering => 2,
+    }
+}
+
+unsafe fn write_campaign_command(
+    output: *mut SdvFotaCampaignCommand,
+    command: Option<CampaignCommand>,
+) {
+    let (command, ecu) = campaign_command_id(command);
+    // SAFETY: each caller validates the output pointer before this write.
+    unsafe { output.write(SdvFotaCampaignCommand { command, ecu }) };
+}
+
+/// Initialize caller-owned fixed storage for the VCU campaign manager.
+///
+/// # Safety
+/// `manager` must point to writable, correctly aligned `sdv_fota_campaign_t` storage.
+#[no_mangle]
+pub unsafe extern "C" fn sdv_fota_campaign_init(manager: *mut CampaignManager) -> i32 {
+    if manager.is_null() {
+        return SDV_FOTA_INVALID_ARG;
+    }
+    // SAFETY: caller guarantees a writable CampaignManager-sized region.
+    unsafe { manager.write(CampaignManager::new()) };
+    SDV_FOTA_OK
+}
+
+/// Start a campaign and return its first Request command.
+///
+/// # Safety
+/// Every non-null pointer must refer to a valid region for the duration of the call. `targets`
+/// contains `target_count` ECU IDs and output regions must not overlap manager storage.
+#[no_mangle]
+pub unsafe extern "C" fn sdv_fota_campaign_start(
+    manager: *mut CampaignManager,
+    targets: *const u8,
+    target_count: u8,
+    conditions: *const SdvFotaVehicleConditions,
+    output: *mut SdvFotaCampaignCommand,
+) -> i32 {
+    if manager.is_null() || conditions.is_null() || output.is_null() {
+        return SDV_FOTA_INVALID_ARG;
+    }
+    if target_count == 0 {
+        return SDV_FOTA_REJECTED;
+    }
+    if target_count as usize > MAX_CAMPAIGN_ECUS || targets.is_null() {
+        return SDV_FOTA_INVALID_ARG;
+    }
+    // SAFETY: caller provides `target_count` readable bytes.
+    let ids = unsafe { slice::from_raw_parts(targets, target_count as usize) };
+    let mut ecus = [Ecu::Engine; MAX_CAMPAIGN_ECUS];
+    for (slot, id) in ecus.iter_mut().zip(ids.iter().copied()) {
+        let Some(ecu) = campaign_ecu_from_id(id) else {
+            return SDV_FOTA_INVALID_ARG;
+        };
+        *slot = ecu;
+    }
+    // SAFETY: conditions is checked non-null above and caller guarantees readability.
+    let Some(conditions) = (unsafe { campaign_conditions(conditions) }) else {
+        return SDV_FOTA_INVALID_ARG;
+    };
+    let Ok(plan) = CampaignPlan::new(&ecus[..target_count as usize]) else {
+        return SDV_FOTA_REJECTED;
+    };
+    // SAFETY: manager is a writable caller-owned CampaignManager initialized with init().
+    let manager = unsafe { &mut *manager };
+    match manager.start(plan, conditions) {
+        Ok(command) => {
+            // SAFETY: output was checked non-null above.
+            unsafe { write_campaign_command(output, Some(command)) };
+            SDV_FOTA_OK
+        }
+        Err(_) => SDV_FOTA_REJECTED,
+    }
+}
+
+/// Report a status from the currently selected ECU and return the next command, if any.
+///
+/// # Safety
+/// Every non-null pointer must refer to valid memory for the duration of the call; output must
+/// not overlap manager storage.
+#[no_mangle]
+pub unsafe extern "C" fn sdv_fota_campaign_report(
+    manager: *mut CampaignManager,
+    ecu: u8,
+    status: u8,
+    conditions: *const SdvFotaVehicleConditions,
+    output: *mut SdvFotaCampaignCommand,
+) -> i32 {
+    if manager.is_null() || conditions.is_null() || output.is_null() {
+        return SDV_FOTA_INVALID_ARG;
+    }
+    let (Some(ecu), Some(status)) = (campaign_ecu_from_id(ecu), campaign_status_from_id(status))
+    else {
+        return SDV_FOTA_INVALID_ARG;
+    };
+    // SAFETY: conditions is checked non-null above and caller guarantees readability.
+    let Some(conditions) = (unsafe { campaign_conditions(conditions) }) else {
+        return SDV_FOTA_INVALID_ARG;
+    };
+    // SAFETY: manager is a writable caller-owned CampaignManager initialized with init().
+    let manager = unsafe { &mut *manager };
+    match manager.report(ecu, status, conditions) {
+        Ok(command) => {
+            // SAFETY: output was checked non-null above.
+            unsafe { write_campaign_command(output, command) };
+            SDV_FOTA_OK
+        }
+        Err(_) => SDV_FOTA_REJECTED,
+    }
+}
+
+/// Recheck vehicle conditions from the VCU periodic task and emit Abort if needed.
+///
+/// # Safety
+/// Every non-null pointer must refer to valid memory for the duration of the call; output must
+/// not overlap manager storage.
+#[no_mangle]
+pub unsafe extern "C" fn sdv_fota_campaign_recheck(
+    manager: *mut CampaignManager,
+    conditions: *const SdvFotaVehicleConditions,
+    output: *mut SdvFotaCampaignCommand,
+) -> i32 {
+    if manager.is_null() || conditions.is_null() || output.is_null() {
+        return SDV_FOTA_INVALID_ARG;
+    }
+    // SAFETY: conditions is checked non-null above and caller guarantees readability.
+    let Some(conditions) = (unsafe { campaign_conditions(conditions) }) else {
+        return SDV_FOTA_INVALID_ARG;
+    };
+    // SAFETY: manager is a writable caller-owned CampaignManager initialized with init().
+    let command = unsafe { &mut *manager }.recheck(conditions);
+    // SAFETY: output was checked non-null above.
+    unsafe { write_campaign_command(output, command) };
+    SDV_FOTA_OK
+}
+
+/// Cancel the current campaign and return its Abort command.
+///
+/// # Safety
+/// `manager` and `output` must point to valid writable regions and must not overlap.
+#[no_mangle]
+pub unsafe extern "C" fn sdv_fota_campaign_cancel(
+    manager: *mut CampaignManager,
+    output: *mut SdvFotaCampaignCommand,
+) -> i32 {
+    if manager.is_null() || output.is_null() {
+        return SDV_FOTA_INVALID_ARG;
+    }
+    // SAFETY: manager is a writable caller-owned CampaignManager initialized with init().
+    match unsafe { &mut *manager }.cancel() {
+        Ok(command) => {
+            // SAFETY: output was checked non-null above.
+            unsafe { write_campaign_command(output, Some(command)) };
+            SDV_FOTA_OK
+        }
+        Err(_) => SDV_FOTA_REJECTED,
+    }
+}
+
+/// Read the campaign lifecycle and active target (0xff when no ECU is active).
+///
+/// # Safety
+/// `manager`, `out_state`, and `out_ecu` must point to valid readable/writable regions.
+#[no_mangle]
+pub unsafe extern "C" fn sdv_fota_campaign_state(
+    manager: *const CampaignManager,
+    out_state: *mut u8,
+    out_ecu: *mut u8,
+) -> i32 {
+    if manager.is_null() || out_state.is_null() || out_ecu.is_null() {
+        return SDV_FOTA_INVALID_ARG;
+    }
+    // SAFETY: manager is caller-owned readable CampaignManager storage.
+    let state = unsafe { &*manager }.state();
+    let (state_id, ecu) = match state {
+        CampaignState::Idle => (0, 0xff),
+        CampaignState::Updating { ecu } => (1, campaign_ecu_id(ecu)),
+        CampaignState::Completed => (2, 0xff),
+        CampaignState::Failed { ecu } => (3, campaign_ecu_id(ecu)),
+    };
+    // SAFETY: both output pointers were checked non-null above.
+    unsafe {
+        out_state.write(state_id);
+        out_ecu.write(ecu);
+    }
+    SDV_FOTA_OK
 }
 
 #[cfg(test)]
