@@ -130,7 +130,12 @@ task so a newly moving vehicle or changed Safety state promptly emits Abort. Thi
 model; diagnostic/CAN transport and integration into the simulator VCU remain separate work.
 For Classic C integration, the same policy is exposed through caller-owned campaign state and
 `sdv_fota_campaign_*` functions in `rust/sdv-fota/include/sdv_fota.h`; C smoke coverage exercises
-the Request/Activate/Commit sequence and a safety-triggered Abort.
+the Request/Activate/Commit sequence and a safety-triggered Abort. The campaign checkpoint API
+encodes the plan, active ECU, phase, and lifecycle in a versioned 16-byte record with CRC32 for
+the target NvM adapter. Persist it after each state transition. After a VCU restart, restore the
+checkpoint, query the active ECU's authoritative status, and report it to the campaign manager;
+the manager may reissue Activate or Commit, so the target adapter must make these operations
+idempotent. CRC32 detects accidental corruption and does not authenticate the record.
 See [the Classic architecture proposal](../docs/design/fota_classic_architecture.md). `SIGNAL_IF_VERSION` is currently 1.
 See the [Pi 5 host operation workflow](../docs/design/fota-pi5-operations.md) for initial provisioning,
 package signing, staging, and trial activation.

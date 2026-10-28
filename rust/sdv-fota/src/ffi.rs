@@ -7,7 +7,7 @@ use crate::{
     resolve_trial, BootControl, BootDecision, BootState, CampaignCommand, CampaignManager,
     CampaignPlan, CampaignState, Ecu, EcuUpdateStatus, FotaInstaller, HealthMonitor, ImageStorage,
     PackageSource, Slot, TrialImage, TrustKey, ValidationContext, VehicleConditions, VehicleSafety,
-    VersionString, MAX_CAMPAIGN_ECUS, MAX_MANIFEST_BYTES,
+    VersionString, CAMPAIGN_CHECKPOINT_SIZE, MAX_CAMPAIGN_ECUS, MAX_MANIFEST_BYTES,
 };
 use core::{ffi::c_void, slice};
 
@@ -725,6 +725,55 @@ pub unsafe extern "C" fn sdv_fota_campaign_state(
         out_state.write(state_id);
         out_ecu.write(ecu);
     }
+    SDV_FOTA_OK
+}
+
+/// Write a stable campaign record for the target's NvM adapter.
+///
+/// # Safety
+/// `manager` must be readable and `output` must point to exactly
+/// `CAMPAIGN_CHECKPOINT_SIZE` writable bytes. The regions must not overlap.
+#[no_mangle]
+pub unsafe extern "C" fn sdv_fota_campaign_checkpoint(
+    manager: *const CampaignManager,
+    output: *mut u8,
+    output_len: usize,
+) -> i32 {
+    if manager.is_null() || output.is_null() || output_len != CAMPAIGN_CHECKPOINT_SIZE {
+        return SDV_FOTA_INVALID_ARG;
+    }
+    // SAFETY: manager is caller-owned readable storage initialized by the campaign API.
+    let manager = unsafe { &*manager };
+    let mut checkpoint = [0u8; CAMPAIGN_CHECKPOINT_SIZE];
+    if manager.encode_checkpoint(&mut checkpoint).is_err() {
+        return SDV_FOTA_REJECTED;
+    }
+    // SAFETY: output has the documented capacity and does not overlap manager storage.
+    unsafe { output.copy_from_nonoverlapping(checkpoint.as_ptr(), CAMPAIGN_CHECKPOINT_SIZE) };
+    SDV_FOTA_OK
+}
+
+/// Restore campaign state from a versioned NvM record.
+///
+/// # Safety
+/// `manager` must be writable, and `checkpoint` must point to exactly
+/// `CAMPAIGN_CHECKPOINT_SIZE` readable bytes. The regions must not overlap.
+#[no_mangle]
+pub unsafe extern "C" fn sdv_fota_campaign_restore(
+    manager: *mut CampaignManager,
+    checkpoint: *const u8,
+    checkpoint_len: usize,
+) -> i32 {
+    if manager.is_null() || checkpoint.is_null() || checkpoint_len != CAMPAIGN_CHECKPOINT_SIZE {
+        return SDV_FOTA_INVALID_ARG;
+    }
+    // SAFETY: the caller supplies a readable checkpoint buffer of the documented size.
+    let checkpoint = unsafe { slice::from_raw_parts(checkpoint, checkpoint_len) };
+    let Ok(restored) = CampaignManager::from_checkpoint(checkpoint) else {
+        return SDV_FOTA_REJECTED;
+    };
+    // SAFETY: caller supplies writable CampaignManager storage that does not overlap checkpoint.
+    unsafe { manager.write(restored) };
     SDV_FOTA_OK
 }
 

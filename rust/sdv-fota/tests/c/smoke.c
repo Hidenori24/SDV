@@ -1,6 +1,7 @@
 #include "sdv_fota.h"
 
 _Static_assert(sizeof(sdv_fota_campaign_t) == 7, "campaign state ABI size changed");
+_Static_assert(SDV_FOTA_CAMPAIGN_CHECKPOINT_SIZE == 16, "campaign checkpoint size changed");
 
 int main(void) {
     /* Null arguments must fail before any callback or memory access. */
@@ -49,27 +50,45 @@ int main(void) {
         command.command != SDV_FOTA_CAMPAIGN_ACTIVATE || command.ecu != SDV_FOTA_ECU_ENGINE) {
         return 8;
     }
-    if (sdv_fota_campaign_report(&campaign, SDV_FOTA_ECU_ENGINE,
-                                SDV_FOTA_ECU_STATUS_TRIAL_HEALTHY, &conditions, &command) != SDV_FOTA_OK ||
-        command.command != SDV_FOTA_CAMPAIGN_COMMIT) {
+
+    uint8_t checkpoint[SDV_FOTA_CAMPAIGN_CHECKPOINT_SIZE];
+    if (sdv_fota_campaign_checkpoint(&campaign, checkpoint, sizeof(checkpoint)) != SDV_FOTA_OK ||
+        sdv_fota_campaign_checkpoint(&campaign, checkpoint, sizeof(checkpoint) - 1) !=
+            SDV_FOTA_INVALID_ARG) {
         return 9;
     }
-    if (sdv_fota_campaign_report(&campaign, SDV_FOTA_ECU_ENGINE,
-                                SDV_FOTA_ECU_STATUS_COMMITTED, &conditions, &command) != SDV_FOTA_OK ||
-        command.command != SDV_FOTA_CAMPAIGN_REQUEST || command.ecu != SDV_FOTA_ECU_BRAKE) {
+    sdv_fota_campaign_t resumed_campaign;
+    uint8_t corrupt_checkpoint[SDV_FOTA_CAMPAIGN_CHECKPOINT_SIZE];
+    for (size_t i = 0; i < sizeof(checkpoint); ++i) {
+        corrupt_checkpoint[i] = checkpoint[i];
+    }
+    corrupt_checkpoint[0] ^= 1;
+    if (sdv_fota_campaign_restore(&resumed_campaign, corrupt_checkpoint,
+                                  sizeof(corrupt_checkpoint)) != SDV_FOTA_REJECTED ||
+        sdv_fota_campaign_restore(&resumed_campaign, checkpoint, sizeof(checkpoint)) != SDV_FOTA_OK) {
         return 10;
     }
-    conditions.stopped = 0;
-    if (sdv_fota_campaign_recheck(&campaign, &conditions, &command) != SDV_FOTA_OK ||
-        command.command != SDV_FOTA_CAMPAIGN_ABORT || command.ecu != SDV_FOTA_ECU_BRAKE) {
+    if (sdv_fota_campaign_report(&resumed_campaign, SDV_FOTA_ECU_ENGINE,
+                                SDV_FOTA_ECU_STATUS_TRIAL_HEALTHY, &conditions, &command) != SDV_FOTA_OK ||
+        command.command != SDV_FOTA_CAMPAIGN_COMMIT) {
         return 11;
+    }
+    if (sdv_fota_campaign_report(&resumed_campaign, SDV_FOTA_ECU_ENGINE,
+                                SDV_FOTA_ECU_STATUS_COMMITTED, &conditions, &command) != SDV_FOTA_OK ||
+        command.command != SDV_FOTA_CAMPAIGN_REQUEST || command.ecu != SDV_FOTA_ECU_BRAKE) {
+        return 12;
+    }
+    conditions.stopped = 0;
+    if (sdv_fota_campaign_recheck(&resumed_campaign, &conditions, &command) != SDV_FOTA_OK ||
+        command.command != SDV_FOTA_CAMPAIGN_ABORT || command.ecu != SDV_FOTA_ECU_BRAKE) {
+        return 13;
     }
     uint8_t campaign_state = 0xff;
     uint8_t campaign_ecu = 0xff;
-    if (sdv_fota_campaign_state(&campaign, &campaign_state, &campaign_ecu) != SDV_FOTA_OK ||
+    if (sdv_fota_campaign_state(&resumed_campaign, &campaign_state, &campaign_ecu) != SDV_FOTA_OK ||
         campaign_state != SDV_FOTA_CAMPAIGN_STATE_FAILED ||
         campaign_ecu != SDV_FOTA_ECU_BRAKE) {
-        return 12;
+        return 14;
     }
     return 0;
 }

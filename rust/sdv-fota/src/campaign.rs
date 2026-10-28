@@ -6,6 +6,18 @@
 use crate::Ecu;
 
 pub const MAX_CAMPAIGN_ECUS: usize = 3;
+pub const CAMPAIGN_CHECKPOINT_SIZE: usize = 16;
+
+const CHECKPOINT_MAGIC: [u8; 4] = *b"SDVC";
+const CHECKPOINT_VERSION: u8 = 1;
+const CHECKPOINT_MAGIC_OFFSET: usize = 0;
+const CHECKPOINT_VERSION_OFFSET: usize = 4;
+const CHECKPOINT_TARGETS_OFFSET: usize = 5;
+const CHECKPOINT_TARGET_COUNT_OFFSET: usize = 8;
+const CHECKPOINT_TARGET_INDEX_OFFSET: usize = 9;
+const CHECKPOINT_PHASE_OFFSET: usize = 10;
+const CHECKPOINT_STATE_OFFSET: usize = 11;
+const CHECKPOINT_CRC_OFFSET: usize = 12;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VehicleSafety {
@@ -109,6 +121,15 @@ pub enum CampaignError {
     UnexpectedStatus,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CampaignCheckpointError {
+    InvalidLength,
+    InvalidMagic,
+    UnsupportedVersion,
+    ChecksumMismatch,
+    InvalidState,
+}
+
 /// Serial campaign controller. It never has more than one ECU request outstanding.
 ///
 /// This plain-byte layout is also exposed in `sdv_fota.h` so Classic C integration can allocate
@@ -173,6 +194,98 @@ impl CampaignManager {
                 .target_at(self.target_index)
                 .map_or(CampaignState::Idle, |ecu| CampaignState::Failed { ecu }),
             _ => CampaignState::Idle,
+        }
+    }
+
+    /// Serialize campaign state to a stable, versioned record for an NvM adapter.
+    ///
+    /// The trailing CRC detects accidental corruption; it is not an authentication mechanism.
+    pub fn encode_checkpoint(
+        &self,
+        output: &mut [u8; CAMPAIGN_CHECKPOINT_SIZE],
+    ) -> Result<(), CampaignCheckpointError> {
+        if !self.is_valid_checkpoint_state() {
+            return Err(CampaignCheckpointError::InvalidState);
+        }
+        output.fill(0);
+        output[CHECKPOINT_MAGIC_OFFSET..CHECKPOINT_VERSION_OFFSET]
+            .copy_from_slice(&CHECKPOINT_MAGIC);
+        output[CHECKPOINT_VERSION_OFFSET] = CHECKPOINT_VERSION;
+        output[CHECKPOINT_TARGETS_OFFSET..CHECKPOINT_TARGET_COUNT_OFFSET]
+            .copy_from_slice(&self.targets);
+        output[CHECKPOINT_TARGET_COUNT_OFFSET] = self.target_count;
+        output[CHECKPOINT_TARGET_INDEX_OFFSET] = self.target_index;
+        output[CHECKPOINT_PHASE_OFFSET] = self.phase;
+        output[CHECKPOINT_STATE_OFFSET] = self.state;
+        let checksum = checkpoint_crc32(&output[..CHECKPOINT_CRC_OFFSET]);
+        output[CHECKPOINT_CRC_OFFSET..].copy_from_slice(&checksum.to_le_bytes());
+        Ok(())
+    }
+
+    /// Restore a campaign manager from a validated NvM record.
+    pub fn from_checkpoint(checkpoint: &[u8]) -> Result<Self, CampaignCheckpointError> {
+        if checkpoint.len() != CAMPAIGN_CHECKPOINT_SIZE {
+            return Err(CampaignCheckpointError::InvalidLength);
+        }
+        if checkpoint[CHECKPOINT_MAGIC_OFFSET..CHECKPOINT_VERSION_OFFSET] != CHECKPOINT_MAGIC {
+            return Err(CampaignCheckpointError::InvalidMagic);
+        }
+        if checkpoint[CHECKPOINT_VERSION_OFFSET] != CHECKPOINT_VERSION {
+            return Err(CampaignCheckpointError::UnsupportedVersion);
+        }
+        let expected_crc = u32::from_le_bytes(
+            checkpoint[CHECKPOINT_CRC_OFFSET..]
+                .try_into()
+                .map_err(|_| CampaignCheckpointError::InvalidLength)?,
+        );
+        if checkpoint_crc32(&checkpoint[..CHECKPOINT_CRC_OFFSET]) != expected_crc {
+            return Err(CampaignCheckpointError::ChecksumMismatch);
+        }
+
+        let manager = Self {
+            targets: checkpoint[CHECKPOINT_TARGETS_OFFSET..CHECKPOINT_TARGET_COUNT_OFFSET]
+                .try_into()
+                .map_err(|_| CampaignCheckpointError::InvalidLength)?,
+            target_count: checkpoint[CHECKPOINT_TARGET_COUNT_OFFSET],
+            target_index: checkpoint[CHECKPOINT_TARGET_INDEX_OFFSET],
+            phase: checkpoint[CHECKPOINT_PHASE_OFFSET],
+            state: checkpoint[CHECKPOINT_STATE_OFFSET],
+        };
+        if !manager.is_valid_checkpoint_state() {
+            return Err(CampaignCheckpointError::InvalidState);
+        }
+        Ok(manager)
+    }
+
+    fn is_valid_checkpoint_state(&self) -> bool {
+        let target_count = self.target_count as usize;
+        if target_count > MAX_CAMPAIGN_ECUS || self.phase().is_none() {
+            return false;
+        }
+        for index in 0..target_count {
+            let Some(target) = self.target_at(index as u8) else {
+                return false;
+            };
+            if (0..index).any(|previous| self.target_at(previous as u8) == Some(target)) {
+                return false;
+            }
+        }
+        if self.targets[target_count..]
+            .iter()
+            .any(|target| *target != EMPTY_ECU_ID)
+        {
+            return false;
+        }
+
+        match self.state {
+            STATE_IDLE => {
+                target_count == 0 && self.target_index == 0 && self.phase == PHASE_AWAITING_STAGE
+            }
+            STATE_UPDATING | STATE_FAILED => {
+                target_count > 0 && (self.target_index as usize) < target_count
+            }
+            STATE_COMPLETED => target_count > 0 && self.target_index as usize + 1 == target_count,
+            _ => false,
         }
     }
 
@@ -251,8 +364,14 @@ impl CampaignManager {
                 self.phase = PHASE_AWAITING_TRIAL_HEALTH;
                 Ok(Some(CampaignCommand::Activate(ecu)))
             }
+            (Some(Phase::AwaitingTrialHealth), EcuUpdateStatus::Staged) => {
+                Ok(Some(CampaignCommand::Activate(ecu)))
+            }
             (Some(Phase::AwaitingTrialHealth), EcuUpdateStatus::TrialHealthy) => {
                 self.phase = PHASE_AWAITING_COMMIT;
+                Ok(Some(CampaignCommand::Commit(ecu)))
+            }
+            (Some(Phase::AwaitingCommit), EcuUpdateStatus::TrialHealthy) => {
                 Ok(Some(CampaignCommand::Commit(ecu)))
             }
             (Some(Phase::AwaitingCommit), EcuUpdateStatus::Committed) => {
@@ -286,6 +405,23 @@ impl CampaignManager {
         self.state = STATE_FAILED;
         Ok(CampaignCommand::Abort(ecu))
     }
+}
+
+fn checkpoint_crc32(bytes: &[u8]) -> u32 {
+    const CRC32_REFLECTED_POLYNOMIAL: u32 = 0xedb8_8320;
+
+    let mut crc = u32::MAX;
+    for byte in bytes {
+        crc ^= u32::from(*byte);
+        for _ in 0..u8::BITS {
+            crc = if crc & 1 == 1 {
+                (crc >> 1) ^ CRC32_REFLECTED_POLYNOMIAL
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
 }
 
 impl Default for CampaignManager {
@@ -467,5 +603,78 @@ mod tests {
             Err(CampaignError::UnexpectedStatus)
         );
         assert_eq!(manager.cancel(), Ok(CampaignCommand::Abort(Ecu::Engine)));
+    }
+
+    #[test]
+    fn checkpoint_round_trip_preserves_active_plan_and_phase() {
+        let plan = CampaignPlan::new(&[Ecu::Engine, Ecu::Brake]).unwrap();
+        let mut manager = CampaignManager::new();
+        manager.start(plan, SAFE).unwrap();
+        manager
+            .report(Ecu::Engine, EcuUpdateStatus::Staged, SAFE)
+            .unwrap();
+
+        let mut checkpoint = [0; CAMPAIGN_CHECKPOINT_SIZE];
+        manager.encode_checkpoint(&mut checkpoint).unwrap();
+        let mut restored = CampaignManager::from_checkpoint(&checkpoint).unwrap();
+        assert_eq!(
+            restored.state(),
+            CampaignState::Updating { ecu: Ecu::Engine }
+        );
+        assert_eq!(
+            restored.report(Ecu::Engine, EcuUpdateStatus::Staged, SAFE),
+            Ok(Some(CampaignCommand::Activate(Ecu::Engine))),
+            "if reset happened before Activate reached the ECU, reconciliation reissues it"
+        );
+        restored.encode_checkpoint(&mut checkpoint).unwrap();
+        let mut restored = CampaignManager::from_checkpoint(&checkpoint).unwrap();
+        assert_eq!(
+            restored.report(Ecu::Engine, EcuUpdateStatus::TrialHealthy, SAFE),
+            Ok(Some(CampaignCommand::Commit(Ecu::Engine)))
+        );
+        assert_eq!(
+            restored.report(Ecu::Engine, EcuUpdateStatus::TrialHealthy, SAFE),
+            Ok(Some(CampaignCommand::Commit(Ecu::Engine))),
+            "if reset happened before Commit reached the ECU, reconciliation reissues it"
+        );
+        assert_eq!(
+            restored.report(Ecu::Engine, EcuUpdateStatus::Committed, SAFE),
+            Ok(Some(CampaignCommand::Request(Ecu::Brake)))
+        );
+    }
+
+    #[test]
+    fn checkpoint_rejects_wrong_length_version_corruption_and_invalid_state() {
+        let mut manager = CampaignManager::new();
+        let mut checkpoint = [0; CAMPAIGN_CHECKPOINT_SIZE];
+        manager.encode_checkpoint(&mut checkpoint).unwrap();
+
+        assert_eq!(
+            CampaignManager::from_checkpoint(&checkpoint[..checkpoint.len() - 1]),
+            Err(CampaignCheckpointError::InvalidLength)
+        );
+        let mut unsupported_version = checkpoint;
+        unsupported_version[CHECKPOINT_VERSION_OFFSET] = CHECKPOINT_VERSION + 1;
+        assert_eq!(
+            CampaignManager::from_checkpoint(&unsupported_version),
+            Err(CampaignCheckpointError::UnsupportedVersion)
+        );
+        let mut corrupted = checkpoint;
+        corrupted[CHECKPOINT_STATE_OFFSET] = STATE_COMPLETED;
+        assert_eq!(
+            CampaignManager::from_checkpoint(&corrupted),
+            Err(CampaignCheckpointError::ChecksumMismatch)
+        );
+
+        let plan = CampaignPlan::new(&[Ecu::Engine]).unwrap();
+        manager.start(plan, SAFE).unwrap();
+        manager.encode_checkpoint(&mut checkpoint).unwrap();
+        checkpoint[CHECKPOINT_TARGET_INDEX_OFFSET] = 1;
+        let checksum = checkpoint_crc32(&checkpoint[..CHECKPOINT_CRC_OFFSET]);
+        checkpoint[CHECKPOINT_CRC_OFFSET..].copy_from_slice(&checksum.to_le_bytes());
+        assert_eq!(
+            CampaignManager::from_checkpoint(&checkpoint),
+            Err(CampaignCheckpointError::InvalidState)
+        );
     }
 }
