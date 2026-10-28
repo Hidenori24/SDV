@@ -103,31 +103,56 @@ pub fn validate_package<'a>(
     trust_keys: &[TrustKey<'_>],
     context: &ValidationContext<'_>,
 ) -> Result<ValidatedPackage<'a>, ValidationError> {
-    validate_key_id(package.key_id)?;
-    let key = trust_keys
-        .iter()
-        .find(|key| key.key_id == package.key_id)
-        .ok_or(ValidationError::UnknownKey)?;
-    if package.signature.len() != ED25519_SIGNATURE_LEN {
-        return Err(ValidationError::InvalidSignatureLength);
-    }
-    if package.manifest_bytes.len() > MAX_MANIFEST_BYTES {
-        return Err(ValidationError::ManifestTooLarge);
-    }
-    let signature: &[u8; ED25519_SIGNATURE_LEN] = package
-        .signature
-        .try_into()
-        .map_err(|_| ValidationError::InvalidSignatureLength)?;
-    ed25519_verify(key.public_key, package.manifest_bytes, signature)
-        .map_err(|_| ValidationError::InvalidSignature)?;
-
-    let manifest: Manifest = serde_json::from_slice(package.manifest_bytes)
-        .map_err(|_| ValidationError::InvalidManifest)?;
-    validate_manifest(&manifest, package.payload, context)?;
+    let payload_size =
+        u64::try_from(package.payload.len()).map_err(|_| ValidationError::PayloadSizeMismatch)?;
+    let manifest = validate_signed_manifest(
+        package.key_id,
+        package.signature,
+        package.manifest_bytes,
+        payload_size,
+        trust_keys,
+        context,
+    )?;
+    validate_payload(&manifest, package.payload)?;
     Ok(ValidatedPackage {
         manifest,
         payload: package.payload,
     })
+}
+
+/// Verify and parse a signed manifest before a transport streams its payload.
+///
+/// `payload_size` comes from the package framing. The signed manifest must declare the same
+/// size; the caller verifies the streamed payload digest before activating the image.
+pub fn validate_signed_manifest(
+    key_id: &str,
+    signature: &[u8],
+    manifest_bytes: &[u8],
+    payload_size: u64,
+    trust_keys: &[TrustKey<'_>],
+    context: &ValidationContext<'_>,
+) -> Result<Manifest, ValidationError> {
+    validate_key_id(key_id)?;
+    let key = trust_keys
+        .iter()
+        .find(|key| key.key_id == key_id)
+        .ok_or(ValidationError::UnknownKey)?;
+    if signature.len() != ED25519_SIGNATURE_LEN {
+        return Err(ValidationError::InvalidSignatureLength);
+    }
+    if manifest_bytes.len() > MAX_MANIFEST_BYTES {
+        return Err(ValidationError::ManifestTooLarge);
+    }
+    let signature: &[u8; ED25519_SIGNATURE_LEN] = signature
+        .try_into()
+        .map_err(|_| ValidationError::InvalidSignatureLength)?;
+    ed25519_verify(key.public_key, manifest_bytes, signature)
+        .map_err(|_| ValidationError::InvalidSignature)?;
+
+    let manifest: Manifest =
+        serde_json::from_slice(manifest_bytes).map_err(|_| ValidationError::InvalidManifest)?;
+    validate_manifest_metadata(&manifest, payload_size, context)?;
+    Ok(manifest)
 }
 
 fn validate_key_id(key_id: &str) -> Result<(), ValidationError> {
@@ -142,9 +167,9 @@ fn validate_key_id(key_id: &str) -> Result<(), ValidationError> {
     Ok(())
 }
 
-fn validate_manifest(
+fn validate_manifest_metadata(
     manifest: &Manifest,
-    payload: &[u8],
+    payload_size: u64,
     context: &ValidationContext<'_>,
 ) -> Result<(), ValidationError> {
     if manifest.manifest_schema != MANIFEST_SCHEMA {
@@ -196,6 +221,14 @@ fn validate_manifest(
     {
         return Err(ValidationError::IncompatibleConfigSchema);
     }
+    if manifest.image.size_bytes != payload_size {
+        return Err(ValidationError::PayloadSizeMismatch);
+    }
+    decode_sha256(&manifest.image.sha256).ok_or(ValidationError::InvalidSha256)?;
+    Ok(())
+}
+
+fn validate_payload(manifest: &Manifest, payload: &[u8]) -> Result<(), ValidationError> {
     let payload_len =
         u64::try_from(payload.len()).map_err(|_| ValidationError::PayloadSizeMismatch)?;
     if manifest.image.size_bytes != payload_len {

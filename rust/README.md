@@ -80,7 +80,14 @@ The FOTA code is split into domain types (`model.rs`), package validation (`pack
 orchestration (`service.rs`), and service-level platform ports (`ports.rs`): `ImageStorage`,
 `BootControl`, `HealthMonitor`, and `PackageSource`.
 `FotaInstaller` writes the validated image in bounded chunks to the inactive slot, streams it
-back through a fixed-size buffer for SHA-256 verification, then schedules a trial boot.
+back through a fixed-size buffer for SHA-256 verification, then schedules a trial boot. The
+`stage_signed_manifest_from_source` path verifies the signed manifest before receiving payload
+bytes, then streams payload chunks directly from the `PackageSource` port to inactive storage.
+That path uses a fixed 1 KiB I/O buffer and rejects truncation, trailing bytes, and digest
+mismatches before scheduling a trial boot.
+`stage_package_from_source` additionally reads the SDVF header, signature, key ID, and manifest
+from the same source. The caller supplies bounded manifest storage; envelope metadata and image
+payload are not assembled into one package-sized allocation.
 `resolve_trial` commits only after the health adapter reports success;
 otherwise it requests rollback. `sdv-fota::linux` implements the Pi 5/Linux host backend for
 application-image slots and redundant CRC-protected boot metadata in a configured Linux data directory. On the Pi 5 this
@@ -88,9 +95,11 @@ adapter does not write the OS, EEPROM, boot partition, or raw block devices. A s
 that selects and starts the slot image is still needed. The common crate also compiles with
 `--no-default-features` (`no_std` + `alloc`). This removes `std` dependencies, but it is not
 heap-free and does not make the crate AUTOSAR Classic compatible. Flash I/O and read-back are
-block-oriented now; the package and JSON manifest are still held/parsed with `alloc`. Classic
-integration requires bounded package reception and adapters for the selected DCM, Csm/Crypto,
-NvM, MemIf/Fls, and bootloader.
+block-oriented; streaming avoids an image-sized allocation. Manifest text and supported schema
+versions are deserialized into fixed-capacity inline fields (64 KiB maximum input, 16 schema
+versions); parsing does not allocate per field. The broader host-facing domain still uses `alloc`
+for boot metadata and Linux integration. Classic integration needs adapters for the selected
+DCM, Csm/Crypto, NvM, MemIf/Fls, and bootloader.
 See [the Classic architecture proposal](../docs/design/fota_classic_architecture.md). `SIGNAL_IF_VERSION` is currently 1.
 
 ## WASM API（C ABI、wasm-bindgen 不要）
