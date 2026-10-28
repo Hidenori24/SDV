@@ -38,7 +38,8 @@ sudo install -d -o root -g root -m 0755 /var/lib/sdv-fota/slots/a /var/lib/sdv-f
 sudo install -d -o root -g root -m 0755 /etc/sdv-picarx
 sudo install -o root -g root -m 0644 rust/sdv-picarx/config/pi5.fota.disabled.example.json /etc/sdv-picarx/vehicle.json
 sudo install -o root -g root -m 0755 rust/sdv-picarx/target/release/sdv-picarx /var/lib/sdv-fota/slots/a/sdv-image.bin
-sudo sdv-fota init /var/lib/sdv-fota a 1.0.0 1
+sudo sdv-fota init --state-root /var/lib/sdv-fota --active-slot a \
+  --active-version 1.0.0 --security-version 1
 printf 'SDV_FOTA_APP_UID=%s\nSDV_FOTA_APP_GID=%s\n' "$(id -u sdv-app)" "$(id -g sdv-app)" | sudo tee /etc/default/sdv-fota-launcher
 sudo chmod 0644 /etc/default/sdv-fota-launcher</code></pre>
     <p>設定ファイルの場所をlauncherの環境へ追加します。</p>
@@ -62,10 +63,11 @@ sudo chmod 0644 /etc/sdv-fota/trusted-keys</code></pre>
   --version 1.1.0 --security-version 2 --trial-ms 5000 --config-schema 1 \
   --signal-if-version 1 --image sdv-image.bin --output update.sdvf
 
-sudo sdv-fota install-url /var/lib/sdv-fota \
-  https://updates.example/vehicle/update.sdvf vehicle 1 1
+sudo sdv-fota install-url --state-root /var/lib/sdv-fota \
+  --url https://updates.example/vehicle/update.sdvf --target vehicle \
+  --config-schema 1 --signal-if-version 1
 sudo systemctl restart sdv-fota-launcher.service
-sudo sdv-fota status /var/lib/sdv-fota</code></pre>
+sudo sdv-fota status --state-root /var/lib/sdv-fota</code></pre>
     <p>launcherはmanifestの試験時間内に車両イメージを <code>sdv-app</code> として起動し、同じユーザーで動く <code>sdv-picarx-health</code> が最近の制御周期成功を確認した場合だけtrial slotを確定します。サービス例は <code>deploy/systemd/sdv-fota-launcher.service</code> にあります。launcherはUID/GID切替に必要な2つのcapabilityだけを持ちます。</p>
 <pre><code>sudo install -m 0644 deploy/systemd/sdv-fota-launcher.service /etc/systemd/system/
 sudo systemctl daemon-reload
@@ -74,7 +76,7 @@ sudo systemctl enable --now sdv-fota-launcher.service</code></pre>
   <section class="card">
     <h2>適用範囲</h2>
     <ul>
-      <li>A/B対象は <code>/var/lib/sdv-fota</code> 内の車両アプリイメージです。VCU、Engine、Brake、Steeringの仮想ECUタスクを一つのイメージとして更新します。</li>
+      <li>A/B対象は <code>/var/lib/sdv-fota</code> 内の車両アプリイメージです。Pi Linux installerは <code>vehicle</code> targetを受け付け、VCU、Engine、Brake、Steeringの仮想ECUタスクを一つのイメージとして更新します。仮想ECUごとの独立イメージ更新は未対応です。</li>
       <li>Pi OS、EEPROM、boot partition、raw deviceは書き換えません。</li>
       <li>Linux上の自動テストはありますが、Pi 5実機でのGPIO/I²C、入力・状態推定プロセス、校正、電源断・再起動・復旧試験はまだ必要です。</li>
       <li>AUTOSAR Classic実機には、採用BSW/MCAL、DCM、NvM、Flash、Bootloaderへの個別接続が必要です。</li>

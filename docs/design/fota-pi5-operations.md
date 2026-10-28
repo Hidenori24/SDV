@@ -41,7 +41,8 @@ sudo install -d -o root -g root -m 0755 /var/lib/sdv-fota/slots/a /var/lib/sdv-f
 sudo install -d -o root -g root -m 0755 /etc/sdv-picarx
 sudo install -o root -g root -m 0644 rust/sdv-picarx/config/pi5.fota.disabled.example.json /etc/sdv-picarx/vehicle.json
 sudo install -o root -g root -m 0755 rust/sdv-picarx/target/release/sdv-picarx /var/lib/sdv-fota/slots/a/sdv-image.bin
-sudo sdv-fota init /var/lib/sdv-fota a 1.0.0 1
+sudo sdv-fota init --state-root /var/lib/sdv-fota --active-slot a \
+  --active-version 1.0.0 --security-version 1
 printf 'SDV_FOTA_APP_UID=%s\nSDV_FOTA_APP_GID=%s\nSDV_PICARX_CONFIG=/etc/sdv-picarx/vehicle.json\n' "$(id -u sdv-app)" "$(id -g sdv-app)" | sudo tee /etc/default/sdv-fota-launcher >/dev/null
 sudo chown root:root /etc/default/sdv-fota-launcher
 sudo chmod 0644 /etc/default/sdv-fota-launcher
@@ -103,9 +104,12 @@ provisioned public key and the active ECU compatibility values:
 
 ```sh
 # Install a local package or stream one from an HTTPS artifact endpoint:
-sudo sdv-fota install /var/lib/sdv-fota update.sdvf vehicle 1 1
-sudo sdv-fota install-url /var/lib/sdv-fota https://updates.example/vehicle/update.sdvf vehicle 1 1
-sudo sdv-fota status /var/lib/sdv-fota
+sudo sdv-fota install --state-root /var/lib/sdv-fota --package update.sdvf \
+  --target vehicle --config-schema 1 --signal-if-version 1
+sudo sdv-fota install-url --state-root /var/lib/sdv-fota \
+  --url https://updates.example/vehicle/update.sdvf --target vehicle \
+  --config-schema 1 --signal-if-version 1
+sudo sdv-fota status --state-root /var/lib/sdv-fota
 sudo systemctl restart sdv-fota-launcher.service
 ```
 
@@ -136,8 +140,9 @@ the FOTA trial fails when it cannot provide fresh snapshots.
 The PiCar-X deployment uses the complete Rust Linux runtime as one `vehicle` FOTA image.
 `sdv-core::runtime::VehicleRuntime` runs VCU, Engine, Brake, and Steering as separate virtual ECU
 tasks with their own RTE state and the same virtual bus contract as the Rust simulator; this does not
-require separate physical CPUs. This initial FOTA unit replaces the whole runtime, not an individual
-task. The Pi path can sign a
+require separate physical CPUs. The Pi Linux installer accepts the `vehicle` target because
+these tasks share one A/B application image; `engine`, `brake`, and `steering` cannot be installed
+as independent Pi images yet. The Pi path can sign a
 package on a separate host, verify and stage it incrementally, and exercise
 A/B trial boot and rollback on Linux. HTTPS artifact transfer uses the device's system CA store;
 mutual TLS, private repository credentials, remote campaign orchestration, a real vehicle-state
