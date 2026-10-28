@@ -384,9 +384,17 @@ mod tests {
             CampaignPlan::new(&[Ecu::Engine, Ecu::Engine]),
             Err(CampaignError::DuplicateTarget)
         );
+        assert_eq!(
+            CampaignPlan::new(&[Ecu::Engine, Ecu::Brake, Ecu::Steering, Ecu::Engine]),
+            Err(CampaignError::TooManyTargets)
+        );
         let plan = CampaignPlan::new(&[Ecu::Engine]).unwrap();
         let mut manager = CampaignManager::new();
         manager.start(plan, SAFE).unwrap();
+        assert_eq!(
+            manager.start(plan, SAFE),
+            Err(CampaignError::CampaignInProgress)
+        );
         assert_eq!(
             manager.report(Ecu::Brake, EcuUpdateStatus::Staged, SAFE),
             Err(CampaignError::UnexpectedEcu)
