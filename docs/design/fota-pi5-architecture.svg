@@ -1,0 +1,161 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1200" viewBox="0 0 1800 1200" role="img" aria-labelledby="title desc">
+<title id="title">Raspberry Pi 5 アプリケーション FOTA アーキテクチャ</title>
+<desc id="desc">OEM向けシステム構成図。更新パッケージ、Rust共通FOTAコア、プラットフォーム抽象化境界、Pi 5 Linuxストレージ、今後のブートおよびヘルス統合を示す。</desc>
+<defs>
+  <linearGradient id="header" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#10243b"/><stop offset="1" stop-color="#183d5b"/></linearGradient>
+  <linearGradient id="core" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#eaf4fb"/><stop offset="1" stop-color="#f4f8fc"/></linearGradient>
+  <filter id="shadow" x="-15%" y="-15%" width="130%" height="140%"><feDropShadow dx="0" dy="4" stdDeviation="7" flood-color="#17324c" flood-opacity=".10"/></filter>
+  <marker id="arr" markerWidth="11" markerHeight="9" refX="9" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9Z" fill="#668098"/></marker>
+  <marker id="arrBlue" markerWidth="11" markerHeight="9" refX="9" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9Z" fill="#2876a5"/></marker>
+  <marker id="arrAmber" markerWidth="11" markerHeight="9" refX="9" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9Z" fill="#bd8a2d"/></marker>
+  <style>
+    text{font-family:"Noto Sans JP","Yu Gothic",Meiryo,sans-serif;fill:#183049}
+    .h1{font-size:34px;font-weight:700;letter-spacing:.4px}.hsub{font-size:16px;fill:#c4d6e4}
+    .section{font-size:13px;font-weight:700;letter-spacing:1.2px;fill:#5e7388}
+    .ptitle{font-size:20px;font-weight:700}.title{font-size:17px;font-weight:700}.body{font-size:14px;fill:#40586e}.small{font-size:12px;fill:#62788b}.tiny{font-size:11px;fill:#6f8395}
+    .white{fill:#fff}.whiteSub{fill:#d0deea}.mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;fill:#38546b}
+    .shadow{}.line{fill:none;stroke:#668098;stroke-width:2;marker-end:url(#arr)}.lineBlue{fill:none;stroke:#2876a5;stroke-width:2.5;marker-end:url(#arrBlue)}.lineAmber{fill:none;stroke:#bd8a2d;stroke-width:2.2;stroke-dasharray:7 6;marker-end:url(#arrAmber)}
+  </style>
+</defs>
+<rect width="1800" height="1200" fill="#f3f6f9"/>
+<!-- Header -->
+<rect width="1800" height="146" fill="url(#header)"/>
+<text x="72" y="61" class="h1 white">Raspberry Pi 5｜アプリケーション FOTA アーキテクチャ</text>
+<text x="74" y="96" class="hsub">更新パッケージの真正性を検証し、非稼働スロットへ安全にステージングする設計</text>
+<rect x="1450" y="39" width="276" height="38" rx="19" fill="#ffffff" fill-opacity=".12" stroke="#a8c5d9" stroke-opacity=".5"/>
+<circle cx="1474" cy="58" r="6" fill="#efbd61"/><text x="1490" y="63" class="white" font-size="13" font-weight="700">設計・実装状況：基盤実装段階</text>
+<text x="74" y="126" class="whiteSub" font-size="12">対象：Pi 5上のLinuxアプリケーションイメージ　｜　Linuxカーネル／rootfs更新は本スコープ外</text>
+
+<!-- Legend -->
+<rect x="70" y="166" width="1660" height="55" rx="13" fill="#fff" stroke="#e0e7ed"/>
+<circle cx="98" cy="193" r="6" fill="#31805e"/><text x="114" y="198" class="body">コード実装済み</text>
+<circle cx="278" cy="193" r="6" fill="#d09a35"/><text x="294" y="198" class="body">統合・実機確認が必要</text>
+<path d="M563 193h52" class="lineBlue"/><text x="628" y="198" class="body">更新データ／制御フロー</text>
+<path d="M888 193h52" class="lineAmber"/><text x="953" y="198" class="body">今後接続するフロー</text>
+<text x="1703" y="198" text-anchor="end" class="small">実装済み ≠ Pi 5実機で検証済み</text>
+
+<!-- column headers -->
+<text x="80" y="263" class="section">01　UPDATE INPUT</text>
+<text x="550" y="263" class="section">02　DEVICE FOTA AGENT</text>
+<text x="1227" y="263" class="section">03　RASPBERRY PI 5 / LINUX</text>
+
+<!-- Package input -->
+<g class="shadow">
+ <rect x="75" y="284" width="385" height="430" rx="20" fill="#fff" stroke="#dbe4ec"/>
+ <rect x="75" y="284" width="385" height="58" rx="20" fill="#e9f0f6"/><path d="M75 322v20h385v-20" fill="#e9f0f6"/>
+ <text x="101" y="320" class="ptitle">更新パッケージ</text>
+ <rect x="342" y="301" width="92" height="24" rx="12" fill="#fff0cc"/><text x="388" y="317" text-anchor="middle" font-size="11" font-weight="700" fill="#89641d">入力未接続</text>
+ <rect x="101" y="365" width="333" height="84" rx="12" fill="#f7fafc" stroke="#dfe7ed"/>
+ <text x="121" y="394" class="title">SDVF コンテナ</text><text x="121" y="420" class="body">署名対象マニフェスト + ペイロード</text>
+ <text x="101" y="485" class="section">マニフェストで扱う情報</text>
+ <circle cx="108" cy="515" r="3" fill="#4282a6"/><text x="121" y="520" class="body">対象ECU / SWC・互換性</text>
+ <circle cx="108" cy="545" r="3" fill="#4282a6"/><text x="121" y="550" class="body">バージョン・アンチロールバック</text>
+ <circle cx="108" cy="575" r="3" fill="#4282a6"/><text x="121" y="580" class="body">信号インターフェース / 設定スキーマ</text>
+ <circle cx="108" cy="605" r="3" fill="#4282a6"/><text x="121" y="610" class="body">ペイロード長・SHA-256</text>
+ <rect x="101" y="643" width="333" height="47" rx="10" fill="#fff8e9" stroke="#ecd9ad"/>
+ <text x="119" y="663" class="small" font-weight="700">転送方式・配信元は未定義</text><text x="119" y="681" class="tiny">PackageSourceポートへ将来接続</text>
+</g>
+
+<!-- Agent shell -->
+<g class="shadow">
+ <rect x="500" y="284" width="681" height="430" rx="20" fill="#fff" stroke="#cddce7" stroke-width="1.5"/>
+ <rect x="500" y="284" width="681" height="58" rx="20" fill="#173d5a"/><path d="M500 322v20h681v-20" fill="#173d5a"/>
+ <text x="528" y="320" class="ptitle white">sdv-fota ｜ Rust 共通コア</text>
+ <text x="1148" y="318" text-anchor="end" class="whiteSub" font-size="12">OS非依存の更新ポリシー</text>
+ <rect x="528" y="365" width="295" height="213" rx="14" fill="url(#core)" stroke="#b8d1e2"/>
+ <text x="550" y="397" class="section">SECURITY GATE</text>
+ <text x="550" y="430" class="title">パッケージ検証</text>
+ <text x="550" y="460" class="body">1. Ed25519署名を生データで検証</text>
+ <text x="550" y="488" class="body">2. マニフェストを厳格に解析</text>
+ <text x="550" y="516" class="body">3. 対象・互換性・更新順序を確認</text>
+ <text x="550" y="544" class="body">4. サイズとSHA-256を確認</text>
+ <rect x="844" y="365" width="309" height="213" rx="14" fill="#f5f8fb" stroke="#d8e1e8"/>
+ <text x="866" y="397" class="section">UPDATE ORCHESTRATION</text>
+ <text x="866" y="430" class="title">FotaInstaller</text>
+ <text x="866" y="460" class="body">・現在状態と互換性を照合</text>
+ <text x="866" y="488" class="body">・非稼働スロットへ書き込み</text>
+ <text x="866" y="516" class="body">・書き戻しデータを再検証</text>
+ <text x="866" y="544" class="body">・成功時のみ試行起動を予約</text>
+ <path d="M823 472h18" class="lineBlue"/>
+ <rect x="528" y="600" width="625" height="84" rx="13" fill="#f6f8fa" stroke="#aab9c6" stroke-dasharray="5 4"/>
+ <text x="550" y="628" class="section">PLATFORM PORTS ｜ TRAIT BOUNDARY</text>
+ <text x="550" y="657" class="body" font-weight="700">PackageSource</text><text x="695" y="657" class="small">取得</text>
+ <text x="760" y="657" class="body" font-weight="700">ImageStorage</text><text x="902" y="657" class="small">保存・読戻し</text>
+ <text x="1004" y="657" class="body" font-weight="700">BootControl</text>
+ <text x="528" y="704" class="tiny">no_std + allocでビルド可能。ベアメタル移植にはallocator・暗号・ストレージ・ブート連携の実装が別途必要。</text>
+</g>
+
+<!-- Platform -->
+<g class="shadow">
+ <rect x="1220" y="284" width="505" height="430" rx="20" fill="#fff" stroke="#dbe4ec"/>
+ <rect x="1220" y="284" width="505" height="58" rx="20" fill="#e9f0f6"/><path d="M1220 322v20h505v-20" fill="#e9f0f6"/>
+ <text x="1246" y="320" class="ptitle">Pi 5 Linux Adapter</text>
+ <rect x="1580" y="301" width="118" height="24" rx="12" fill="#e3f2e9"/><text x="1639" y="317" text-anchor="middle" font-size="11" font-weight="700" fill="#326d4b">コード実装</text>
+ <rect x="1246" y="365" width="453" height="127" rx="13" fill="#f3f8f4" stroke="#c8e0ce"/>
+ <text x="1268" y="395" class="section">IMAGE STORAGE</text>
+ <text x="1268" y="425" class="title">データ領域のA/Bスロット</text>
+ <rect x="1268" y="442" width="194" height="33" rx="7" fill="#fff" stroke="#cbd9cf"/><text x="1365" y="464" text-anchor="middle" class="mono">slots/a/sdv-image.bin</text>
+ <rect x="1480" y="442" width="194" height="33" rx="7" fill="#fff" stroke="#cbd9cf"/><text x="1577" y="464" text-anchor="middle" class="mono">slots/b/sdv-image.bin</text>
+ <rect x="1246" y="512" width="453" height="89" rx="13" fill="#f3f8f4" stroke="#c8e0ce"/>
+ <text x="1268" y="543" class="section">BOOT STATE RECORD</text>
+ <text x="1268" y="572" class="body">冗長メタデータ（CRC32）｜試行・確定・ロールバック状態</text>
+ <rect x="1246" y="621" width="453" height="66" rx="11" fill="#fff6e6" stroke="#e7d2a7"/>
+ <text x="1266" y="647" class="small" font-weight="700">実行環境との接続は未実装</text>
+ <text x="1266" y="669" class="tiny">systemd / 起動選択 / HealthMonitor / 実機検証</text>
+</g>
+
+<!-- flow connectors across columns -->
+<path d="M460 400h37" class="lineAmber"/>
+<path d="M1181 472h36" class="lineBlue"/>
+<text x="1198" y="455" text-anchor="middle" class="tiny">ports</text>
+
+<!-- Lifecycle strip -->
+<text x="80" y="779" class="section">更新ライフサイクルと安全な切替</text>
+<rect x="75" y="799" width="1650" height="205" rx="20" fill="#fff" stroke="#dbe4ec"/>
+<!-- step 1 -->
+<g>
+ <circle cx="130" cy="858" r="20" fill="#e7f1f8"/><text x="130" y="864" text-anchor="middle" font-size="15" font-weight="700" fill="#2876a5">1</text>
+ <text x="163" y="854" class="title">受信</text><text x="163" y="879" class="small">PackageSource</text>
+</g>
+<path d="M270 858h70" class="lineAmber"/>
+<!-- step 2 -->
+<g>
+ <circle cx="379" cy="858" r="20" fill="#e7f1f8"/><text x="379" y="864" text-anchor="middle" font-size="15" font-weight="700" fill="#2876a5">2</text>
+ <text x="412" y="854" class="title">検証</text><text x="412" y="879" class="small">署名・互換性・ハッシュ</text>
+</g>
+<path d="M584 858h67" class="lineBlue"/>
+<!-- step 3 -->
+<g>
+ <circle cx="690" cy="858" r="20" fill="#e7f1f8"/><text x="690" y="864" text-anchor="middle" font-size="15" font-weight="700" fill="#2876a5">3</text>
+ <text x="723" y="854" class="title">ステージング</text><text x="723" y="879" class="small">非稼働スロットへ書込み</text>
+</g>
+<path d="M920 858h67" class="lineBlue"/>
+<!-- step 4 -->
+<g>
+ <circle cx="1026" cy="858" r="20" fill="#e7f1f8"/><text x="1026" y="864" text-anchor="middle" font-size="15" font-weight="700" fill="#2876a5">4</text>
+ <text x="1059" y="854" class="title">読戻し確認</text><text x="1059" y="879" class="small">一致時のみ試行起動を予約</text>
+</g>
+<path d="M1275 858h67" class="lineAmber"/>
+<!-- step 5 -->
+<g>
+ <circle cx="1382" cy="858" r="20" fill="#fff1d2"/><text x="1382" y="864" text-anchor="middle" font-size="15" font-weight="700" fill="#a7781f">5</text>
+ <text x="1415" y="854" class="title">試行起動・判定</text><text x="1415" y="879" class="small">ブート / HealthMonitor接続待ち</text>
+</g>
+<path d="M1120 930h165" class="lineAmber"/>
+<text x="1096" y="935" class="tiny" text-anchor="end">現行実装：ここまで予約</text>
+<rect x="328" y="921" width="450" height="52" rx="10" fill="#edf7f0" stroke="#c8e0ce"/>
+<text x="350" y="943" class="small" font-weight="700">検証失敗 / 書込み失敗</text><text x="350" y="961" class="tiny">起動予約を行わず、現在の稼働イメージを維持</text>
+<rect x="1307" y="909" width="384" height="62" rx="10" fill="#fff8e9" stroke="#e8d6af"/>
+<text x="1327" y="934" class="small" font-weight="700">正常：新スロット確定</text><text x="1327" y="956" class="small" font-weight="700">異常：旧スロットへ復帰</text>
+
+<!-- footer -->
+<rect x="75" y="1030" width="1650" height="108" rx="16" fill="#eaf0f5"/>
+<text x="101" y="1062" class="section">設計境界</text>
+<line x1="232" y1="1050" x2="232" y2="1118" stroke="#cad5de"/>
+<text x="261" y="1062" class="title">共通コア</text><text x="261" y="1088" class="small">署名検証・互換性・更新状態遷移を保持</text><text x="261" y="1110" class="small">ハードウェア差分をplatform portsの外側へ隔離</text>
+<line x1="744" y1="1050" x2="744" y2="1118" stroke="#cad5de"/>
+<text x="772" y="1062" class="title">Pi 5 Linux実装</text><text x="772" y="1088" class="small">ファイル領域へのA/Bステージングと状態記録</text><text x="772" y="1110" class="small">ブートローダー・systemd・ヘルス判定は統合対象</text>
+<line x1="1264" y1="1050" x2="1264" y2="1118" stroke="#cad5de"/>
+<text x="1292" y="1062" class="title">検証ステータス</text><text x="1292" y="1088" class="small">Rust host / AArch64 compile確認済み</text><text x="1292" y="1110" class="small">Pi 5実機・電源断復旧の検証は未実施</text>
+<text x="1725" y="1170" text-anchor="end" class="tiny">SDV FOTA Architecture  •  Draft for OEM Technical Review</text>
+</svg>

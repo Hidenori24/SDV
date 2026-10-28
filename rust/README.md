@@ -67,6 +67,32 @@ C++ 側の挙動を変えた場合は、`sdv_sim` を再実行して golden を�
 
 故障注入の golden（`tests/golden/cpp_stall_*.csv`）も同様です。再生成コマンドは `tests/golden/README.md` を参照してください。
 
+## FOTA package validation (ADR-0005)
+
+`sdv-fota` is a separate crate so FOTA does not depend on the simulator. Its signed manifest
+and v1 binary package format use `SDVF` magic, format version, key-ID length, manifest length,
+payload length, 64-byte signature, key ID, exact signed manifest bytes, then payload.
+`validate_package` verifies the raw manifest signature before parsing it, then checks target
+ECU/SWC, semantic version and downgrade policy, security-version floor, signal interface and
+Config schema compatibility, payload length, and SHA-256.
+
+The FOTA code is split into domain types (`model.rs`), package validation (`package.rs`), update
+orchestration (`service.rs`), and service-level platform ports (`ports.rs`): `ImageStorage`,
+`BootControl`, `HealthMonitor`, and `PackageSource`.
+`FotaInstaller` writes the validated image in bounded chunks to the inactive slot, streams it
+back through a fixed-size buffer for SHA-256 verification, then schedules a trial boot.
+`resolve_trial` commits only after the health adapter reports success;
+otherwise it requests rollback. `sdv-fota::linux` implements the Pi 5/Linux host backend for
+application-image slots and redundant CRC-protected boot metadata in a configured Linux data directory. On the Pi 5 this
+adapter does not write the OS, EEPROM, boot partition, or raw block devices. A systemd launcher
+that selects and starts the slot image is still needed. The common crate also compiles with
+`--no-default-features` (`no_std` + `alloc`). This removes `std` dependencies, but it is not
+heap-free and does not make the crate AUTOSAR Classic compatible. Flash I/O and read-back are
+block-oriented now; the package and JSON manifest are still held/parsed with `alloc`. Classic
+integration requires bounded package reception and adapters for the selected DCM, Csm/Crypto,
+NvM, MemIf/Fls, and bootloader.
+See [the Classic architecture proposal](../docs/design/fota_classic_architecture.md). `SIGNAL_IF_VERSION` is currently 1.
+
 ## WASM API（C ABI、wasm-bindgen 不要）
 | 関数 | 説明 |
 |---|---|

@@ -29,6 +29,16 @@ fn sha256_known_answers() {
 }
 
 #[test]
+fn incremental_sha256_matches_one_shot() {
+    let message = b"an image split into diagnostic download blocks";
+    let mut context = Sha256Context::new();
+    context.update(&message[..7]);
+    context.update(&message[7..23]);
+    context.update(&message[23..]);
+    assert_eq!(context.finalize(), sha256(message));
+}
+
+#[test]
 fn hmac_sha256_rfc4231() {
     // test case 1
     assert_eq!(
