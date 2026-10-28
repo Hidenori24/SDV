@@ -70,6 +70,13 @@ cargo build --release --manifest-path rust/sdv-picarx/Cargo.toml
 ./rust/sdv-picarx/target/release/sdv-picarx --config /etc/sdv-picarx.json
 ```
 
+To list available I2C device paths and GPIO chip line offsets without requesting or changing any
+pins, build and run `sdv-picarx-discover`:
+
+```sh
+cargo run --release --manifest-path rust/sdv-picarx/Cargo.toml --bin sdv-picarx-discover
+```
+
 These bindings have passed unit and aarch64 compile checks; they have not been run on a physical
 PiCar-X. GPIO mapping, motor polarity, and steering/PWM values still need to be checked and
 calibrated on the target vehicle before enabling forward power.

@@ -12,11 +12,15 @@ On the Pi 5, build the Linux FOTA tools and PiCar-X vehicle image from the repos
 
 ```sh
 cargo build --release --manifest-path rust/sdv-fota/Cargo.toml --bin sdv-fota --bin sdv-fota-launcher
-cargo build --release --manifest-path rust/sdv-picarx/Cargo.toml --bin sdv-picarx --bin sdv-picarx-health
+cargo build --release --manifest-path rust/sdv-picarx/Cargo.toml --bin sdv-picarx --bin sdv-picarx-health --bin sdv-picarx-discover
 sudo install -m 0755 rust/sdv-fota/target/release/sdv-fota /usr/bin/sdv-fota
 sudo install -m 0755 rust/sdv-fota/target/release/sdv-fota-launcher /usr/bin/sdv-fota-launcher
 sudo install -m 0755 rust/sdv-picarx/target/release/sdv-picarx-health /usr/bin/sdv-picarx-health
+sudo install -m 0755 rust/sdv-picarx/target/release/sdv-picarx-discover /usr/bin/sdv-picarx-discover
 ```
+
+Before editing the PiCar-X config, run `sdv-picarx-discover` to list the actual I2C device paths,
+GPIO chip labels, and GPIO line offsets on that Pi. It does not request or change any pins.
 
 The signing utility is built separately on a protected release host with
 `--features host-signing --bin sdv-fota-sign`. Do not build or provision a signing seed on the Pi.
