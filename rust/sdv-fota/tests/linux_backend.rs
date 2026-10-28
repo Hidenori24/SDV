@@ -512,6 +512,48 @@ fn rollback_trial_cli_clears_pending_candidate_and_rejects_empty_rollback() {
 }
 
 #[test]
+fn verify_images_cli_returns_failure_when_a_trial_digest_mismatches() {
+    let root = TempRoot::new();
+    let storage = FileSlotStorage::new(&root.0);
+    write_slot_image(&root.0, Slot::A, "#!/bin/sh\nexit 0\n");
+    write_slot_image(&root.0, Slot::B, "#!/bin/sh\nexit 0\n");
+    let mut boot = FileBootControl::new(&root.0);
+    boot.initialize_with_image(&storage, Slot::A, "1.0.0", 1)
+        .unwrap();
+    boot.schedule_trial(TrialImage {
+        slot: Slot::B,
+        version: fixed_version("1.1.0"),
+        security_version: 2,
+        boots_left: 2,
+        trial_window_ms: 5_000,
+    })
+    .unwrap();
+
+    let verify = || {
+        Command::new(env!("CARGO_BIN_EXE_sdv-fota"))
+            .args(["verify-images", "--state-root", root.0.to_str().unwrap()])
+            .output()
+            .unwrap()
+    };
+    let healthy = verify();
+    assert!(
+        healthy.status.success(),
+        "{}",
+        String::from_utf8_lossy(&healthy.stderr)
+    );
+    let healthy_report = String::from_utf8_lossy(&healthy.stdout);
+    assert!(healthy_report.contains("active_image_integrity: verified"));
+    assert!(healthy_report.contains("trial_image_integrity: verified"));
+
+    fs::write(storage.image_path(Slot::B), "#!/bin/sh\nexit 1\n").unwrap();
+    let corrupt = verify();
+    assert!(!corrupt.status.success());
+    let corrupt_report = String::from_utf8_lossy(&corrupt.stdout);
+    assert!(corrupt_report.contains("active_image_integrity: verified"));
+    assert!(corrupt_report.contains("trial_image_integrity: mismatch_or_unbootable"));
+}
+
+#[test]
 fn record_active_integrity_only_updates_the_active_slot_without_a_trial() {
     let root = TempRoot::new();
     let mut boot = FileBootControl::new(&root.0);
