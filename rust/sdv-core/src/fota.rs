@@ -14,7 +14,7 @@ use crate::sim::{Sim, SystemState};
 pub const STOPPED_SPEED_EPSILON_MPS: f32 = 0.01;
 
 /// VCU-side campaign policy bound to the live simulation state.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct SimFotaCampaign {
     manager: CampaignManager,
 }
