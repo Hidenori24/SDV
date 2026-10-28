@@ -28,6 +28,8 @@ const IMAGE_DIGEST_HEX_BYTES: usize = 64;
 const LOCK_EX: i32 = 2;
 const LOCK_NB: i32 = 4;
 const LOCK_UN: i32 = 8;
+const TRIAL_HEALTH_STABILITY_WINDOW: Duration = Duration::from_secs(2);
+const TRIAL_HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(100);
 // Linux O_NOFOLLOW: reject a final path component that is a symbolic link.
 const O_NOFOLLOW: i32 = 0x20_000;
 const UNSAFE_WRITE_BITS: u32 = 0o022;
@@ -562,7 +564,20 @@ fn wait_for_trial_health(
     identity: Option<&(u32, u32, Vec<u32>)>,
 ) -> Result<(), Error> {
     let started = Instant::now();
+    let stability_window = TRIAL_HEALTH_STABILITY_WINDOW.min(timeout / 2);
+    if stability_window.is_zero() {
+        boot.rollback_trial()?;
+        return Err(Error::TrialHealthTimeout);
+    }
+    let poll_interval = TRIAL_HEALTH_POLL_INTERVAL
+        .min(stability_window / 4)
+        .max(Duration::from_millis(1));
+    let mut healthy_since = None;
     loop {
+        if started.elapsed() >= timeout {
+            boot.rollback_trial()?;
+            return Err(Error::TrialHealthTimeout);
+        }
         match child.try_wait() {
             Ok(Some(_)) => {
                 boot.rollback_trial()?;
@@ -586,19 +601,23 @@ fn wait_for_trial_health(
                 return Err(Error::Io(error));
             }
         };
+        let mut health_succeeded = false;
         loop {
             match health.try_wait() {
-                Ok(Some(status)) if status.success() => match child.try_wait() {
-                    Ok(Some(_)) => {
-                        boot.rollback_trial()?;
-                        return Err(Error::TrialImageExited);
+                Ok(Some(status)) if status.success() => {
+                    match child.try_wait() {
+                        Ok(Some(_)) => {
+                            boot.rollback_trial()?;
+                            return Err(Error::TrialImageExited);
+                        }
+                        Ok(None) => health_succeeded = true,
+                        Err(error) => {
+                            boot.rollback_trial()?;
+                            return Err(Error::Io(error));
+                        }
                     }
-                    Ok(None) => return Ok(()),
-                    Err(error) => {
-                        boot.rollback_trial()?;
-                        return Err(Error::Io(error));
-                    }
-                },
+                    break;
+                }
                 Ok(Some(_)) => break,
                 Ok(None) => {}
                 Err(error) => {
@@ -630,14 +649,26 @@ fn wait_for_trial_health(
                 boot.rollback_trial()?;
                 return Err(Error::TrialHealthTimeout);
             }
-            thread::sleep(Duration::from_millis(10).min(timeout - elapsed));
+            thread::sleep(
+                Duration::from_millis(10)
+                    .min(poll_interval)
+                    .min(timeout - elapsed),
+            );
         }
         let elapsed = started.elapsed();
         if elapsed >= timeout {
             boot.rollback_trial()?;
             return Err(Error::TrialHealthTimeout);
         }
-        thread::sleep(Duration::from_millis(100).min(timeout - elapsed));
+        if health_succeeded {
+            let since = healthy_since.get_or_insert_with(Instant::now);
+            if since.elapsed() >= stability_window {
+                return Ok(());
+            }
+        } else {
+            healthy_since = None;
+        }
+        thread::sleep(poll_interval.min(timeout - elapsed));
     }
 }
 
