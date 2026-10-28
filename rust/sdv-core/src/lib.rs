@@ -4,6 +4,8 @@
 pub mod bus;
 pub mod config;
 pub mod failsafe;
+#[cfg(feature = "fota-simulator")]
+pub mod fota;
 pub mod model;
 pub mod nvm;
 pub mod rte;
