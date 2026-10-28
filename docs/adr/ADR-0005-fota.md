@@ -13,7 +13,7 @@ ADR-0003 で **Config（データ）の更新** は成立している（検証 �
 
 ### 実装状況（2026-10-26）
 
-`rust/sdv-fota` に署名済み SDVF の固定メモリ検証、共通 A/B 更新状態機械、Pi 5/Linux のファイル backend、ホスト用 package signer/installer、HTTPS ingress、trial launcher が実装されている。Pi installer は root が管理する trust store の Ed25519 鍵だけを受け入れる。Linux launcher は root 所有のスロットとboot metadataを保持し、candidate image とhealth commandを別の非特権UID/GIDで起動する。署名→導入→trial起動→health check→commit/rollback はLinux統合テストで通している。実Pi 5上の動作確認、実アプリのhealth check、VCU UpdateManager/ECUキャンペーン、採用 AUTOSAR Classic BSW/MCAL/Bootloader binding は未完了であり、この実装を量産FOTAやAUTOSAR準拠とは扱わない。
+`rust/sdv-fota` に署名済み SDVF の固定メモリ検証、共通 A/B 更新状態機械、Pi 5/Linux のファイル backend、ホスト用 package signer/installer、HTTPS ingress、trial launcher が実装されている。Pi installer は root が管理する trust store の Ed25519 鍵だけを受け入れる。Linux launcher は root 所有のスロットとboot metadataを保持し、candidate image とhealth commandを別の非特権UID/GIDで起動する。署名→導入→trial起動→health check→commit/rollback はLinux統合テストで通している。固定メモリの `CampaignManager` は車両停止・Safety正常を条件に複数ECUを一台ずつ更新するコマンド列を制御するが、診断/CAN transportとVCUシミュレータへの接続は未実装。実Pi 5上の動作確認、実アプリのhealth check、VCU UpdateManager統合、採用 AUTOSAR Classic BSW/MCAL/Bootloader binding は未完了であり、この実装を量産FOTAやAUTOSAR準拠とは扱わない。
 
 本ADRで、ECU に載るソフトを **配信 → 検証 → 書き込み → 試験適用 → 確定 or 自動ロールバック** する仕組み（FOTA）を設計する。
 ADR-0002 で作った「ECU 分割・仮想バス・故障注入・Watchdog」が、そのまま FOTA の検証環境になる。
@@ -237,10 +237,10 @@ NG のときは `error_code` を返す（`NOT_STOPPED` / `BUSY` / `BAD_SIZE` / `
 2. **`sdv-sec` ライブラリ**: `sha256` / `ed25519_verify` / `hmac_sha256` と C ABI。既知のテストベクタ（RFC 8032 など）で検証。CI に追加（native と wasm32 のビルド・テスト）。他は変えない
 3. Rust: manifest の型・検証（署名・サイズ・SHA-256・互換性・ダウングレード・`security_version`）、署名ツール（ホスト用 CLI、デモ鍵）、`boot_ctl`（A/B・trial・CRC）。単体テスト。挙動は不変（golden 一致）
 4. Rust: ECU 側の更新ステートマシンと更新チャネル（ブロック転送・ack・再開）。ECU 単体のテスト
-5. Rust: VCU の UpdateManager（前提条件、1 ECU ずつ、保守状態）と Watchdog 連携、故障注入（途中断、壊れたイメージ、起動失敗）。UpdateCtrl への MAC の適用（追加の確認事項 A）
+5. Rust: VCU の UpdateManager。固定長 `CampaignManager` の前提条件（停止・Safety Normal・他更新なし）、1 ECU ずつの Request / Activate / Commit と安全条件再確認・Abort は実装済み。VCUへの統合、ECU状態/診断transport、Watchdog・故障注入連携、UpdateCtrlへのMAC（追加の確認事項A）は未完了
 6. WASM API と GUI: パッケージ選択 → 配信の進捗 → 試験適用 → 確定 / ロールバック、壊れた・改ざんしたイメージの注入、イベントログ表示
 7. シナリオ JSON の `update` イベント、イベントログ（別ファイル）、必要なら CSV の `versions` 列
-8. 段階2（別ADR）: 実 WASM モジュール化、鍵のローテーション・失効、キャンペーン（複数 ECU の順次更新）
+8. 段階2（別ADR）: 実 WASM モジュール化、鍵のローテーション・失効、製品の配信基盤とキャンペーン管理
 
 ## Consequences
 
