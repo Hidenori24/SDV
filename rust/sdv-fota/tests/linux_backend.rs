@@ -646,15 +646,25 @@ fn signing_and_install_commands_complete_a_host_update() {
 
     let signed = Command::new(env!("CARGO_BIN_EXE_sdv-fota-sign"))
         .args([
+            "--seed",
             seed_path.to_str().unwrap(),
+            "--key-id",
             KEY_ID,
+            "--target",
             "engine",
+            "--version",
             "1.1.0",
+            "--security-version",
             "2",
+            "--trial-ms",
             "5000",
+            "--config-schema",
             "1",
+            "--signal-if-version",
             "1",
+            "--image",
             image_path.to_str().unwrap(),
+            "--output",
             package_path.to_str().unwrap(),
         ])
         .output()
