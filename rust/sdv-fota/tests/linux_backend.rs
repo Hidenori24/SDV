@@ -1183,7 +1183,7 @@ fn install_url_rejects_group_or_world_accessible_client_keys() {
     let curl_called = root.0.join("curl-called");
     write_executable(
         fake_bin.join("curl").as_path(),
-        "#!/bin/sh\\ntouch \"$SDV_FOTA_TEST_CURL_CALLED\"\\n",
+        "#!/bin/sh\ntouch \"$SDV_FOTA_TEST_CURL_CALLED\"\n",
     );
     let path = format!(
         "{}:{}",
