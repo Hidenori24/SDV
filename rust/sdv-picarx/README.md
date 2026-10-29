@@ -19,10 +19,15 @@ channels P13/P12. It requires explicit motor polarity and duty calibration. It c
 motor and servo timers and stops both motor PWM channels during initialization. Direction pins are
 provided through the `MotorDirections` port so the GPIO backend can be replaced independently.
 
+On Linux, `linux_gpio::LinuxMotorDirections` requests both direction lines as inactive outputs in
+one GPIO character-device request. The chip device path and both line offsets must be supplied
+explicitly for the target Pi; it does not assume that the same `/dev/gpiochipN` exists on every
+image.
+
 On Linux, `linux_i2c::I2cTransport` opens an explicitly configured i2c-dev path and MCU address,
-then sends each PWM register message as one I2C transaction. The current crate still needs a Linux
-GPIO implementation, a fresh input source, and an executable that composes these ports. These
-bindings have passed unit and aarch64 compile checks; they have not been run on a physical PiCar-X.
+then sends each PWM register message as one I2C transaction. The current crate still needs a fresh
+input source and an executable that composes these ports. These bindings have passed unit and
+aarch64 compile checks; they have not been run on a physical PiCar-X.
 
 ```sh
 cargo test --manifest-path rust/sdv-picarx/Cargo.toml
