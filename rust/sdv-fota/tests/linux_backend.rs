@@ -36,6 +36,14 @@ fn write_executable(path: &Path, contents: &str) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+fn write_slot_image(root: &Path, slot: Slot, contents: &str) {
+    let storage = FileSlotStorage::new(root);
+    let path = storage.image_path(slot);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    write_executable(&path, contents);
+    storage.record_image_integrity(slot).unwrap();
+}
+
 #[test]
 fn https_ingress_rejects_plain_http_urls() {
     assert!(matches!(
@@ -245,9 +253,7 @@ fn linux_launcher_commits_trial_after_health_command_succeeds() {
     let root = TempRoot::new();
     let mut boot = FileBootControl::new(&root.0);
     boot.initialize(Slot::A, "1.0.0", 1).unwrap();
-    let slot_dir = root.0.join("slots/b");
-    fs::create_dir_all(&slot_dir).unwrap();
-    write_executable(&slot_dir.join("sdv-image.bin"), "#!/bin/sh\nexec sleep 2\n");
+    write_slot_image(&root.0, Slot::B, "#!/bin/sh\nexec sleep 2\n");
     let health = root.0.join("health-check");
     write_executable(
         &health,
@@ -278,10 +284,9 @@ fn linux_launcher_runs_trial_image_and_health_check_as_configured_user() {
     boot.initialize(Slot::A, "1.0.0", 1).unwrap();
     let run_as = fs::metadata("/proc/self").unwrap();
     let uid_record = root.0.join("candidate-uid");
-    let candidate = root.0.join("slots/b/sdv-image.bin");
-    fs::create_dir_all(candidate.parent().unwrap()).unwrap();
-    write_executable(
-        &candidate,
+    write_slot_image(
+        &root.0,
+        Slot::B,
         &format!(
             "#!/bin/sh\nid -u > {}\nexec sleep 2\n",
             uid_record.display()
@@ -347,9 +352,7 @@ fn linux_launcher_rolls_back_trial_when_health_window_expires() {
     let root = TempRoot::new();
     let mut boot = FileBootControl::new(&root.0);
     boot.initialize(Slot::A, "1.0.0", 1).unwrap();
-    let slot_dir = root.0.join("slots/b");
-    fs::create_dir_all(&slot_dir).unwrap();
-    write_executable(&slot_dir.join("sdv-image.bin"), "#!/bin/sh\nexec sleep 2\n");
+    write_slot_image(&root.0, Slot::B, "#!/bin/sh\nexec sleep 2\n");
     let health = root.0.join("health-check");
     write_executable(&health, "#!/bin/sh\nexit 1\n");
     boot.schedule_trial(TrialImage {
@@ -378,9 +381,7 @@ fn linux_launcher_rolls_back_if_trial_image_exits_before_health_check() {
     let root = TempRoot::new();
     let mut boot = FileBootControl::new(&root.0);
     boot.initialize(Slot::A, "1.0.0", 1).unwrap();
-    let slot_dir = root.0.join("slots/b");
-    fs::create_dir_all(&slot_dir).unwrap();
-    write_executable(&slot_dir.join("sdv-image.bin"), "#!/bin/sh\nexit 1\n");
+    write_slot_image(&root.0, Slot::B, "#!/bin/sh\nexit 1\n");
     let health = root.0.join("health-check");
     write_executable(&health, "#!/bin/sh\nexit 0\n");
     boot.schedule_trial(TrialImage {
@@ -439,6 +440,86 @@ fn init_cli_accepts_named_provisioning_options() {
     assert!(report.contains("active_slot: B"));
     assert!(report.contains("active_version: 2.3.0"));
     assert!(report.contains("highest_security_version: 7"));
+    assert!(report.contains("active_image_integrity: verified"));
+    FileSlotStorage::new(&root.0)
+        .verify_executable_image(Slot::B)
+        .unwrap();
+}
+
+#[test]
+fn record_active_integrity_only_updates_the_active_slot_without_a_trial() {
+    let root = TempRoot::new();
+    let mut boot = FileBootControl::new(&root.0);
+    let image = FileSlotStorage::new(&root.0).image_path(Slot::A);
+    fs::create_dir_all(image.parent().unwrap()).unwrap();
+    write_executable(&image, "#!/bin/sh\nexit 0\n");
+    boot.initialize(Slot::A, "1.0.0", 1).unwrap();
+    let record_integrity = |slot: &str| {
+        Command::new(env!("CARGO_BIN_EXE_sdv-fota"))
+            .args([
+                "record-active-integrity",
+                "--state-root",
+                root.0.to_str().unwrap(),
+                "--slot",
+                slot,
+            ])
+            .output()
+            .unwrap()
+    };
+
+    assert!(!record_integrity("b").status.success());
+    assert!(!root.0.join("slots/a/sdv-image.sha256").exists());
+
+    boot.schedule_trial(TrialImage {
+        slot: Slot::B,
+        version: fixed_version("1.1.0"),
+        security_version: 2,
+        boots_left: 2,
+        trial_window_ms: 5_000,
+    })
+    .unwrap();
+    assert!(!record_integrity("a").status.success());
+    assert!(!root.0.join("slots/a/sdv-image.sha256").exists());
+
+    boot.rollback_trial().unwrap();
+    let result = record_integrity("a");
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    FileSlotStorage::new(&root.0)
+        .verify_executable_image(Slot::A)
+        .unwrap();
+}
+
+#[test]
+fn status_reports_missing_and_mismatched_active_image_digests() {
+    let root = TempRoot::new();
+    let boot = FileBootControl::new(&root.0);
+    let image = FileSlotStorage::new(&root.0).image_path(Slot::A);
+    fs::create_dir_all(image.parent().unwrap()).unwrap();
+    write_executable(&image, "#!/bin/sh\nexit 0\n");
+    boot.initialize(Slot::A, "1.0.0", 1).unwrap();
+    let status = || {
+        Command::new(env!("CARGO_BIN_EXE_sdv-fota"))
+            .args(["status", "--state-root", root.0.to_str().unwrap()])
+            .output()
+            .unwrap()
+    };
+
+    let missing = status();
+    assert!(missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stdout).contains("active_image_integrity: missing"));
+
+    FileSlotStorage::new(&root.0)
+        .record_image_integrity(Slot::A)
+        .unwrap();
+    fs::write(&image, "#!/bin/sh\nexit 1\n").unwrap();
+    let mismatched = status();
+    assert!(mismatched.status.success());
+    assert!(String::from_utf8_lossy(&mismatched.stdout)
+        .contains("active_image_integrity: mismatch_or_unbootable"));
 }
 
 #[test]
@@ -558,6 +639,22 @@ fn boot_image_validation_rejects_a_symlinked_slot_directory() {
 }
 
 #[test]
+fn executable_image_verification_does_not_follow_digest_symlinks() {
+    let root = TempRoot::new();
+    let storage = FileSlotStorage::new(&root.0);
+    write_slot_image(&root.0, Slot::A, "#!/bin/sh\nexit 0\n");
+    let record = storage
+        .image_path(Slot::A)
+        .with_file_name("sdv-image.sha256");
+    let external_record = root.0.join("external-digest");
+    fs::copy(&record, &external_record).unwrap();
+    fs::remove_file(&record).unwrap();
+    std::os::unix::fs::symlink(&external_record, &record).unwrap();
+
+    assert!(storage.verify_executable_image(Slot::A).is_err());
+}
+
+#[test]
 fn launcher_rolls_back_trial_with_nonexecutable_candidate_image() {
     let root = TempRoot::new();
     let mut boot = FileBootControl::new(&root.0);
@@ -581,6 +678,62 @@ fn launcher_rolls_back_trial_with_nonexecutable_candidate_image() {
     let state = boot.state().unwrap();
     assert_eq!(state.active, Slot::A);
     assert!(state.trial.is_none());
+}
+
+#[test]
+fn launcher_rolls_back_trial_when_image_digest_mismatches() {
+    let root = TempRoot::new();
+    let mut boot = FileBootControl::new(&root.0);
+    boot.initialize(Slot::A, "1.0.0", 1).unwrap();
+    write_slot_image(&root.0, Slot::B, "#!/bin/sh\nexec sleep 2\n");
+    fs::write(
+        FileSlotStorage::new(&root.0).image_path(Slot::B),
+        "#!/bin/sh\nexit 1\n",
+    )
+    .unwrap();
+    let health = root.0.join("health-check");
+    write_executable(&health, "#!/bin/sh\nexit 0\n");
+    boot.schedule_trial(TrialImage {
+        slot: Slot::B,
+        version: fixed_version("1.1.0"),
+        security_version: 2,
+        boots_left: 2,
+        trial_window_ms: 2_000,
+    })
+    .unwrap();
+
+    let result = run_selected_image(&root.0, &health, &[]);
+
+    assert!(matches!(
+        result,
+        Err(sdv_fota::linux::Error::InvalidBootImage)
+    ));
+    let state = boot.state().unwrap();
+    assert_eq!(state.active, Slot::A);
+    assert!(state.trial.is_none());
+}
+
+#[test]
+fn launcher_does_not_execute_active_image_after_digest_mismatch() {
+    let root = TempRoot::new();
+    let boot = FileBootControl::new(&root.0);
+    let started = root.0.join("started");
+    let image = format!("#!/bin/sh\ntouch {}\n", started.display());
+    write_slot_image(&root.0, Slot::A, &image);
+    boot.initialize(Slot::A, "1.0.0", 1).unwrap();
+    fs::write(
+        FileSlotStorage::new(&root.0).image_path(Slot::A),
+        "#!/bin/sh\nexit 0\n",
+    )
+    .unwrap();
+
+    let result = run_selected_image(&root.0, Path::new("/bin/true"), &[]);
+
+    assert!(matches!(
+        result,
+        Err(sdv_fota::linux::Error::InvalidBootImage)
+    ));
+    assert!(!started.exists());
 }
 
 #[test]
@@ -673,9 +826,15 @@ fn install_cli_streams_signed_package_into_inactive_slot() {
         .output()
         .unwrap();
     assert!(reported.status.success());
-    assert!(String::from_utf8_lossy(&reported.stdout).contains("trial_slot: B"));
+    let report = String::from_utf8_lossy(&reported.stdout);
+    assert!(report.contains("trial_slot: B"));
+    assert!(report.contains("trial_image_integrity: verified"));
     let image_path = FileSlotStorage::new(&root.0).image_path(Slot::B);
     assert_eq!(fs::read(&image_path).unwrap(), payload);
+    assert_eq!(
+        fs::read_to_string(image_path.with_file_name("sdv-image.sha256")).unwrap(),
+        hex(&sha256(payload))
+    );
     assert_ne!(
         fs::metadata(image_path).unwrap().permissions().mode() & 0o111,
         0
