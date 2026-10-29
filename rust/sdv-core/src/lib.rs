@@ -8,6 +8,7 @@ pub mod failsafe;
 pub mod fota;
 pub mod model;
 pub mod nvm;
+pub mod platform;
 pub mod rte;
 pub mod runtime;
 pub mod scenario;
