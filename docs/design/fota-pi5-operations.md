@@ -3,8 +3,10 @@
 This is the development workflow for the Linux application-image backend. It updates only files
 under `/var/lib/sdv-fota`; it does not write the Pi OS, EEPROM, boot partition, or raw devices.
 The host CLI can install from a local package file or stream a package from an HTTPS URL. HTTPS
-uses the system CA store through `curl`, rejects HTTP URLs and HTTP redirects, and keeps the
-Ed25519 package signature as the release authorization check.
+uses the system CA store through `curl`, rejects HTTP URLs and URL-embedded credentials, and keeps
+the Ed25519 package signature as the release authorization check. Deployments can additionally
+require mutual TLS with an owner-only client private key; the client identity controls access to the
+artifact endpoint but does not replace package signature verification.
 
 ## Build
 
@@ -132,6 +134,14 @@ sudo sdv-fota install --state-root /var/lib/sdv-fota --package update.sdvf \
 sudo sdv-fota install-url --state-root /var/lib/sdv-fota \
   --url https://updates.example/vehicle/update.sdvf --target vehicle \
   --config-schema 1 --signal-if-version 1
+# When the endpoint requires mutual TLS, provision a root-owned certificate and private key:
+sudo install -d -o root -g root -m 0750 /etc/sdv-fota/tls
+sudo install -o root -g root -m 0644 device.crt /etc/sdv-fota/tls/device.crt
+sudo install -o root -g root -m 0600 device.key /etc/sdv-fota/tls/device.key
+sudo sdv-fota install-url --state-root /var/lib/sdv-fota \
+  --url https://updates.example/vehicle/update.sdvf --target vehicle \
+  --config-schema 1 --signal-if-version 1 \
+  --client-cert /etc/sdv-fota/tls/device.crt --client-key /etc/sdv-fota/tls/device.key
 sudo sdv-fota status --state-root /var/lib/sdv-fota
 sudo sdv-fota verify-images --state-root /var/lib/sdv-fota
 sudo systemctl restart sdv-fota-launcher.service
