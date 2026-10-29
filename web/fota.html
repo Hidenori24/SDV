@@ -16,7 +16,7 @@ header,main{max-width:900px;margin:auto;padding:18px}header{display:flex;justify
 <main>
   <section class="card">
     <span class="pill">開発プレビュー</span>
-    <p>署名済みアプリイメージをHTTPSまたはファイルから受け取り、署名と互換性を検証して非稼働スロットへ書き込みます。起動時には記録済みSHA-256と照合してから試験起動し、ヘルスチェックに合格すれば確定、失敗すれば元のスロットへ戻ります。</p>
+    <p>署名済みアプリイメージをHTTPSまたはファイルから受け取り、署名と互換性を検証して非稼働スロットへ書き込みます。HTTPS配信はシステムCAでサーバー証明書を検証し、必要に応じて端末証明書による相互TLS認証も使えます。どちらの場合もパッケージ署名の検証は必須です。起動時には記録済みSHA-256と照合してから試験起動し、ヘルスチェックに合格すれば確定、失敗すれば元のスロットへ戻ります。</p>
     <p class="sub">このページは実装済みのPi 5/Linuxホスト経路を説明します。ブラウザ上のシミュレータ自体はFOTA更新しません。</p>
   </section>
   <section class="card">
@@ -70,9 +70,19 @@ sdv-fota-sign --seed /secure/release.seed --key-id release-2026 --target vehicle
 sudo sdv-fota install-url --state-root /var/lib/sdv-fota \
   --url https://updates.example/vehicle/update.sdvf --target vehicle \
   --config-schema 1 --signal-if-version 1
+
+# 相互TLSが必要な配信先では端末証明書と秘密鍵も指定
+sudo install -d -o root -g root -m 0750 /etc/sdv-fota/tls
+sudo install -o root -g root -m 0644 device.crt /etc/sdv-fota/tls/device.crt
+sudo install -o root -g root -m 0600 device.key /etc/sdv-fota/tls/device.key
+sudo sdv-fota install-url --state-root /var/lib/sdv-fota \
+  --url https://updates.example/vehicle/update.sdvf --target vehicle \
+  --config-schema 1 --signal-if-version 1 \
+  --client-cert /etc/sdv-fota/tls/device.crt --client-key /etc/sdv-fota/tls/device.key
 sudo sdv-fota status --state-root /var/lib/sdv-fota
 sudo sdv-fota verify-images --state-root /var/lib/sdv-fota
 sudo systemctl restart sdv-fota-launcher.service</code></pre>
+    <p>相互TLSのクライアント鍵は実行ユーザー所有で、group/otherから読めず書き込めない通常ファイルを指定してください。証明書と鍵は両方指定します。配信認証が成功しても、Ed25519署名と互換性の検証は省略されません。</p>
     <p>launcherは起動対象のSHA-256を照合し、manifestの試験時間内に車両イメージを <code>sdv-app</code> として起動します。trial候補には <code>SDV_TRIAL_SLOT</code> が渡され、PiCar-Xランタイムはtrial中すべてのアクチュエータ指令をゼロに保ちます。同じユーザーで動く <code>sdv-picarx-health</code> は最近の制御周期成功に加え、推定速度とスロットル要求が設定した停車許容値内にある場合だけreadyを返します。最大2秒間health成功とプロセス稼働が続いてからtrial slotを確定し、候補イメージの欠落、digest不一致、移動検出、health途絶、早期終了はrollbackします。確定後launcherは安全モードのプロセスを停止し、systemdが確定slotを通常モードで再起動します。<code>status</code>はactive/trial両slotのdigest照合状態と直近trialの結果・slot・versionを表示します。サービス例は <code>deploy/systemd/sdv-fota-launcher.service</code> にあります。launcherはUID/GID切替に必要な2つのcapabilityだけを持ちます。</p>
     <p><code>status</code>は診断表示なのでdigest不一致でも終了コード0です。監視や更新前ゲートで検証結果を終了コードに反映する場合は <code>sudo sdv-fota verify-images --state-root /var/lib/sdv-fota</code> を使ってください。activeイメージとpending trialイメージのdigestがすべて一致するときだけ成功します。</p>
     <p class="note">停車ゲートは外部の状態推定値に依存するソフトウェア判定で、物理的な停止を独立検証しません。信頼できるセンサー推定を使い、trial中は車両を機械的に固定してください。</p>

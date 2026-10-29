@@ -209,6 +209,8 @@ fn install_from_options(
             "--config-schema",
             "--signal-if-version",
             "--trial-boots",
+            "--client-cert",
+            "--client-key",
         ][..],
     };
     let mut options = parse_named_options(args, accepted_options)?;
@@ -224,6 +226,8 @@ fn install_from_options(
     )?;
     let trial_boots = optional_u32(&mut options, "--trial-boots", "trial boot count")?
         .unwrap_or(DEFAULT_TRIAL_BOOTS);
+    let client_certificate = optional_option(&mut options, "--client-cert").map(PathBuf::from);
+    let client_key = optional_option(&mut options, "--client-key").map(PathBuf::from);
 
     match package_location {
         PackageLocation::File => {
@@ -240,8 +244,12 @@ fn install_from_options(
         }
         PackageLocation::Https => {
             let url = required_str(&source_value, "HTTPS package URL")?;
-            let source = HttpsPackageSource::open(url)
-                .map_err(|error| format!("cannot start HTTPS package download: {error:?}"))?;
+            let source = HttpsPackageSource::open_with_client_identity(
+                url,
+                client_certificate.as_deref(),
+                client_key.as_deref(),
+            )
+            .map_err(|error| format!("cannot start HTTPS package download: {error:?}"))?;
             install_source(
                 state_root,
                 target_ecu,
@@ -419,7 +427,7 @@ fn trial_outcome_name(outcome: sdv_fota::TrialOutcome) -> &'static str {
 }
 
 fn usage() -> String {
-    "usage:\n  sdv-fota init --state-root <dir> --active-slot <a|b> --active-version <version> --security-version <n>\n  sdv-fota record-active-integrity --state-root <dir> --slot <a|b>\n  sdv-fota rollback-trial --state-root <dir>\n  sdv-fota install --state-root <dir> --package <file> --target vehicle --config-schema <n> --signal-if-version <n> [--trial-boots <n>]\n  sdv-fota install-url --state-root <dir> --url <https-url> --target vehicle --config-schema <n> --signal-if-version <n> [--trial-boots <n>]\n  sdv-fota status --state-root <dir>\n  sdv-fota verify-images --state-root <dir>".into()
+    "usage:\n  sdv-fota init --state-root <dir> --active-slot <a|b> --active-version <version> --security-version <n>\n  sdv-fota record-active-integrity --state-root <dir> --slot <a|b>\n  sdv-fota rollback-trial --state-root <dir>\n  sdv-fota install --state-root <dir> --package <file> --target vehicle --config-schema <n> --signal-if-version <n> [--trial-boots <n>]\n  sdv-fota install-url --state-root <dir> --url <https-url> --target vehicle --config-schema <n> --signal-if-version <n> [--trial-boots <n>] [--client-cert <file> --client-key <file>]\n  sdv-fota status --state-root <dir>\n  sdv-fota verify-images --state-root <dir>".into()
 }
 
 #[cfg(test)]
