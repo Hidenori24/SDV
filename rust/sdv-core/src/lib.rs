@@ -11,6 +11,7 @@ pub mod nvm;
 pub mod platform;
 pub mod rte;
 pub mod runtime;
+pub mod runtime_host;
 pub mod scenario;
 pub mod safety;
 pub mod sim;
