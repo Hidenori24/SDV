@@ -21,21 +21,28 @@ header,main{max-width:900px;margin:auto;padding:18px}header{display:flex;justify
   </section>
   <section class="card">
     <h2>Pi 5への初期セットアップ</h2>
-    <p>リポジトリからホスト用ツールをビルドします。署名ツールは別の保護されたリリース環境だけでビルドしてください。</p>
+    <p>リポジトリからFOTAランチャーとPiCar-X車両イメージをビルドします。署名ツールは別の保護されたリリース環境だけでビルドしてください。</p>
 <pre><code>cargo build --release --manifest-path rust/sdv-fota/Cargo.toml \
   --bin sdv-fota --bin sdv-fota-launcher
 sudo install -m 0755 rust/sdv-fota/target/release/sdv-fota /usr/bin/
-sudo install -m 0755 rust/sdv-fota/target/release/sdv-fota-launcher /usr/bin/</code></pre>
+sudo install -m 0755 rust/sdv-fota/target/release/sdv-fota-launcher /usr/bin/
+cargo build --release --manifest-path rust/sdv-picarx/Cargo.toml --bin sdv-picarx --bin sdv-picarx-health
+sudo install -m 0755 rust/sdv-picarx/target/release/sdv-picarx-health /usr/bin/</code></pre>
     <p>署名コマンドは保護されたリリースホストで別にビルドします。</p>
 <pre><code>cargo build --release --manifest-path rust/sdv-fota/Cargo.toml \
   --features host-signing --bin sdv-fota-sign</code></pre>
-    <p>アプリ実行用の非特権ユーザーを作成します。スロットとboot metadataはroot所有にし、アプリ自身から更新イメージや起動状態を書き換えられないようにします。</p>
+    <p>アプリ実行用の非特権ユーザーを作成します。スロットとboot metadataはroot所有にし、アプリ自身から更新イメージや起動状態を書き換えられないようにします。初期イメージにはPiCar-X用Rustホストを配置し、設定はスロット外に置きます。</p>
 <pre><code>sudo useradd --system --user-group --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin sdv-app
 sudo install -d -o root -g root -m 0755 /var/lib/sdv-fota/slots/a /var/lib/sdv-fota/slots/b
-sudo install -o root -g root -m 0755 initial-sdv-app /var/lib/sdv-fota/slots/a/sdv-image.bin
+sudo install -d -o root -g root -m 0755 /etc/sdv-picarx
+sudo install -o root -g root -m 0644 rust/sdv-picarx/config/pi5.fota.disabled.example.json /etc/sdv-picarx/vehicle.json
+sudo install -o root -g root -m 0755 rust/sdv-picarx/target/release/sdv-picarx /var/lib/sdv-fota/slots/a/sdv-image.bin
 sudo sdv-fota init /var/lib/sdv-fota a 1.0.0 1
 printf 'SDV_FOTA_APP_UID=%s\nSDV_FOTA_APP_GID=%s\n' "$(id -u sdv-app)" "$(id -g sdv-app)" | sudo tee /etc/default/sdv-fota-launcher
 sudo chmod 0644 /etc/default/sdv-fota-launcher</code></pre>
+    <p>設定ファイルの場所をlauncherの環境へ追加します。</p>
+<pre><code>printf 'SDV_PICARX_CONFIG=/etc/sdv-picarx/vehicle.json' | sudo tee -a /etc/default/sdv-fota-launcher</code></pre>
+    <p class="note">例の設定は前進モーター出力をゼロにしています。GPIO chip pathとモーター・操舵校正を実車で確認するまで、forward powerを有効にしないでください。</p>
   </section>
   <section class="card">
     <h2>署名鍵の信頼設定</h2>
@@ -50,13 +57,13 @@ sudo chmod 0644 /etc/sdv-fota/trusted-keys</code></pre>
   <section class="card">
     <h2>更新と試験起動</h2>
     <p>リリース環境でパッケージを作成し、Piで署名済みパッケージを導入します。</p>
-<pre><code>sdv-fota-sign /secure/release.seed release-2026 engine 1.1.0 2 5000 1 1 sdv-app update.sdvf
+<pre><code>sdv-fota-sign /secure/release.seed release-2026 vehicle 1.1.0 2 5000 1 1 sdv-app update.sdvf
 
 sudo sdv-fota install-url /var/lib/sdv-fota \
-  https://updates.example/engine/update.sdvf engine 1 1
+  https://updates.example/vehicle/update.sdvf vehicle 1 1
 sudo systemctl restart sdv-fota-launcher.service
 sudo sdv-fota status /var/lib/sdv-fota</code></pre>
-    <p>launcherはmanifestの試験時間内にアプリを <code>sdv-app</code> として起動し、同じユーザーで動くhealth commandが成功した場合だけtrial slotを確定します。サービス例は <code>deploy/systemd/sdv-fota-launcher.service</code> にあります。launcherはUID/GID切替に必要な2つのcapabilityだけを持ちます。アプリ固有のhealth commandはセットアップ時に必要です。</p>
+    <p>launcherはmanifestの試験時間内に車両イメージを <code>sdv-app</code> として起動し、同じユーザーで動く <code>sdv-picarx-health</code> が最近の制御周期成功を確認した場合だけtrial slotを確定します。サービス例は <code>deploy/systemd/sdv-fota-launcher.service</code> にあります。launcherはUID/GID切替に必要な2つのcapabilityだけを持ちます。</p>
 <pre><code>sudo install -m 0644 deploy/systemd/sdv-fota-launcher.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now sdv-fota-launcher.service</code></pre>
@@ -64,12 +71,12 @@ sudo systemctl enable --now sdv-fota-launcher.service</code></pre>
   <section class="card">
     <h2>適用範囲</h2>
     <ul>
-      <li>A/B対象は <code>/var/lib/sdv-fota</code> 内のアプリイメージです。</li>
+      <li>A/B対象は <code>/var/lib/sdv-fota</code> 内の車両アプリイメージです。VCU、Engine、Brake、Steeringの仮想ECUタスクを一つのイメージとして更新します。</li>
       <li>Pi OS、EEPROM、boot partition、raw deviceは書き換えません。</li>
-      <li>Linux上の自動テストはありますが、実Pi 5での電源断・再起動・復旧試験はまだ必要です。</li>
+      <li>Linux上の自動テストはありますが、Pi 5実機でのGPIO/I²C、入力・状態推定プロセス、校正、電源断・再起動・復旧試験はまだ必要です。</li>
       <li>AUTOSAR Classic実機には、採用BSW/MCAL、DCM、NvM、Flash、Bootloaderへの個別接続が必要です。</li>
     </ul>
-    <p class="sub">実装コードと詳細手順: <a href="https://github.com/Hidenori24/SDV/tree/main/rust/sdv-fota">rust/sdv-fota</a> · <a href="https://github.com/Hidenori24/SDV/blob/main/docs/design/fota-pi5-operations.md">Pi 5運用手順</a> · <a href="https://github.com/Hidenori24/SDV/blob/main/docs/design/fota_classic_architecture.md">Classic境界案</a></p>
+    <p class="sub">実装コードと詳細手順: <a href="https://github.com/Hidenori24/SDV/tree/main/rust/sdv-fota">rust/sdv-fota</a> · <a href="https://github.com/Hidenori24/SDV/tree/main/rust/sdv-picarx">rust/sdv-picarx</a> · <a href="https://github.com/Hidenori24/SDV/blob/main/docs/design/fota-pi5-operations.md">Pi 5運用手順</a> · <a href="https://github.com/Hidenori24/SDV/blob/main/docs/design/fota_classic_architecture.md">Classic境界案</a></p>
   </section>
 </main>
 </body>

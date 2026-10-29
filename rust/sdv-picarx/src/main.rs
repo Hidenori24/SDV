@@ -1,12 +1,16 @@
 use std::env;
 use std::fs;
+use std::io::{self, Write};
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
+use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use sdv_core::platform::VehicleExecutor;
+use sdv_core::platform::{PlatformInputs, VehicleExecutor, VehiclePlatform};
+use sdv_core::runtime::VehicleActuation;
 use sdv_core::runtime::VehicleRuntime;
 use sdv_core::runtime_host::{self, SystemClock, ECU_PERIOD};
 use sdv_picarx::linux_gpio::LinuxMotorDirections;
@@ -27,6 +31,7 @@ struct HostConfig {
     left_direction_line: u32,
     right_direction_line: u32,
     input_socket: PathBuf,
+    health_socket: PathBuf,
     input_max_age_ms: u64,
     motor: MotorConfig,
     vehicle: VehicleConfig,
@@ -38,6 +43,7 @@ impl HostConfig {
         let vehicle = Calibration::from(self.vehicle);
         if self.input_max_age_ms == 0
             || self.left_direction_line == self.right_direction_line
+            || self.input_socket == self.health_socket
             || !motor.is_valid()
             || !vehicle.is_valid()
         {
@@ -76,6 +82,131 @@ struct VehicleConfig {
     steering_center_degrees: f32,
     steering_direction: f32,
     max_forward_power: f32,
+}
+
+struct RuntimeHealth {
+    started_at: Instant,
+    last_cycle_ms: std::sync::atomic::AtomicU64,
+    saw_cycle: AtomicBool,
+    max_age: Duration,
+}
+
+impl RuntimeHealth {
+    fn new(max_age: Duration) -> Self {
+        Self {
+            started_at: Instant::now(),
+            last_cycle_ms: std::sync::atomic::AtomicU64::new(0),
+            saw_cycle: AtomicBool::new(false),
+            max_age,
+        }
+    }
+
+    fn mark_cycle(&self) {
+        let elapsed_ms = u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        self.last_cycle_ms.store(elapsed_ms, Ordering::Relaxed);
+        self.saw_cycle.store(true, Ordering::Release);
+    }
+
+    fn is_healthy(&self) -> bool {
+        if !self.saw_cycle.load(Ordering::Acquire) {
+            return false;
+        }
+        let now_ms = u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let last_cycle_ms = self.last_cycle_ms.load(Ordering::Relaxed);
+        now_ms.saturating_sub(last_cycle_ms) <= self.max_age.as_millis() as u64
+    }
+}
+
+struct HealthServer {
+    stop: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+    socket_path: PathBuf,
+    socket_identity: (u64, u64),
+}
+
+impl HealthServer {
+    fn bind(path: PathBuf, health: Arc<RuntimeHealth>) -> io::Result<Self> {
+        let listener = UnixListener::bind(&path)?;
+        let metadata = fs::symlink_metadata(&path)?;
+        if !metadata.file_type().is_socket() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "health endpoint is not a socket",
+            ));
+        }
+        listener.set_nonblocking(true)?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let worker = thread::Builder::new()
+            .name("sdv-picarx-health".into())
+            .spawn(move || {
+                while !worker_stop.load(Ordering::Relaxed) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            let status = if health.is_healthy() {
+                                b"READY\n".as_slice()
+                            } else {
+                                b"NOT_READY\n".as_slice()
+                            };
+                            let _ = stream.write_all(status);
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            thread::sleep(ECU_PERIOD);
+                        }
+                        Err(_) => break,
+                    }
+                }
+            })?;
+        Ok(Self {
+            stop,
+            thread: Some(worker),
+            socket_path: path,
+            socket_identity: (metadata.dev(), metadata.ino()),
+        })
+    }
+
+    fn shutdown(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(worker) = self.thread.take() {
+            let _ = worker.join();
+        }
+        if let Ok(metadata) = fs::symlink_metadata(&self.socket_path) {
+            if metadata.file_type().is_socket()
+                && (metadata.dev(), metadata.ino()) == self.socket_identity
+            {
+                let _ = fs::remove_file(&self.socket_path);
+            }
+        }
+    }
+}
+
+impl Drop for HealthServer {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+struct HealthReportingPlatform<P> {
+    platform: P,
+    health: Arc<RuntimeHealth>,
+}
+
+impl<P: VehiclePlatform> VehiclePlatform for HealthReportingPlatform<P> {
+    type Error = P::Error;
+
+    fn sample(&mut self) -> Result<PlatformInputs, Self::Error> {
+        self.platform.sample()
+    }
+
+    fn apply(&mut self, actuation: VehicleActuation) -> Result<(), Self::Error> {
+        self.platform.apply(actuation)?;
+        self.health.mark_cycle();
+        Ok(())
+    }
+
+    fn stop(&mut self) -> Result<(), Self::Error> {
+        self.platform.stop()
+    }
 }
 
 impl From<VehicleConfig> for Calibration {
@@ -123,6 +254,12 @@ fn run() -> Result<(), String> {
     let mut actuators = Actuators::initialize(i2c, directions, motor_calibration)
         .map_err(|error| format!("cannot initialize Robot HAT actuators: {error:?}"))?;
 
+    let health = Arc::new(RuntimeHealth::new(Duration::from_millis(
+        config.input_max_age_ms,
+    )));
+    let mut health_server = HealthServer::bind(config.health_socket, Arc::clone(&health))
+        .map_err(|error| format!("cannot bind vehicle health socket: {error}"))?;
+
     let mut inputs = UnixDatagramInputSource::bind(
         &config.input_socket,
         Duration::from_millis(config.input_max_age_ms),
@@ -146,18 +283,31 @@ fn run() -> Result<(), String> {
 
     let platform = PiCarX::new(inputs, actuators, vehicle_calibration)
         .map_err(|error| format!("cannot initialize PiCar-X platform: {error}"))?;
-    let mut executor = VehicleExecutor::new(VehicleRuntime::default(), platform);
-    runtime_host::run(&mut executor, &mut SystemClock::default(), || {
+    let reporting_platform = HealthReportingPlatform { platform, health };
+    let mut executor = VehicleExecutor::new(VehicleRuntime::default(), reporting_platform);
+    let result = runtime_host::run(&mut executor, &mut SystemClock::default(), || {
         shutdown.load(Ordering::Relaxed)
-    })
-    .map_err(|error| format!("vehicle runtime stopped: {error:?}"))
+    });
+    health_server.shutdown();
+    result.map_err(|error| format!("vehicle runtime stopped: {error:?}"))
 }
 
 fn config_path() -> Result<PathBuf, String> {
     let mut args = env::args_os();
     let program = args.next().unwrap_or_default();
+    config_path_from_args(program, args, env::var_os("SDV_PICARX_CONFIG"))
+}
+
+fn config_path_from_args(
+    program: std::ffi::OsString,
+    mut args: impl Iterator<Item = std::ffi::OsString>,
+    environment_path: Option<std::ffi::OsString>,
+) -> Result<PathBuf, String> {
     match (args.next(), args.next(), args.next()) {
         (Some(flag), Some(path), None) if flag == "--config" => Ok(PathBuf::from(path)),
+        (None, None, None) => environment_path
+            .map(PathBuf::from)
+            .ok_or_else(|| "set SDV_PICARX_CONFIG or pass --config <file.json>".into()),
         _ => Err(format!(
             "usage: {} --config <file.json>",
             PathBuf::from(program).display()
@@ -168,6 +318,11 @@ fn config_path() -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::BufRead;
+    use std::os::unix::net::UnixStream;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_SOCKET: AtomicU64 = AtomicU64::new(0);
 
     const VALID_CONFIG: &str = include_str!("../config/pi5.disabled.example.json");
 
@@ -177,6 +332,10 @@ mod tests {
         let (motor, vehicle) = config.calibrations().unwrap();
         assert_eq!(motor.maximum_duty, 0.0);
         assert_eq!(vehicle.max_forward_power, 0.0);
+
+        let fota_config: HostConfig =
+            serde_json::from_str(include_str!("../config/pi5.fota.disabled.example.json")).unwrap();
+        assert!(fota_config.calibrations().is_ok());
     }
 
     #[test]
@@ -190,5 +349,49 @@ mod tests {
         );
         let config: HostConfig = serde_json::from_str(&duplicate).unwrap();
         assert!(config.calibrations().is_err());
+    }
+
+    #[test]
+    fn fota_environment_supplies_config_when_image_has_no_arguments() {
+        let path = config_path_from_args(
+            "sdv-picarx".into(),
+            std::iter::empty(),
+            Some("/etc/sdv-picarx/vehicle.json".into()),
+        )
+        .unwrap();
+        assert_eq!(path, PathBuf::from("/etc/sdv-picarx/vehicle.json"));
+    }
+
+    #[test]
+    fn health_socket_requires_a_recent_successful_control_cycle() {
+        let path = std::env::temp_dir().join(format!(
+            "sdv-picarx-health-{}-{}.sock",
+            std::process::id(),
+            NEXT_SOCKET.fetch_add(1, Ordering::Relaxed)
+        ));
+        let health = Arc::new(RuntimeHealth::new(Duration::from_secs(1)));
+        let mut server = HealthServer::bind(path.clone(), Arc::clone(&health)).unwrap();
+
+        let mut response = String::new();
+        let mut stream = std::io::BufReader::new(UnixStream::connect(&path).unwrap());
+        stream.read_line(&mut response).unwrap();
+        assert_eq!(response, "NOT_READY\n");
+
+        health.mark_cycle();
+        response.clear();
+        let mut stream = std::io::BufReader::new(UnixStream::connect(&path).unwrap());
+        stream.read_line(&mut response).unwrap();
+        assert_eq!(response, "READY\n");
+
+        server.shutdown();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn health_expires_when_control_cycles_stop() {
+        let health = RuntimeHealth::new(Duration::from_nanos(1));
+        health.mark_cycle();
+        thread::sleep(Duration::from_millis(2));
+        assert!(!health.is_healthy());
     }
 }

@@ -1,6 +1,7 @@
 [Unit]
 Description=SDV A/B application slot launcher
 After=local-fs.target
+RequiresMountsFor=/var/lib/sdv-fota
 
 [Service]
 Type=simple
@@ -8,14 +9,17 @@ User=root
 Group=root
 SupplementaryGroups=
 EnvironmentFile=/etc/default/sdv-fota-launcher
-ExecStart=/usr/bin/sdv-fota-launcher /var/lib/sdv-fota /usr/bin/sdv-health-check
+RuntimeDirectory=sdv-picarx
+RuntimeDirectoryMode=0750
+ExecStartPre=/usr/bin/chown sdv-app:sdv-app /run/sdv-picarx
+ExecStart=/usr/bin/sdv-fota-launcher /var/lib/sdv-fota /usr/bin/sdv-picarx-health --socket /run/sdv-picarx/health.sock
 Restart=always
 RestartSec=2
 NoNewPrivileges=true
 CapabilityBoundingSet=CAP_SETUID CAP_SETGID
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/sdv-fota
+ReadWritePaths=/var/lib/sdv-fota /run/sdv-picarx
 
 [Install]
 WantedBy=multi-user.target

@@ -17,3 +17,7 @@ signal-hook = "0.3"
 [[bin]]
 name = "sdv-picarx"
 path = "src/main.rs"
+
+[[bin]]
+name = "sdv-picarx-health"
+path = "src/bin/sdv-picarx-health.rs"

@@ -52,11 +52,16 @@ The host validates calibration before opening devices, initializes the motor PWM
 for a first valid input packet before starting the 10 ms ECU loop. Missing or stale input, hardware
 I/O failure, a missed ECU deadline, SIGINT, and SIGTERM request a motor stop. The process removes
 its input socket path on exit. Vehicle state in each packet must be supplied by a real sensor or
-state estimator; this crate does not provide one.
+state estimator; this crate does not provide one. A health socket reports ready only after a
+successful actuator cycle and turns unhealthy if successful cycles stop for longer than the input
+freshness limit. The `sdv-picarx-health --socket <path>` command is suitable for the FOTA launcher's
+trial check. With no command line arguments, the vehicle executable reads its config path from
+`SDV_PICARX_CONFIG`, as used by the FOTA systemd service.
 
 `config/pi5.disabled.example.json` is a commissioning template. Its zero motor duty and zero
-forward-power limit keep drive output disabled. Replace the GPIO chip placeholder and calibrate
-the motor and steering values against the target PiCar-X before enabling forward power.
+forward-power limit keep drive output disabled. `config/pi5.fota.disabled.example.json` uses the
+systemd runtime directory for input and health sockets. Replace the GPIO chip placeholder and
+calibrate motor and steering values against the target PiCar-X before enabling forward power.
 
 Build and run it with:
 

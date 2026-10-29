@@ -1,0 +1,24 @@
+{
+  "i2c_device": "/dev/i2c-1",
+  "robot_hat_address": 20,
+  "gpio_chip": "/dev/gpiochipN",
+  "left_direction_line": 23,
+  "right_direction_line": 24,
+  "input_socket": "/run/sdv-picarx/input.sock",
+  "health_socket": "/run/sdv-picarx/health.sock",
+  "input_max_age_ms": 100,
+  "motor": {
+    "left_forward_high": true,
+    "right_forward_high": false,
+    "minimum_duty": 0.0,
+    "maximum_duty": 0.0
+  },
+  "vehicle": {
+    "max_drive_accel_mps2": 1.0,
+    "max_steering_rad": 0.1,
+    "max_steering_servo_degrees": 0.001,
+    "steering_center_degrees": 0.0,
+    "steering_direction": 1.0,
+    "max_forward_power": 0.0
+  }
+}
