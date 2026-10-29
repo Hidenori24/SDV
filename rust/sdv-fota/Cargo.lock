@@ -168,6 +168,7 @@ dependencies = [
 name = "sdv-fota"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "sdv-sec",
  "serde",
  "serde_json",

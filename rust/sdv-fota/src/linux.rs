@@ -15,7 +15,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::os::unix::process::CommandExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -33,6 +33,8 @@ const LOCK_NB: i32 = 4;
 const LOCK_UN: i32 = 8;
 const TRIAL_HEALTH_STABILITY_WINDOW: Duration = Duration::from_secs(2);
 const TRIAL_HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const TRIAL_PROCESS_STOP_TIMEOUT: Duration = Duration::from_secs(2);
+const PROCESS_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 // Linux O_NOFOLLOW: reject a final path component that is a symbolic link.
 const O_NOFOLLOW: i32 = 0x20_000;
 const UNSAFE_WRITE_BITS: u32 = 0o022;
@@ -522,7 +524,17 @@ fn run_selected_image_with_identity(
     } else {
         0
     };
-    let mut child = match command_with_identity(&image, identity.as_ref()).spawn() {
+    let mut image_command = command_with_identity(&image, identity.as_ref());
+    if decision.trial {
+        image_command
+            .env("SDV_TRIAL_SLOT", slot_name(decision.slot))
+            .env("SDV_IMAGE_PATH", &image);
+    } else {
+        image_command
+            .env_remove("SDV_TRIAL_SLOT")
+            .env_remove("SDV_IMAGE_PATH");
+    }
+    let mut child = match image_command.spawn() {
         Ok(child) => child,
         Err(error) => {
             if decision.trial {
@@ -552,8 +564,35 @@ fn run_selected_image_with_identity(
             let _ = child.wait();
             return Err(error);
         }
+        stop_trial_process_for_restart(&mut child)?;
+        // Report the successful commit to callers. The systemd unit uses Restart=always, so its
+        // next launch starts the committed image without SDV_TRIAL_SLOT.
+        return Ok(ExitStatus::from_raw(0));
     }
     child.wait().map_err(Error::Io)
+}
+
+fn stop_trial_process_for_restart(child: &mut Child) -> Result<ExitStatus, Error> {
+    let process_id = libc::pid_t::try_from(child.id()).map_err(|_| Error::InvalidRunIdentity)?;
+    // The PiCar-X app catches SIGTERM and stops its actuators before systemd starts the committed
+    // image again without the trial environment.
+    if unsafe { libc::kill(process_id, libc::SIGTERM) } != 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            return Err(Error::Io(error));
+        }
+    }
+    let shutdown_deadline = Instant::now() + TRIAL_PROCESS_STOP_TIMEOUT;
+    loop {
+        if let Some(status) = child.try_wait().map_err(Error::Io)? {
+            return Ok(status);
+        }
+        if Instant::now() >= shutdown_deadline {
+            child.kill().map_err(Error::Io)?;
+            return child.wait().map_err(Error::Io);
+        }
+        thread::sleep(PROCESS_EXIT_POLL_INTERVAL);
+    }
 }
 
 fn wait_for_trial_health(

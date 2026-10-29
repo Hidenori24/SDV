@@ -10,6 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use sdv_core::platform::{PlatformInputs, VehicleExecutor, VehiclePlatform};
+use sdv_core::rte::ActuatorCmd;
 use sdv_core::runtime::VehicleActuation;
 use sdv_core::runtime::VehicleRuntime;
 use sdv_core::runtime_host::{self, SystemClock, ECU_PERIOD};
@@ -33,6 +34,8 @@ struct HostConfig {
     input_socket: PathBuf,
     health_socket: PathBuf,
     input_max_age_ms: u64,
+    trial_stationary_speed_tolerance_mps: f32,
+    trial_stationary_throttle_tolerance: f32,
     motor: MotorConfig,
     vehicle: VehicleConfig,
 }
@@ -42,6 +45,10 @@ impl HostConfig {
         let motor = MotorCalibration::from(self.motor);
         let vehicle = Calibration::from(self.vehicle);
         if self.input_max_age_ms == 0
+            || !self.trial_stationary_speed_tolerance_mps.is_finite()
+            || self.trial_stationary_speed_tolerance_mps < 0.0
+            || !self.trial_stationary_throttle_tolerance.is_finite()
+            || self.trial_stationary_throttle_tolerance < 0.0
             || self.left_direction_line == self.right_direction_line
             || self.input_socket == self.health_socket
             || !motor.is_valid()
@@ -88,17 +95,35 @@ struct RuntimeHealth {
     started_at: Instant,
     last_cycle_ms: std::sync::atomic::AtomicU64,
     saw_cycle: AtomicBool,
+    stationary: AtomicBool,
     max_age: Duration,
+    stationary_speed_tolerance_mps: f32,
+    stationary_throttle_tolerance: f32,
 }
 
 impl RuntimeHealth {
-    fn new(max_age: Duration) -> Self {
+    fn new(
+        max_age: Duration,
+        stationary_speed_tolerance_mps: f32,
+        stationary_throttle_tolerance: f32,
+    ) -> Self {
         Self {
             started_at: Instant::now(),
             last_cycle_ms: std::sync::atomic::AtomicU64::new(0),
             saw_cycle: AtomicBool::new(false),
+            stationary: AtomicBool::new(false),
             max_age,
+            stationary_speed_tolerance_mps,
+            stationary_throttle_tolerance,
         }
+    }
+
+    fn record_sample(&self, inputs: Option<&PlatformInputs>) {
+        let stationary = inputs.is_some_and(|inputs| {
+            inputs.vehicle.v.abs() <= self.stationary_speed_tolerance_mps
+                && inputs.driver.throttle.abs() <= self.stationary_throttle_tolerance
+        });
+        self.stationary.store(stationary, Ordering::Release);
     }
 
     fn mark_cycle(&self) {
@@ -108,7 +133,7 @@ impl RuntimeHealth {
     }
 
     fn is_healthy(&self) -> bool {
-        if !self.saw_cycle.load(Ordering::Acquire) {
+        if !self.saw_cycle.load(Ordering::Acquire) || !self.stationary.load(Ordering::Acquire) {
             return false;
         }
         let now_ms = u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -189,23 +214,52 @@ impl Drop for HealthServer {
 struct HealthReportingPlatform<P> {
     platform: P,
     health: Arc<RuntimeHealth>,
+    trial_mode: bool,
 }
 
 impl<P: VehiclePlatform> VehiclePlatform for HealthReportingPlatform<P> {
     type Error = P::Error;
 
     fn sample(&mut self) -> Result<PlatformInputs, Self::Error> {
-        self.platform.sample()
+        match self.platform.sample() {
+            Ok(inputs) => {
+                self.health.record_sample(Some(&inputs));
+                Ok(inputs)
+            }
+            Err(error) => {
+                self.health.record_sample(None);
+                Err(error)
+            }
+        }
     }
 
     fn apply(&mut self, actuation: VehicleActuation) -> Result<(), Self::Error> {
-        self.platform.apply(actuation)?;
+        self.platform.apply(if self.trial_mode {
+            trial_safe_actuation(actuation)
+        } else {
+            actuation
+        })?;
         self.health.mark_cycle();
         Ok(())
     }
 
     fn stop(&mut self) -> Result<(), Self::Error> {
         self.platform.stop()
+    }
+}
+
+fn trial_safe_actuation(actuation: VehicleActuation) -> VehicleActuation {
+    VehicleActuation {
+        command: ActuatorCmd::default(),
+        safety: actuation.safety,
+    }
+}
+
+fn trial_mode_from_env() -> Result<bool, String> {
+    match env::var_os("SDV_TRIAL_SLOT") {
+        None => Ok(false),
+        Some(slot) if slot == "a" || slot == "b" => Ok(true),
+        Some(_) => Err("SDV_TRIAL_SLOT must be `a` or `b`".into()),
     }
 }
 
@@ -230,6 +284,7 @@ fn main() {
 }
 
 fn run() -> Result<(), String> {
+    let trial_mode = trial_mode_from_env()?;
     let config_path = config_path()?;
     let config_data = fs::read(&config_path)
         .map_err(|error| format!("cannot read {}: {error}", config_path.display()))?;
@@ -254,9 +309,11 @@ fn run() -> Result<(), String> {
     let mut actuators = Actuators::initialize(i2c, directions, motor_calibration)
         .map_err(|error| format!("cannot initialize Robot HAT actuators: {error:?}"))?;
 
-    let health = Arc::new(RuntimeHealth::new(Duration::from_millis(
-        config.input_max_age_ms,
-    )));
+    let health = Arc::new(RuntimeHealth::new(
+        Duration::from_millis(config.input_max_age_ms),
+        config.trial_stationary_speed_tolerance_mps,
+        config.trial_stationary_throttle_tolerance,
+    ));
     let mut health_server = HealthServer::bind(config.health_socket, Arc::clone(&health))
         .map_err(|error| format!("cannot bind vehicle health socket: {error}"))?;
 
@@ -283,7 +340,11 @@ fn run() -> Result<(), String> {
 
     let platform = PiCarX::new(inputs, actuators, vehicle_calibration)
         .map_err(|error| format!("cannot initialize PiCar-X platform: {error}"))?;
-    let reporting_platform = HealthReportingPlatform { platform, health };
+    let reporting_platform = HealthReportingPlatform {
+        platform,
+        health,
+        trial_mode,
+    };
     let mut executor = VehicleExecutor::new(VehicleRuntime::default(), reporting_platform);
     let result = runtime_host::run(&mut executor, &mut SystemClock::default(), || {
         shutdown.load(Ordering::Relaxed)
@@ -349,6 +410,13 @@ mod tests {
         );
         let config: HostConfig = serde_json::from_str(&duplicate).unwrap();
         assert!(config.calibrations().is_err());
+
+        let invalid_stationary_limit = VALID_CONFIG.replace(
+            "\"trial_stationary_speed_tolerance_mps\": 0.02",
+            "\"trial_stationary_speed_tolerance_mps\": -0.02",
+        );
+        let config: HostConfig = serde_json::from_str(&invalid_stationary_limit).unwrap();
+        assert!(config.calibrations().is_err());
     }
 
     #[test]
@@ -369,7 +437,7 @@ mod tests {
             std::process::id(),
             NEXT_SOCKET.fetch_add(1, Ordering::Relaxed)
         ));
-        let health = Arc::new(RuntimeHealth::new(Duration::from_secs(1)));
+        let health = Arc::new(RuntimeHealth::new(Duration::from_secs(1), 0.02, 0.0));
         let mut server = HealthServer::bind(path.clone(), Arc::clone(&health)).unwrap();
 
         let mut response = String::new();
@@ -377,11 +445,27 @@ mod tests {
         stream.read_line(&mut response).unwrap();
         assert_eq!(response, "NOT_READY\n");
 
+        health.record_sample(Some(&PlatformInputs::default()));
         health.mark_cycle();
         response.clear();
         let mut stream = std::io::BufReader::new(UnixStream::connect(&path).unwrap());
         stream.read_line(&mut response).unwrap();
         assert_eq!(response, "READY\n");
+
+        let moving = PlatformInputs {
+            vehicle: sdv_core::model::VehicleState {
+                v: 0.1,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        health.record_sample(Some(&moving));
+        response.clear();
+        let mut stream = std::io::BufReader::new(UnixStream::connect(&path).unwrap());
+        stream.read_line(&mut response).unwrap();
+        assert_eq!(response, "NOT_READY\n");
+
+        health.record_sample(Some(&PlatformInputs::default()));
 
         server.shutdown();
         assert!(!path.exists());
@@ -389,9 +473,44 @@ mod tests {
 
     #[test]
     fn health_expires_when_control_cycles_stop() {
-        let health = RuntimeHealth::new(Duration::from_nanos(1));
+        let health = RuntimeHealth::new(Duration::from_nanos(1), 0.02, 0.0);
+        health.record_sample(Some(&PlatformInputs::default()));
         health.mark_cycle();
         thread::sleep(Duration::from_millis(2));
         assert!(!health.is_healthy());
+    }
+
+    #[test]
+    fn health_rejects_nonzero_throttle_even_when_estimated_speed_is_zero() {
+        let health = RuntimeHealth::new(Duration::from_secs(1), 0.02, 0.0);
+        health.record_sample(Some(&PlatformInputs {
+            driver: sdv_core::rte::DriverInput {
+                throttle: 0.1,
+                ..Default::default()
+            },
+            ..Default::default()
+        }));
+        health.mark_cycle();
+        assert!(!health.is_healthy());
+    }
+
+    #[test]
+    fn trial_actuation_suppresses_commands_and_preserves_safety_state() {
+        let actuation = VehicleActuation {
+            command: ActuatorCmd {
+                drive_accel_cmd: 1.0,
+                brake_decel_cmd: 0.5,
+                steer_angle_cmd: 0.25,
+            },
+            safety: sdv_core::rte::Safety {
+                estop: true,
+                ..Default::default()
+            },
+        };
+
+        let safe = trial_safe_actuation(actuation);
+
+        assert_eq!(safe.command, ActuatorCmd::default());
+        assert_eq!(safe.safety, actuation.safety);
     }
 }
