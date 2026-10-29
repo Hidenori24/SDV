@@ -47,9 +47,13 @@ fn write_slot_image(root: &Path, slot: Slot, contents: &str) {
 }
 
 #[test]
-fn https_ingress_rejects_plain_http_urls() {
+fn https_ingress_rejects_plain_http_urls_and_embedded_credentials() {
     assert!(matches!(
         HttpsPackageSource::open("http://updates.example.test/update.sdvf"),
+        Err(sdv_fota::linux::Error::InvalidHttpsUrl)
+    ));
+    assert!(matches!(
+        HttpsPackageSource::open("https://user:password@updates.example.test/update.sdvf"),
         Err(sdv_fota::linux::Error::InvalidHttpsUrl)
     ));
 }
