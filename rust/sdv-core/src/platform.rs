@@ -73,6 +73,10 @@ impl<P: VehiclePlatform> VehicleExecutor<P> {
     pub fn platform(&self) -> &P {
         &self.platform
     }
+
+    pub fn platform_mut(&mut self) -> &mut P {
+        &mut self.platform
+    }
 }
 
 fn finite(input: &PlatformInputs) -> bool {
