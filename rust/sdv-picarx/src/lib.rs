@@ -1,5 +1,7 @@
 //! PiCar-X actuator mapping. Concrete Robot HAT device access is supplied by `RobotHat`.
 
+pub mod pwm;
+
 use sdv_core::platform::{PlatformInputs, VehiclePlatform};
 use sdv_core::rte::SystemState;
 use sdv_core::runtime::VehicleActuation;
