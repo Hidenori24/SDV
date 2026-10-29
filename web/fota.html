@@ -26,8 +26,9 @@ header,main{max-width:900px;margin:auto;padding:18px}header{display:flex;justify
   --bin sdv-fota --bin sdv-fota-launcher
 sudo install -m 0755 rust/sdv-fota/target/release/sdv-fota /usr/bin/
 sudo install -m 0755 rust/sdv-fota/target/release/sdv-fota-launcher /usr/bin/
-cargo build --release --manifest-path rust/sdv-picarx/Cargo.toml --bin sdv-picarx --bin sdv-picarx-health
-sudo install -m 0755 rust/sdv-picarx/target/release/sdv-picarx-health /usr/bin/</code></pre>
+cargo build --release --manifest-path rust/sdv-picarx/Cargo.toml --bin sdv-picarx --bin sdv-picarx-health --bin sdv-picarx-discover
+sudo install -m 0755 rust/sdv-picarx/target/release/sdv-picarx-health /usr/bin/
+sudo install -m 0755 rust/sdv-picarx/target/release/sdv-picarx-discover /usr/bin/</code></pre>
     <p>署名コマンドは保護されたリリースホストで別にビルドします。</p>
 <pre><code>cargo build --release --manifest-path rust/sdv-fota/Cargo.toml \
   --features host-signing --bin sdv-fota-sign</code></pre>
