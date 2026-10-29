@@ -49,6 +49,7 @@ sudo chmod 0644 /etc/default/sdv-fota-launcher</code></pre>
   <section class="card">
     <h2>署名鍵の信頼設定</h2>
     <p>リリース環境の <code>sdv-fota-sign</code> が表示する公開鍵を、root所有の <code>/etc/sdv-fota/trusted-keys</code> に登録します。秘密鍵はPiへコピーしません。</p>
+    <p>署名seedはリリース環境の通常ファイルに保管し、Unix modeを <code>0600</code> にします。署名ツールはgroup/otherから読めるseedを拒否します。</p>
 <pre><code>sudo install -d -o root -g root -m 0755 /etc/sdv-fota
 PUBLIC_KEY_HEX='&lt;key printed by sdv-fota-sign&gt;'
 printf '%s %s\n' 'release-2026' "$PUBLIC_KEY_HEX" | sudo tee /etc/sdv-fota/trusted-keys
@@ -59,7 +60,8 @@ sudo chmod 0644 /etc/sdv-fota/trusted-keys</code></pre>
   <section class="card">
     <h2>更新と試験起動</h2>
     <p>リリース環境でパッケージを作成し、Piで署名済みパッケージを導入します。</p>
-<pre><code>sdv-fota-sign --seed /secure/release.seed --key-id release-2026 --target vehicle \
+<pre><code>chmod 0600 /secure/release.seed
+sdv-fota-sign --seed /secure/release.seed --key-id release-2026 --target vehicle \
   --version 1.1.0 --security-version 2 --trial-ms 5000 --config-schema 1 \
   --signal-if-version 1 --image sdv-image.bin --output update.sdvf
 

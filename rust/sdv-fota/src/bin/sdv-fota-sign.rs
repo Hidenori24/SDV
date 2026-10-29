@@ -1,14 +1,28 @@
-use sdv_fota::{encode_package, Ecu, MAX_MANIFEST_BYTES};
+use sdv_fota::{
+    encode_package, validate_signed_manifest, Ecu, TrustKey, ValidationContext, MAX_MANIFEST_BYTES,
+};
 use sdv_sec::{ed25519_public_key, ed25519_sign, Sha256Context};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+
+const MAX_SEED_FILE_BYTES: usize = 128;
 
 struct Seed([u8; 32]);
 
 impl Drop for Seed {
     fn drop(&mut self) {
-        self.0.fill(0);
+        zeroize(&mut self.0);
+    }
+}
+
+struct SeedText(Vec<u8>);
+
+impl Drop for SeedText {
+    fn drop(&mut self) {
+        zeroize(&mut self.0);
     }
 }
 
@@ -35,7 +49,7 @@ fn main() {
 
 fn run(args: Vec<String>) -> Result<(), String> {
     let options = parse_options(args)?;
-    let seed = Seed(read_seed(&options.seed_file)?);
+    let seed = read_seed(&options.seed_file)?;
     let (ecu, swc) = match options.target.as_str() {
         "engine" => (Ecu::Engine, "EngineSWC"),
         "brake" => (Ecu::Brake, "BrakeSWC"),
@@ -50,6 +64,11 @@ fn run(args: Vec<String>) -> Result<(), String> {
     let signal_if_version = options.signal_if_version;
     let image_path = options.image_path;
     let output_path = options.output_path;
+
+    let config_schema = u32::try_from(config_schema)
+        .map_err(|_| "config schema must fit an unsigned 32-bit integer".to_owned())?;
+    let signal_if_version = u32::try_from(signal_if_version)
+        .map_err(|_| "signal interface version must fit an unsigned 32-bit integer".to_owned())?;
 
     let (payload_size, payload_digest) = hash_file(&image_path)?;
     if payload_size == 0 || payload_size > u64::from(u32::MAX) {
@@ -83,6 +102,26 @@ fn run(args: Vec<String>) -> Result<(), String> {
     }
     let signature = ed25519_sign(&seed.0, &manifest_bytes);
     let public_key = ed25519_public_key(&seed.0);
+    let validation_key = TrustKey {
+        key_id: &options.key_id,
+        public_key: &public_key,
+    };
+    let validation_context = ValidationContext {
+        target_ecu: ecu,
+        current_version: "0.0.0",
+        highest_security_version: 0,
+        config_schema,
+        signal_if_version,
+    };
+    validate_signed_manifest(
+        &options.key_id,
+        &signature,
+        &manifest_bytes,
+        payload_size,
+        &[validation_key],
+        &validation_context,
+    )
+    .map_err(|error| format!("release metadata is invalid: {error:?}"))?;
     let result = write_package(
         &options.key_id,
         &signature,
@@ -235,18 +274,58 @@ fn hash_file(path: &Path) -> Result<(u64, [u8; 32]), String> {
     Ok((size, digest.finalize()))
 }
 
-fn read_seed(path: &Path) -> Result<[u8; 32], String> {
-    let text =
-        fs::read_to_string(path).map_err(|error| format!("cannot read seed file: {error}"))?;
-    let text = text.trim();
-    if text.len() != 64 {
+fn read_seed(path: &Path) -> Result<Seed, String> {
+    let path_metadata =
+        fs::symlink_metadata(path).map_err(|error| format!("cannot inspect seed file: {error}"))?;
+    if !path_metadata.file_type().is_file() {
+        return Err("seed path must be a regular file".into());
+    }
+    let file = File::open(path).map_err(|error| format!("cannot read seed file: {error}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("cannot inspect seed file: {error}"))?;
+    if !metadata.is_file() {
+        return Err("seed path must be a regular file".into());
+    }
+    #[cfg(unix)]
+    if metadata.permissions().mode() & 0o077 != 0 {
+        return Err("seed file must not be accessible by group or other users".into());
+    }
+
+    let mut text = SeedText(Vec::with_capacity(MAX_SEED_FILE_BYTES + 1));
+    file.take((MAX_SEED_FILE_BYTES + 1) as u64)
+        .read_to_end(&mut text.0)
+        .map_err(|error| format!("cannot read seed file: {error}"))?;
+    if text.0.len() > MAX_SEED_FILE_BYTES {
+        return Err("seed file is too large".into());
+    }
+    let start = text
+        .0
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(text.0.len());
+    let end = text
+        .0
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())
+        .map_or(start, |index| index + 1);
+    let bytes = &text.0[start..end];
+    if bytes.len() != 64 {
         return Err("seed file must contain exactly 64 hexadecimal characters".into());
     }
-    let mut seed = [0u8; 32];
-    for (index, pair) in text.as_bytes().chunks_exact(2).enumerate() {
-        seed[index] = (hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?;
+    let mut seed = Seed([0u8; 32]);
+    for (index, pair) in bytes.chunks_exact(2).enumerate() {
+        seed.0[index] = (hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?;
     }
     Ok(seed)
+}
+
+fn zeroize(bytes: &mut [u8]) {
+    for byte in bytes {
+        // SAFETY: each reference points to a writable byte owned by the secret buffer.
+        unsafe { std::ptr::write_volatile(byte, 0) };
+    }
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
 }
 
 fn hex_nibble(byte: u8) -> Result<u8, String> {
