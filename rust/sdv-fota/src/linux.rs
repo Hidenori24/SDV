@@ -64,6 +64,8 @@ pub enum Error {
     TrailingPackageData,
     UpdateInProgress,
     InvalidHttpsUrl,
+    InvalidClientCredentials,
+    UnsafeClientCredentials,
     DownloadFailed,
     InvalidRunIdentity,
     UnsafeStatePath,
@@ -115,32 +117,58 @@ pub struct HttpsPackageSource {
 
 impl HttpsPackageSource {
     pub fn open(url: &str) -> Result<Self, Error> {
+        Self::open_with_client_identity(url, None, None)
+    }
+
+    pub fn open_with_client_identity(
+        url: &str,
+        client_certificate: Option<&Path>,
+        client_key: Option<&Path>,
+    ) -> Result<Self, Error> {
         let Some(host_and_path) = url.strip_prefix("https://") else {
             return Err(Error::InvalidHttpsUrl);
         };
-        if host_and_path.is_empty() || host_and_path.starts_with('/') {
+        let authority = host_and_path.split('/').next().unwrap_or_default();
+        if authority.is_empty() || authority.contains('@') {
             return Err(Error::InvalidHttpsUrl);
         }
-        let mut child = Command::new("curl")
-            .args([
-                "--disable",
-                "--fail",
-                "--location",
-                "--silent",
-                "--show-error",
-                "--proto",
-                "=https",
-                "--proto-redir",
-                "=https",
-                "--connect-timeout",
-                "20",
-                "--max-time",
-                "900",
-                "--output",
-                "-",
-                "--",
-                url,
-            ])
+        match (client_certificate, client_key) {
+            (None, None) => {}
+            (Some(certificate), Some(key)) => {
+                validate_client_identity_file(certificate, false)?;
+                validate_client_identity_file(key, true)?;
+            }
+            _ => return Err(Error::InvalidClientCredentials),
+        }
+
+        let mut command = Command::new("curl");
+        command.args([
+            "--disable",
+            "--fail",
+            "--location",
+            "--silent",
+            "--show-error",
+            "--proto",
+            "=https",
+            "--proto-redir",
+            "=https",
+            "--connect-timeout",
+            "20",
+            "--max-time",
+            "900",
+            "--output",
+            "-",
+        ]);
+        if let (Some(certificate), Some(key)) = (client_certificate, client_key) {
+            command
+                .arg("--cert")
+                .arg(certificate)
+                .arg("--key")
+                .arg(key);
+        }
+        let mut child = command
+            .arg("--")
+            .arg(url)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .spawn()?;
@@ -150,6 +178,29 @@ impl HttpsPackageSource {
             stdout,
         })
     }
+}
+
+fn validate_client_identity_file(path: &Path, private_key: bool) -> Result<(), Error> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let parent_metadata = fs::symlink_metadata(parent)?;
+    let metadata = fs::symlink_metadata(path)?;
+    let owner = unsafe { geteuid() };
+    let parent_mode = parent_metadata.permissions().mode();
+    let mode = metadata.permissions().mode();
+    if !parent_metadata.file_type().is_dir()
+        || parent_metadata.uid() != owner
+        || parent_mode & UNSAFE_WRITE_BITS != 0
+        || !metadata.file_type().is_file()
+        || metadata.uid() != owner
+        || mode & UNSAFE_WRITE_BITS != 0
+        || (private_key && mode & 0o077 != 0)
+    {
+        return Err(Error::UnsafeClientCredentials);
+    }
+    Ok(())
 }
 
 impl super::PackageSource for HttpsPackageSource {
