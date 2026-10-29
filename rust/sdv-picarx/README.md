@@ -67,6 +67,7 @@ It accepts one named option, `--config <file.json>`. The JSON config contains:
 | `i2c_device`, `robot_hat_address` | Linux I2C device path and 7-bit Robot HAT address |
 | `gpio_chip`, `left_direction_line`, `right_direction_line` | GPIO chip device path and line offsets |
 | `input_socket`, `input_max_age_ms` | Local input socket path and maximum input age |
+| `trial_stationary_speed_tolerance_mps`, `trial_stationary_throttle_tolerance` | Maximum estimated speed and requested throttle accepted by the FOTA trial health check |
 | `motor` | Forward direction polarity and measured minimum/maximum PWM duty |
 | `vehicle` | Measured drive and steering calibration used by the ECU adapter |
 
@@ -75,10 +76,15 @@ for a first valid input packet before starting the 10 ms ECU loop. Missing or st
 I/O failure, a missed ECU deadline, SIGINT, and SIGTERM request a motor stop. The process removes
 its input socket path on exit. Vehicle state in each packet must be supplied by a real sensor or
 state estimator; this crate does not provide one. A health socket reports ready only after a
-successful actuator cycle and turns unhealthy if successful cycles stop for longer than the input
-freshness limit. The `sdv-picarx-health --socket <path>` command is suitable for the FOTA launcher's
-trial check. With no command line arguments, the vehicle executable reads its config path from
-`SDV_PICARX_CONFIG`, as used by the FOTA systemd service.
+successful actuator cycle, while the input remains fresh, the estimated speed stays within the
+configured stationary tolerance, and throttle demand stays within its configured tolerance. When
+`SDV_TRIAL_SLOT` is set to `a` or `b`, the runtime suppresses all actuator commands until the FOTA
+launcher commits the image and restarts the service in normal mode. Missing, stale, or moving
+snapshots fail the FOTA trial health check. This software interlock trusts the external state
+estimator; it cannot independently prove physical standstill. The
+`sdv-picarx-health --socket <path>` command is suitable for the FOTA launcher. With no command line
+arguments, the vehicle executable reads its config path from `SDV_PICARX_CONFIG`, as used by the
+FOTA systemd service.
 
 `config/pi5.disabled.example.json` is a commissioning template. Its zero motor duty and zero
 forward-power limit keep drive output disabled. `config/pi5.fota.disabled.example.json` uses the

@@ -7,6 +7,8 @@
   "input_socket": "/run/sdv-picarx/input.sock",
   "health_socket": "/run/sdv-picarx/health.sock",
   "input_max_age_ms": 100,
+  "trial_stationary_speed_tolerance_mps": 0.02,
+  "trial_stationary_throttle_tolerance": 0.0,
   "motor": {
     "left_forward_high": true,
     "right_forward_high": false,

@@ -282,7 +282,15 @@ fn linux_launcher_commits_trial_after_health_command_succeeds() {
     let root = TempRoot::new();
     let mut boot = FileBootControl::new(&root.0);
     boot.initialize(Slot::A, "1.0.0", 1).unwrap();
-    write_slot_image(&root.0, Slot::B, "#!/bin/sh\nexec sleep 2\n");
+    let candidate_trial_slot = root.0.join("candidate-trial-slot");
+    write_slot_image(
+        &root.0,
+        Slot::B,
+        &format!(
+            "#!/bin/sh\nprintf '%s' \"$SDV_TRIAL_SLOT\" > {}\nexec sleep 2\n",
+            candidate_trial_slot.display()
+        ),
+    );
     let health = root.0.join("health-check");
     write_executable(
         &health,
@@ -300,6 +308,7 @@ fn linux_launcher_commits_trial_after_health_command_succeeds() {
     let status = run_selected_image(&root.0, &health, &[]).unwrap();
 
     assert!(status.success());
+    assert_eq!(fs::read_to_string(candidate_trial_slot).unwrap(), "b");
     let state = boot.state().unwrap();
     assert_eq!(state.active, Slot::B);
     assert_eq!(state.active_version, "1.1.0");

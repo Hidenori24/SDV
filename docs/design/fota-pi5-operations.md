@@ -142,10 +142,16 @@ sudo systemctl restart sdv-fota-launcher.service
 states, and exits nonzero unless every bootable image has a verified digest. It can be used as a
 deployment gate or a monitoring check.
 
-The Pi Linux trial health check does not currently read a vehicle-stopped interlock. On a real
-PiCar-X, restart the launcher only after the vehicle is fully stopped and the external driver-input
-peer is no longer requesting motion. The health check proves a recent control cycle and stable
-process; it does not prove that the vehicle is stationary.
+The launcher sets `SDV_TRIAL_SLOT` on a trial candidate. The PiCar-X image recognizes this mode and
+holds all vehicle actuator commands at zero while its health is checked. Health reports ready only
+when the latest fresh vehicle snapshot estimates speed within
+`trial_stationary_speed_tolerance_mps` and throttle input is within
+`trial_stationary_throttle_tolerance`, in addition to a recent successful actuator write. Otherwise
+the trial times out or fails and rolls back. Configure these limits in the vehicle JSON before
+deployment. The gate depends on the external estimator/input peer and cannot independently prove
+physical standstill; mechanically secure the vehicle during a trial. After a successful commit, the
+launcher stops the safe-mode trial process. The systemd unit restarts it from the committed slot in
+normal mode. A caller running the launcher directly must restart it after a successful trial.
 
 If a trial is pending but the launcher cannot complete its automatic recovery, an operator can
 clear the trial metadata explicitly. This command keeps the current active slot and makes it the
@@ -188,9 +194,10 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now sdv-fota-launcher.service
 ```
 
-`sdv-picarx-health` reports ready only after the vehicle application completes a recent ECU cycle
-and actuator write. Keep the external input and vehicle-state process available during the trial;
-the FOTA trial fails when it cannot provide fresh snapshots.
+`sdv-picarx-health` reports ready only after a recent ECU cycle and zeroed actuator write with an
+estimated stationary vehicle and zero throttle demand. Keep the external input and vehicle-state
+process available during the trial; the FOTA trial fails when snapshots are stale, missing, or
+report motion.
 
 ## Current boundary
 
