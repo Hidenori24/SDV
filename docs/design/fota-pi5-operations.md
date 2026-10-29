@@ -50,6 +50,12 @@ sudo chown root:root /etc/default/sdv-fota-launcher
 sudo chmod 0644 /etc/default/sdv-fota-launcher
 ```
 
+The configured state root, `slots` directory, slot directories, image files, and boot records must
+be owned by the account running the FOTA tools (root in this setup). Directories and files must not
+be writable by group or other users. The tools never follow symlinked state roots, slot directories,
+images, boot records, or lock files. Update images and boot records are created through unique, exclusive
+temporary files before being atomically renamed into place.
+
 The systemd launcher retains only `CAP_SETUID` and `CAP_SETGID` so it can drop privileges before
 starting either the application or its health command. It is otherwise restricted to writing
 under `/var/lib/sdv-fota`.
@@ -116,8 +122,10 @@ sudo sdv-fota status --state-root /var/lib/sdv-fota
 sudo systemctl restart sdv-fota-launcher.service
 ```
 
-The restart selects the pending trial slot. The launcher starts the image and repeatedly runs the
-configured health command until it succeeds or `trial_ms` expires. During a trial, that command
+The `init` command refuses to record a slot without a non-empty regular executable image. A restart selects
+the pending trial slot; the launcher checks the selected image is regular and executable, then
+repeatedly runs the configured health command until it succeeds or `trial_ms` expires. A trial
+image that is missing or not executable is rolled back. During a trial, the health command
 receives `SDV_TRIAL_SLOT` and `SDV_IMAGE_PATH`; it must exit promptly and return success only when
 the application is healthy. A failed or expired trial is rolled back. A successful trial commits
 the slot and security version before the launcher waits for the application process.

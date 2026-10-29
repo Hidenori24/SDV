@@ -21,7 +21,7 @@ header,main{max-width:900px;margin:auto;padding:18px}header{display:flex;justify
   </section>
   <section class="card">
     <h2>Pi 5への初期セットアップ</h2>
-    <p>リポジトリからFOTAランチャーとPiCar-X車両イメージをビルドします。署名ツールは別の保護されたリリース環境だけでビルドしてください。</p>
+    <p>リポジトリからFOTAランチャーとPiCar-X車両イメージをビルドします。署名ツールは別の保護されたリリース環境だけでビルドしてください。<code>sdv-fota init</code> は初期active slotに空でない通常の実行可能ファイルがあることを確認してから起動状態を記録します。</p>
 <pre><code>cargo build --release --manifest-path rust/sdv-fota/Cargo.toml \
   --bin sdv-fota --bin sdv-fota-launcher
 sudo install -m 0755 rust/sdv-fota/target/release/sdv-fota /usr/bin/
@@ -32,7 +32,7 @@ sudo install -m 0755 rust/sdv-picarx/target/release/sdv-picarx-discover /usr/bin
     <p>署名コマンドは保護されたリリースホストで別にビルドします。</p>
 <pre><code>cargo build --release --manifest-path rust/sdv-fota/Cargo.toml \
   --features host-signing --bin sdv-fota-sign</code></pre>
-    <p>アプリ実行用の非特権ユーザーを作成します。スロットとboot metadataはroot所有にし、アプリ自身から更新イメージや起動状態を書き換えられないようにします。初期イメージにはPiCar-X用Rustホストを配置し、設定はスロット外に置きます。</p>
+    <p>アプリ実行用の非特権ユーザーを作成します。状態ディレクトリ、スロット、イメージ、boot metadataはroot所有にし、group/otherから書き込めないようにします。ツールはsymlinkの状態パスを拒否し、更新データと起動記録は排他的な一時ファイルからatomic renameで配置します。初期イメージにはPiCar-X用Rustホストを配置し、設定はスロット外に置きます。</p>
 <pre><code>sudo useradd --system --user-group --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin sdv-app
 sudo install -d -o root -g root -m 0755 /var/lib/sdv-fota/slots/a /var/lib/sdv-fota/slots/b
 sudo install -d -o root -g root -m 0755 /etc/sdv-picarx
@@ -70,7 +70,7 @@ sudo sdv-fota install-url --state-root /var/lib/sdv-fota \
   --config-schema 1 --signal-if-version 1
 sudo systemctl restart sdv-fota-launcher.service
 sudo sdv-fota status --state-root /var/lib/sdv-fota</code></pre>
-    <p>launcherはmanifestの試験時間内に車両イメージを <code>sdv-app</code> として起動し、同じユーザーで動く <code>sdv-picarx-health</code> が最近の制御周期成功を確認した場合だけtrial slotを確定します。サービス例は <code>deploy/systemd/sdv-fota-launcher.service</code> にあります。launcherはUID/GID切替に必要な2つのcapabilityだけを持ちます。</p>
+    <p>launcherは起動対象が通常の実行可能ファイルか確認し、manifestの試験時間内に車両イメージを <code>sdv-app</code> として起動します。同じユーザーで動く <code>sdv-picarx-health</code> が最近の制御周期成功を確認した場合だけtrial slotを確定し、候補イメージの欠落や実行不可はrollbackします。サービス例は <code>deploy/systemd/sdv-fota-launcher.service</code> にあります。launcherはUID/GID切替に必要な2つのcapabilityだけを持ちます。</p>
     <p>試験起動中は外部の入力・車両状態推定プロセスが <code>/run/sdv-picarx/input.sock</code> へ継続送信する必要があります。各センサ取得時に <code>time.monotonic_ns()</code> の時刻と増加するsequenceを付け、古い状態や過剰な入力は安全停止とヘルス失敗になります。</p>
 <pre><code>sudo install -m 0644 deploy/systemd/sdv-fota-launcher.service /etc/systemd/system/
 sudo systemctl daemon-reload

@@ -10,10 +10,11 @@ use serde::Serialize;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -24,9 +25,14 @@ const IMAGE_FILE: &str = "sdv-image.bin";
 const LOCK_EX: i32 = 2;
 const LOCK_NB: i32 = 4;
 const LOCK_UN: i32 = 8;
+// Linux O_NOFOLLOW: reject a final path component that is a symbolic link.
+const O_NOFOLLOW: i32 = 0x20_000;
+const UNSAFE_WRITE_BITS: u32 = 0o022;
+static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(0);
 
 extern "C" {
     fn flock(fd: i32, operation: i32) -> i32;
+    fn geteuid() -> u32;
     fn setgroups(size: usize, list: *const u32) -> i32;
     fn setgid(gid: u32) -> i32;
     fn setuid(uid: u32) -> i32;
@@ -42,6 +48,7 @@ pub enum Error {
     ImageWriteInProgress,
     InvalidImageWrite,
     InvalidRecord,
+    InvalidBootImage,
     TrialImageExited,
     TrialHealthTimeout,
     TrailingPackageData,
@@ -49,6 +56,7 @@ pub enum Error {
     InvalidHttpsUrl,
     DownloadFailed,
     InvalidRunIdentity,
+    UnsafeStatePath,
 }
 
 impl From<io::Error> for Error {
@@ -186,15 +194,19 @@ struct PendingImage {
 struct BootRecordLock(File);
 
 impl BootRecordLock {
-    fn acquire(root: &Path) -> io::Result<Self> {
+    fn acquire(root: &Path) -> Result<Self, Error> {
+        ensure_secure_directory(root, true)?;
         let file = OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
+            .mode(0o600)
+            .custom_flags(O_NOFOLLOW)
             .open(root.join(".fota-bootctl.lock"))?;
+        validate_owned_file(&file).map_err(Error::Io)?;
         // SAFETY: this is a valid open file descriptor; flock is released when the guard drops.
         if unsafe { flock(file.as_raw_fd(), LOCK_EX) } != 0 {
-            return Err(io::Error::last_os_error());
+            return Err(Error::Io(io::Error::last_os_error()));
         }
         Ok(Self(file))
     }
@@ -222,6 +234,24 @@ impl FileSlotStorage {
             .join(slot_name(slot))
             .join(IMAGE_FILE)
     }
+
+    pub fn validate_executable_image(&self, slot: Slot) -> Result<(), Error> {
+        ensure_secure_directory(&self.root, false)?;
+        ensure_slot_directories(&self.root, slot, false)?;
+        let metadata = fs::symlink_metadata(self.image_path(slot))?;
+        if !metadata.file_type().is_file() {
+            return Err(Error::UnsafeStatePath);
+        }
+        if metadata.len() == 0 || metadata.permissions().mode() & 0o111 == 0 {
+            return Err(Error::InvalidBootImage);
+        }
+        if metadata.uid() != effective_uid()
+            || metadata.permissions().mode() & UNSAFE_WRITE_BITS != 0
+        {
+            return Err(Error::UnsafeStatePath);
+        }
+        Ok(())
+    }
 }
 
 impl ImageStorage for FileSlotStorage {
@@ -234,6 +264,7 @@ impl ImageStorage for FileSlotStorage {
         if image_size == 0 {
             return Err(Error::InvalidImageWrite);
         }
+        ensure_secure_directory(&self.root, true)?;
         let new_lock = if self.update_lock.is_none() {
             Some(acquire_update_lock(&self.root)?)
         } else {
@@ -241,14 +272,10 @@ impl ImageStorage for FileSlotStorage {
         };
         let slot = active.other();
         let directory = self.root.join("slots").join(slot_name(slot));
-        fs::create_dir_all(&directory)?;
-        let temporary = directory.join("sdv-image.tmp");
+        ensure_secure_directory(&self.root.join("slots"), true)?;
+        ensure_secure_directory(&directory, true)?;
+        let (temporary, file) = create_temporary_file(&directory, "sdv-image")?;
         let destination = directory.join(IMAGE_FILE);
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&temporary)?;
         self.pending = Some(PendingImage {
             slot,
             directory,
@@ -329,6 +356,7 @@ impl ImageStorage for FileSlotStorage {
         offset: u32,
         buffer: &mut [u8],
     ) -> Result<usize, Self::Error> {
+        validate_slot_image(&self.root, slot)?;
         let mut file = File::open(self.image_path(slot))?;
         file.seek(SeekFrom::Start(u64::from(offset)))?;
         Ok(file.read(buffer)?)
@@ -336,13 +364,15 @@ impl ImageStorage for FileSlotStorage {
 }
 
 fn acquire_update_lock(root: &Path) -> Result<File, Error> {
-    fs::create_dir_all(root)?;
+    ensure_secure_directory(root, true)?;
     let file = OpenOptions::new()
         .create(true)
-        .truncate(false)
         .read(true)
         .write(true)
+        .mode(0o600)
+        .custom_flags(O_NOFOLLOW)
         .open(root.join(".fota-update.lock"))?;
+    validate_owned_file(&file)?;
     // SAFETY: `file` owns a valid descriptor; flock does not retain the descriptor pointer.
     if unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) } == 0 {
         Ok(file)
@@ -439,7 +469,14 @@ fn run_selected_image_with_identity(
 ) -> Result<ExitStatus, Error> {
     let mut boot = FileBootControl::new(&root);
     let decision = boot.select_for_boot()?;
-    let image = FileSlotStorage::new(&root).image_path(decision.slot);
+    let storage = FileSlotStorage::new(&root);
+    if let Err(error) = storage.validate_executable_image(decision.slot) {
+        if decision.trial {
+            boot.rollback_trial()?;
+        }
+        return Err(error);
+    }
+    let image = storage.image_path(decision.slot);
     let trial_window_ms = if decision.trial {
         boot.state()?
             .trial
@@ -589,9 +626,11 @@ impl FileBootControl {
         active_version: &str,
         highest_security_version: u64,
     ) -> Result<(), Error> {
-        fs::create_dir_all(&self.root)?;
+        ensure_secure_directory(&self.root, true)?;
         let _lock = BootRecordLock::acquire(&self.root)?;
-        if self.root.join("bootctl.a").exists() || self.root.join("bootctl.b").exists() {
+        if path_entry_exists(&self.root.join("bootctl.a"))
+            || path_entry_exists(&self.root.join("bootctl.b"))
+        {
             return Err(Error::AlreadyInitialized);
         }
         self.save(
@@ -607,6 +646,7 @@ impl FileBootControl {
     }
 
     fn load(&self) -> Result<(u64, BootState), Error> {
+        ensure_secure_directory(&self.root, false)?;
         let a = read_record(&self.root.join("bootctl.a"));
         let b = read_record(&self.root.join("bootctl.b"));
         match (a, b) {
@@ -617,6 +657,7 @@ impl FileBootControl {
     }
 
     fn save(&self, sequence: u64, state: &BootState) -> Result<(), Error> {
+        ensure_secure_directory(&self.root, false)?;
         let bytes = encode_record(sequence, state)?;
         let name = if sequence % 2 == 0 {
             "bootctl.a"
@@ -624,16 +665,17 @@ impl FileBootControl {
             "bootctl.b"
         };
         let destination = self.root.join(name);
-        let temporary = self.root.join(format!("{name}.tmp"));
-        fs::create_dir_all(&self.root)?;
-        let mut file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&temporary)?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        fs::rename(&temporary, destination)?;
+        let (temporary, mut file) = create_temporary_file(&self.root, name)?;
+        let write_result = file.write_all(&bytes).and_then(|()| file.sync_all());
+        drop(file);
+        if let Err(error) = write_result {
+            discard_temp_file(&temporary);
+            return Err(Error::Io(error));
+        }
+        if let Err(error) = fs::rename(&temporary, destination) {
+            discard_temp_file(&temporary);
+            return Err(Error::Io(error));
+        }
         sync_directory(&self.root)?;
         Ok(())
     }
@@ -720,7 +762,12 @@ fn encode_record(sequence: u64, state: &impl Serialize) -> Result<Vec<u8>, Error
 }
 
 fn read_record(path: &Path) -> Option<(u64, BootState)> {
-    let mut file = File::open(path).ok()?;
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW)
+        .open(path)
+        .ok()?;
+    validate_owned_file(&file).ok()?;
     let size = usize::try_from(file.metadata().ok()?.len()).ok()?;
     if !(RECORD_HEADER_BYTES + 4..=MAX_BOOT_RECORD_BYTES).contains(&size) {
         return None;
@@ -745,6 +792,83 @@ fn read_record(path: &Path) -> Option<(u64, BootState)> {
     }
     let state = serde_json::from_slice(&bytes[RECORD_HEADER_BYTES..bytes.len() - 4]).ok()?;
     Some((sequence, state))
+}
+
+fn ensure_secure_directory(path: &Path, create: bool) -> Result<(), Error> {
+    if create {
+        fs::create_dir_all(path)?;
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_dir()
+        || metadata.uid() != effective_uid()
+        || metadata.permissions().mode() & UNSAFE_WRITE_BITS != 0
+    {
+        return Err(Error::UnsafeStatePath);
+    }
+    Ok(())
+}
+
+fn ensure_slot_directories(root: &Path, slot: Slot, create: bool) -> Result<(), Error> {
+    ensure_secure_directory(&root.join("slots"), create)?;
+    ensure_secure_directory(&root.join("slots").join(slot_name(slot)), create)
+}
+
+fn validate_slot_image(root: &Path, slot: Slot) -> Result<(), Error> {
+    ensure_secure_directory(root, false)?;
+    ensure_slot_directories(root, slot, false)?;
+    let metadata = fs::symlink_metadata(root.join("slots").join(slot_name(slot)).join(IMAGE_FILE))?;
+    if !metadata.file_type().is_file()
+        || metadata.uid() != effective_uid()
+        || metadata.permissions().mode() & UNSAFE_WRITE_BITS != 0
+    {
+        return Err(Error::UnsafeStatePath);
+    }
+    Ok(())
+}
+
+fn validate_owned_file(file: &File) -> io::Result<()> {
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file()
+        || metadata.uid() != effective_uid()
+        || metadata.permissions().mode() & UNSAFE_WRITE_BITS != 0
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "FOTA state file is not a protected regular file owned by this account",
+        ));
+    }
+    Ok(())
+}
+
+fn create_temporary_file(directory: &Path, prefix: &str) -> Result<(PathBuf, File), Error> {
+    for _ in 0..32 {
+        let sequence = NEXT_TEMP_FILE.fetch_add(1, Ordering::Relaxed);
+        let path = directory.join(format!(".{prefix}.{}.{}.tmp", std::process::id(), sequence));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(O_NOFOLLOW)
+            .open(&path)
+        {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(Error::Io(error)),
+        }
+    }
+    Err(Error::Io(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate a unique FOTA temporary file",
+    )))
+}
+
+fn path_entry_exists(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok()
+}
+
+fn effective_uid() -> u32 {
+    // SAFETY: geteuid has no preconditions and returns the process effective user ID.
+    unsafe { geteuid() }
 }
 
 fn crc32(bytes: &[u8]) -> u32 {
