@@ -74,6 +74,7 @@ sudo systemctl restart sdv-fota-launcher.service
 sudo sdv-fota status --state-root /var/lib/sdv-fota</code></pre>
     <p>launcherは起動対象のSHA-256を照合し、manifestの試験時間内に車両イメージを <code>sdv-app</code> として起動します。同じユーザーで動く <code>sdv-picarx-health</code> が最近の制御周期成功を確認した後も、最大2秒間health成功とプロセス稼働が続いてからtrial slotを確定します。候補イメージの欠落、digest不一致、health途絶、早期終了はrollbackします。<code>status</code>はactive/trial両slotのdigest照合状態も表示します。サービス例は <code>deploy/systemd/sdv-fota-launcher.service</code> にあります。launcherはUID/GID切替に必要な2つのcapabilityだけを持ちます。</p>
     <p class="note">実車のhealth checkは停車状態を判定しません。PiCar-Xを完全に停止し、外部の運転入力peerが走行要求を出していないことを確認してからlauncherを再起動してください。</p>
+    <p>launcherの自動復旧が動かない状態でtrialが残った場合は、管理者が <code>sudo sdv-fota rollback-trial --state-root /var/lib/sdv-fota</code> を実行できます。現在のactive slotは維持され、次回launcher起動時に使われます。このコマンドは稼働中プロセスを停止しないため、実車を止めてから実行し、その後launcherを再起動してください。</p>
     <p>試験起動中は外部の入力・車両状態推定プロセスが <code>/run/sdv-picarx/input.sock</code> へ継続送信する必要があります。各センサ取得時に <code>time.monotonic_ns()</code> の時刻と増加するsequenceを付け、古い状態や過剰な入力は安全停止とヘルス失敗になります。</p>
 <pre><code>sudo install -m 0644 deploy/systemd/sdv-fota-launcher.service /etc/systemd/system/
 sudo systemctl daemon-reload

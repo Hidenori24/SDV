@@ -141,6 +141,16 @@ PiCar-X, restart the launcher only after the vehicle is fully stopped and the ex
 peer is no longer requesting motion. The health check proves a recent control cycle and stable
 process; it does not prove that the vehicle is stationary.
 
+If a trial is pending but the launcher cannot complete its automatic recovery, an operator can
+clear the trial metadata explicitly. This command keeps the current active slot and makes it the
+next slot the launcher starts; it does not stop a process that is already running. Stop the vehicle
+first, clear the trial, then restart the launcher to run the previous active image:
+
+```sh
+sudo sdv-fota rollback-trial --state-root /var/lib/sdv-fota
+sudo systemctl restart sdv-fota-launcher.service
+```
+
 The `init` command refuses to record a slot without a non-empty regular executable image and
 records its SHA-256 digest. The installer records the digest of each staged image after writing it;
 the existing package readback check must also match the signed manifest before a trial is
