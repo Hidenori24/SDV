@@ -136,12 +136,20 @@ sudo sdv-fota status --state-root /var/lib/sdv-fota
 sudo systemctl restart sdv-fota-launcher.service
 ```
 
+The Pi Linux trial health check does not currently read a vehicle-stopped interlock. On a real
+PiCar-X, restart the launcher only after the vehicle is fully stopped and the external driver-input
+peer is no longer requesting motion. The health check proves a recent control cycle and stable
+process; it does not prove that the vehicle is stationary.
+
 The `init` command refuses to record a slot without a non-empty regular executable image and
 records its SHA-256 digest. The installer records the digest of each staged image after writing it;
 the existing package readback check must also match the signed manifest before a trial is
 scheduled. On restart, the launcher checks the selected image against its recorded digest before
 starting it, then repeatedly runs the configured health command until it succeeds or `trial_ms`
 expires. A trial image that is missing, not executable, or has a mismatched digest is rolled back.
+After the first healthy result, the launcher requires the process to remain alive and the health
+check to keep passing for up to two seconds (half the trial window when that is shorter) before it
+commits. An exit or failed health check during this stability window rolls the trial back.
 During a trial, the health command
 receives `SDV_TRIAL_SLOT` and `SDV_IMAGE_PATH`; it must exit promptly and return success only when
 the application is healthy. A failed or expired trial is rolled back. A successful trial commits
