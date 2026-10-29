@@ -1,9 +1,9 @@
 //! PiCar-X actuator mapping. Concrete Robot HAT device access is supplied by `RobotHat`.
 
 #[cfg(target_os = "linux")]
-pub mod linux_i2c;
-#[cfg(target_os = "linux")]
 pub mod linux_gpio;
+#[cfg(target_os = "linux")]
+pub mod linux_i2c;
 #[cfg(target_os = "linux")]
 pub mod linux_input;
 pub mod pwm;

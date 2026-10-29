@@ -27,13 +27,35 @@ image.
 On Linux, `linux_i2c::I2cTransport` opens an explicitly configured i2c-dev path and MCU address,
 then sends each PWM register message as one I2C transaction. The current crate still needs a fresh
 `linux_input::UnixDatagramInputSource` receives driver input, E-stop, and vehicle state estimates
-over a local Unix datagram socket. It accepts only increasing sequence numbers and returns an error
-when no sample has arrived within the configured freshness limit; `VehicleExecutor` then requests
-a motor stop. Vehicle state must come from a sensor or estimator process. The packet shape is:
+over a local Unix datagram socket. It accepts only increasing sequence numbers and source timestamps
+from the host's shared `CLOCK_MONOTONIC` clock. Packets must be at most 2048 bytes, and at most eight
+queued frames are processed per ECU cycle. Missing, stale, future-dated, oversized, or excessive
+input returns an error; `VehicleExecutor` then requests a motor stop. The sender should set
+`sampled_at_monotonic_ns` with `time.monotonic_ns()` when it samples its sensors. Vehicle state must
+come from a sensor or estimator process. This one-shot commissioning probe requests no drive and
+asserts E-stop; it illustrates the packet fields, but it does not provide live telemetry:
 
-```json
-{"sequence":1,"throttle":0.4,"brake":0.0,"steer":-0.1,"estop":false,"vehicle":{"t":1.0,"x":2.0,"y":3.0,"yaw":0.2,"v":0.5,"yaw_rate":0.1,"wheel_omega":5.0}}
+```python
+import json
+import socket
+import time
+
+frame = {
+    "sequence": 1,
+    "sampled_at_monotonic_ns": time.monotonic_ns(),
+    "throttle": 0.0,
+    "brake": 0.0,
+    "steer": 0.0,
+    "estop": True,
+    "vehicle": {"t": 0.0, "x": 0.0, "y": 0.0, "yaw": 0.0,
+                "v": 0.0, "yaw_rate": 0.0, "wheel_omega": 0.0},
+}
+with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as peer:
+    peer.sendto(json.dumps(frame).encode(), "/run/sdv-picarx/input.sock")
 ```
+
+A real input peer must publish continuously, increment `sequence`, and timestamp each actual sensor
+sample. The receiver treats the timestamp as the age of the measurement, not the packet arrival.
 
 ## Linux vehicle host
 

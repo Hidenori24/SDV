@@ -123,7 +123,8 @@ Install the example unit from `deploy/systemd/sdv-fota-launcher.service`. Its he
 the vehicle runtime's Unix socket, which reports ready only after a successful control cycle. The
 vehicle image waits for a peer to send fresh driver and state-estimate packets to
 `/run/sdv-picarx/input.sock`; that peer must run as `sdv-app` or have permission to write to the
-socket:
+socket. Each packet carries its monotonic sensor-sample timestamp so queued old state is rejected;
+the protocol and limits are documented in `rust/sdv-picarx/README.md`:
 
 ```sh
 sudo install -m 0644 deploy/systemd/sdv-fota-launcher.service /etc/systemd/system/
