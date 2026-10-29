@@ -93,7 +93,9 @@ On the release host, sign an application image. The tool prints the key ID and p
 release process can verify which trust key is needed on the target:
 
 ```sh
-sdv-fota-sign /secure/release.seed release-2026 vehicle 1.1.0 2 5000 1 1 sdv-app update.sdvf
+sdv-fota-sign --seed /secure/release.seed --key-id release-2026 --target vehicle \
+  --version 1.1.0 --security-version 2 --trial-ms 5000 --config-schema 1 \
+  --signal-if-version 1 --image sdv-image.bin --output update.sdvf
 ```
 
 Deliver `update.sdvf` through the deployment's chosen transport. On the Pi, install it using the
