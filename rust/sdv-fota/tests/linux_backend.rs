@@ -1138,6 +1138,83 @@ fn install_url_streams_https_package_through_curl_ingress() {
     );
     assert_eq!(boot.state().unwrap().trial.unwrap().version, "1.1.0");
 }
+
+#[test]
+fn install_url_requires_client_certificate_and_key_as_a_pair() {
+    let result = Command::new(env!("CARGO_BIN_EXE_sdv-fota"))
+        .args([
+            "install-url",
+            "--state-root",
+            "/tmp/sdv-fota-unused",
+            "--url",
+            "https://updates.example.test/vehicle.sdvf",
+            "--target",
+            "vehicle",
+            "--config-schema",
+            "1",
+            "--signal-if-version",
+            "1",
+            "--client-cert",
+            "/etc/sdv-fota/client.crt",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("InvalidClientCredentials"));
+}
+
+#[test]
+fn install_url_rejects_group_or_world_accessible_client_keys() {
+    let root = TempRoot::new();
+    let certificate = root.0.join("client.crt");
+    fs::write(&certificate, b"test certificate").unwrap();
+    fs::set_permissions(&certificate, fs::Permissions::from_mode(0o644)).unwrap();
+    let private_key = root.0.join("client.key");
+    fs::write(&private_key, b"test private key").unwrap();
+    fs::set_permissions(&private_key, fs::Permissions::from_mode(0o644)).unwrap();
+
+    let fake_bin = root.0.join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let curl_called = root.0.join("curl-called");
+    write_executable(
+        fake_bin.join("curl").as_path(),
+        "#!/bin/sh\\ntouch \"$SDV_FOTA_TEST_CURL_CALLED\"\\n",
+    );
+    let path = format!(
+        "{}:{}",
+        fake_bin.display(),
+        std::env::var_os("PATH")
+            .unwrap_or_default()
+            .to_string_lossy()
+    );
+    let result = Command::new(env!("CARGO_BIN_EXE_sdv-fota"))
+        .args([
+            "install-url",
+            "--state-root",
+            "/tmp/sdv-fota-unused",
+            "--url",
+            "https://updates.example.test/vehicle.sdvf",
+            "--target",
+            "vehicle",
+            "--config-schema",
+            "1",
+            "--signal-if-version",
+            "1",
+            "--client-cert",
+            certificate.to_str().unwrap(),
+            "--client-key",
+            private_key.to_str().unwrap(),
+        ])
+        .env("PATH", path)
+        .env("SDV_FOTA_TEST_CURL_CALLED", &curl_called)
+        .output()
+        .unwrap();
+
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("UnsafeClientCredentials"));
+    assert!(!curl_called.exists());
+}
 #[test]
 fn failed_https_transfer_aborts_candidate_and_does_not_schedule_trial() {
     let root = TempRoot::new();
