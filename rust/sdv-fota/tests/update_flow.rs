@@ -131,6 +131,7 @@ impl MemoryBootControl {
                 active_version: fixed_version("1.0.0"),
                 highest_security_version: 1,
                 trial: None,
+                last_trial: None,
             },
         }
     }

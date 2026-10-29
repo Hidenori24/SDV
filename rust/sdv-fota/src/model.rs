@@ -220,6 +220,33 @@ pub struct TrialImage {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrialOutcome {
+    Committed,
+    RolledBack,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LastTrialResult {
+    pub slot: Slot,
+    pub version: VersionString,
+    pub security_version: u64,
+    pub outcome: TrialOutcome,
+}
+
+impl LastTrialResult {
+    pub const fn from_trial(trial: TrialImage, outcome: TrialOutcome) -> Self {
+        Self {
+            slot: trial.slot,
+            version: trial.version,
+            security_version: trial.security_version,
+            outcome,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BootState {
     pub active: Slot,
@@ -227,6 +254,8 @@ pub struct BootState {
     pub highest_security_version: u64,
     #[serde(default)]
     pub trial: Option<TrialImage>,
+    #[serde(default)]
+    pub last_trial: Option<LastTrialResult>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -350,4 +379,19 @@ pub enum ValidationError {
     SecurityVersionRollback,
     PayloadSizeMismatch,
     PayloadHashMismatch,
+}
+
+#[cfg(all(test, feature = "std"))]
+mod tests {
+    use super::BootState;
+
+    #[test]
+    fn old_boot_records_without_trial_history_still_deserialize() {
+        let state: BootState = serde_json::from_str(
+            r#"{"active":"a","active_version":"1.0.0","highest_security_version":1,"trial":null}"#,
+        )
+        .unwrap();
+
+        assert!(state.last_trial.is_none());
+    }
 }

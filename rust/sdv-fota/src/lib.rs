@@ -24,9 +24,10 @@ pub use campaign::{
     MAX_CAMPAIGN_ECUS,
 };
 pub use model::{
-    BootDecision, BootState, Ecu, FixedString, FixedU32List, Image, Manifest, Package,
-    Requirements, Slot, TrialImage, TrustKey, UpdatePolicy, ValidatedPackage, ValidationContext,
-    ValidationError, VersionString, DEFAULT_TRIAL_WINDOW_MS, MAX_CONFIG_SCHEMA_VERSIONS,
+    BootDecision, BootState, Ecu, FixedString, FixedU32List, Image, LastTrialResult, Manifest,
+    Package, Requirements, Slot, TrialImage, TrialOutcome, TrustKey, UpdatePolicy,
+    ValidatedPackage, ValidationContext, ValidationError, VersionString, DEFAULT_TRIAL_WINDOW_MS,
+    MAX_CONFIG_SCHEMA_VERSIONS,
 };
 #[cfg(feature = "std")]
 pub use package::encode_package;
