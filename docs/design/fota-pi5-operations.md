@@ -118,6 +118,10 @@ When both groups exist, add `SDV_FOTA_APP_GROUPS=<i2c-gid>,<gpio-gid>` to
 `/etc/default/sdv-fota-launcher`. The launcher applies these supplementary groups to both the
 vehicle process and its health check, while both run as the unprivileged `sdv-app` user.
 
+Do not add hardware device groups to `SDV_FOTA_ECU_APP_GROUPS`. If ECU images need OS permissions
+separate from the vehicle, configure a dedicated non-root ECU account. Reusing the vehicle UID does
+not provide privilege isolation.
+
 Provision the matching Ed25519 public key through the ECU's trusted configuration. The FOTA CLI
 loads trusted keys from `/etc/sdv-fota/trusted-keys`. Provision the file as root, readable by
 the `sdv` account, and not writable by group or other users. The file contains one key per line:
@@ -259,6 +263,38 @@ the slot and security version before the launcher waits for the application proc
 why a slot was rejected. It also retains the most recent trial's outcome, slot, version, and
 security version across restarts (`committed` or `rolled_back`) for post-update diagnosis.
 
+The launcher keeps its existing positional form and also supports a target-aware form with fixed
+application arguments:
+
+```text
+sdv-fota-launcher --state-root <base-dir> --target <vehicle|engine|brake|steering> \
+  --health-program <configured-health-check> [--health-arg <arg> ...] [--app-arg <arg> ...]
+```
+
+`vehicle` uses the base state directory; each virtual ECU resolves to its fixed `ecus/<target>`
+directory. Each repeated `--app-arg` is passed as one argument to the digest-verified slot image
+with `Command::args`; values such as spaces, semicolons, and `$()` are not shell syntax. Keep the
+launcher invocation and its arguments in root-owned service configuration; arguments are not read
+from a package manifest. The root launcher owns launch-time slot selection, commit, and rollback;
+the selected image and health check run as the configured unprivileged account and cannot update
+the protected boot records. Package installation and operator-triggered rollback remain explicit
+administrator operations through `sdv-fota`. This CLI/API
+does not connect a worker trial to the Pi coordinator: coordinator-managed output hold, trial
+socket routing cutover, worker-specific health, and commit/rollback after that cutover remain
+unconnected. The target-aware launcher can commit or roll back its selected image using its own
+health command, but that is not a live worker update procedure; do not use it for one until the
+coordinator integration exists.
+
+An ECU launch requires exactly one matching app argument pair, for example
+`--app-arg --ecu --app-arg engine` when `--target engine` is selected. ECU launches use
+`SDV_FOTA_ECU_APP_UID` and `SDV_FOTA_ECU_APP_GID`, plus optional
+`SDV_FOTA_ECU_APP_GROUPS`; missing groups means an empty supplementary-group list, and the
+launcher clears inherited groups before exec. Vehicle launches keep using `SDV_FOTA_APP_*`, so
+vehicle `i2c`/`gpio` groups are not passed to an ECU image. The ECU UID/GID should identify a
+dedicated non-root account. If it is configured to the same UID as the vehicle process, this does
+not provide privilege isolation. The launcher requires `CAP_SETGID` to clear inherited groups.
+The fixed `ecus` parent must be a real launcher-owned directory; a symlink is rejected.
+
 Install the example unit from `deploy/systemd/sdv-fota-launcher.service`. Its health command checks
 the vehicle runtime's Unix socket, which reports ready only after a successful control cycle. The
 vehicle image waits for a peer to send fresh driver and state-estimate packets to
@@ -284,11 +320,16 @@ The PiCar-X deployment uses the complete Rust Linux runtime as one `vehicle` FOT
 tasks with their own RTE state and the same virtual bus contract as the Rust simulator; this does not
 require separate physical CPUs. The `vehicle` target remains a single A/B application image, while
 the Linux CLI can also stage individually signed `engine`, `brake`, or `steering` packages into
-separate fixed state roots and record independent trial metadata. Only the `vehicle` root is
-currently consumed by the Pi FOTA launcher. Virtual ECU worker processes can be enabled as an
-alternative Linux runtime mode, but ECU-targeted packages only stage into those individual roots and
-record trial metadata: per-ECU trial image selection, worker startup, health reporting, and automatic
-commit/rollback are not connected. The Pi path can sign a package on a separate host, verify and
+separate fixed state roots and record independent trial metadata. The installed systemd unit still
+uses the `vehicle` root; an explicit target-aware launcher invocation can select an ECU root, but
+the ECU-targeted launcher is not connected to the live coordinator. An ECU target requires a
+matching `--app-arg --ecu --app-arg <target>` pair and a dedicated non-root identity from
+`SDV_FOTA_ECU_APP_UID/GID`; supplementary ECU groups default to empty. The installed
+`sdv-picarx-health` command checks vehicle runtime health and is not an ECU worker health check, so
+the example systemd unit remains vehicle-only. Virtual ECU worker processes can
+be enabled as an alternative Linux runtime mode, but coordinator-managed worker trial startup,
+output hold, trial-socket health checks, atomic route cutover, and commit/rollback after cutover are
+not connected. The Pi path can sign a package on a separate host, verify and
 stage it incrementally, and exercise whole-vehicle A/B trial boot and rollback on Linux. HTTPS
 artifact transfer uses the device's system CA store and can use mutual TLS. Private repository
 credentials, remote campaign orchestration, a real vehicle-state estimator/input peer, actual Pi 5
