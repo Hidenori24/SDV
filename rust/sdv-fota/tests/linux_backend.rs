@@ -1225,11 +1225,7 @@ fn install_url_rejects_credentials_beneath_a_writable_ancestor() {
     let root = TempRoot::new();
     let writable_ancestor = root.0.join("writable-ancestor");
     fs::create_dir(&writable_ancestor).unwrap();
-    fs::set_permissions(
-        &writable_ancestor,
-        fs::Permissions::from_mode(0o777),
-    )
-    .unwrap();
+    fs::set_permissions(&writable_ancestor, fs::Permissions::from_mode(0o777)).unwrap();
     let private_directory = writable_ancestor.join("private");
     fs::create_dir(&private_directory).unwrap();
     fs::set_permissions(&private_directory, fs::Permissions::from_mode(0o700)).unwrap();
