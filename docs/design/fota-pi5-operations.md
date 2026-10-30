@@ -6,7 +6,9 @@ The host CLI can install from a local package file or stream a package from an H
 uses the system CA store through `curl`, rejects HTTP URLs and URL-embedded credentials, and keeps
 the Ed25519 package signature as the release authorization check. Deployments can additionally
 require mutual TLS with an owner-only client private key; the client identity controls access to the
-artifact endpoint but does not replace package signature verification.
+artifact endpoint but does not replace package signature verification. When mutual TLS is enabled,
+the client caps redirects at zero so curl cannot forward the device identity to a redirect host; the
+artifact endpoint must return the package directly.
 
 ## Build
 
