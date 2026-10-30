@@ -76,9 +76,7 @@ impl VirtualEcuTask {
         let swc = match id {
             VirtualEcuId::Engine => EcuSwc::Engine(EngineSwc::new(config.engine_params())),
             VirtualEcuId::Brake => EcuSwc::Brake(BrakeSwc::new(config.brake_params())),
-            VirtualEcuId::Steering => {
-                EcuSwc::Steering(SteeringSwc::new(config.steering_params()))
-            }
+            VirtualEcuId::Steering => EcuSwc::Steering(SteeringSwc::new(config.steering_params())),
         };
         Self {
             id,
@@ -379,7 +377,9 @@ mod tests {
 
         let mut task = VirtualEcuTask::new(VirtualEcuId::Engine, &Config::default());
         task.set_enabled(false);
-        assert!(task.step_10ms(&[Frame::Safety(Safety::default())]).is_none());
+        assert!(task
+            .step_10ms(&[Frame::Safety(Safety::default())])
+            .is_none());
 
         task.set_enabled(true);
         let output = task.step_10ms(&[]).expect("re-enabled ECU executes");
