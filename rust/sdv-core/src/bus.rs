@@ -46,7 +46,7 @@ pub enum Frame {
 pub const FRAME_WIRE_VERSION: u8 = 1;
 /// Capacity required by `Frame::encode_wire`: header + largest payload + CRC32.
 pub const FRAME_WIRE_MAX_SIZE: usize = 39;
-const FRAME_WIRE_MAGIC: [u8; 4] = *b"SDVF";
+const FRAME_WIRE_MAGIC: [u8; 4] = *b"SDVW";
 const FRAME_WIRE_HEADER_SIZE: usize = 7;
 const FRAME_WIRE_CRC_SIZE: usize = 4;
 
@@ -109,7 +109,7 @@ impl Frame {
 
     /// Encode this frame into a fixed-size buffer and return its used byte length.
     ///
-    /// The wire record is `SDVF | version | kind | payload length | payload | CRC32`, with
+    /// The wire record is `SDVW | version | kind | payload length | payload | CRC32`, with
     /// multibyte values encoded little-endian. CRC32 detects accidental corruption; it is not
     /// authentication. The output buffer is cleared before writing.
     pub fn encode_wire(
@@ -384,6 +384,7 @@ mod frame_wire_tests {
 
         for frame in frames {
             let (output, length) = encode(frame);
+            assert_eq!(&output[..4], b"SDVW");
             assert!(length <= FRAME_WIRE_MAX_SIZE);
             assert!(output[length..].iter().all(|byte| *byte == 0));
             assert_eq!(Frame::decode_wire(&output[..length]), Ok(frame));
