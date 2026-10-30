@@ -96,6 +96,7 @@ tools/      可視化などの補助スクリプト（Python）
 - [docs/adr/ADR-0002-ecu-partitioning.md](docs/adr/ADR-0002-ecu-partitioning.md) : 疑似 ECU 分割の方針
 - [docs/adr/ADR-0003-config-nvm.md](docs/adr/ADR-0003-config-nvm.md) : Config / NVM（更新とロールバック）
 - [docs/adr/ADR-0005-fota.md](docs/adr/ADR-0005-fota.md) : FOTA（ECU ソフトの更新・署名検証・試験適用・ロールバック）
+- [docs/design/fota-pi5-operations.md](docs/design/fota-pi5-operations.md) : Pi 5 FOTA運用。positional launcherはvehicle root専用、ECU target-aware launchはactive slot専用
 - [rust/README.md](rust/README.md) : Rust 実装の構成・WASM API
 - [rust/sdv-sec/README.md](rust/sdv-sec/README.md) : 通信の基礎ライブラリ（SHA-256・Ed25519 検証・フレーム MAC、C ABI）
 - [web/README.md](web/README.md) : ブラウザ GUI の使い方

@@ -1,5 +1,6 @@
 use sdv_fota::linux::{
-    run_selected_image_as_with_groups, run_selected_target_image_as_with_groups_and_app_args,
+    run_active_target_image_as_with_groups_and_app_args, run_selected_image_as_with_groups,
+    run_selected_target_image_as_with_groups_and_app_args,
 };
 use sdv_fota::Ecu;
 use std::ffi::{OsStr, OsString};
@@ -14,7 +15,7 @@ enum Invocation {
     Flags {
         base_root: PathBuf,
         target: Ecu,
-        health_program: PathBuf,
+        health_program: Option<PathBuf>,
         health_args: Vec<OsString>,
         app_args: Vec<OsString>,
     },
@@ -68,16 +69,25 @@ fn run(
             health_program,
             health_args,
             app_args,
-        } => run_selected_target_image_as_with_groups_and_app_args(
-            base_root,
-            target,
-            &health_program,
-            &health_args,
-            uid,
-            gid,
-            &groups,
-            &app_args,
-        ),
+        } => match target {
+            Ecu::Vehicle => run_selected_target_image_as_with_groups_and_app_args(
+                base_root,
+                target,
+                health_program
+                    .as_deref()
+                    .expect("vehicle invocation requires a health program"),
+                &health_args,
+                uid,
+                gid,
+                &groups,
+                &app_args,
+            ),
+            Ecu::Engine | Ecu::Brake | Ecu::Steering => {
+                run_active_target_image_as_with_groups_and_app_args(
+                    base_root, target, uid, gid, &groups, &app_args,
+                )
+            }
+        },
     }
     .map_err(|error| LauncherError::Launch(format!("{error:?}")))?;
     Ok(status)
@@ -131,10 +141,29 @@ fn parse_flag_invocation(args: &[OsString]) -> Result<Invocation, String> {
         }
     }
 
+    let target = required(target, "--target")?;
+    let health_program = health_program.map(PathBuf::from);
+    match target {
+        Ecu::Vehicle if health_program.is_none() => {
+            return Err(format!(
+                "vehicle target requires --health-program\n{}",
+                usage()
+            ));
+        }
+        Ecu::Engine | Ecu::Brake | Ecu::Steering
+            if health_program.is_some() || !health_args.is_empty() =>
+        {
+            return Err(format!(
+                "ECU targets are active-only and do not accept health-check options\n{}",
+                usage()
+            ));
+        }
+        _ => {}
+    }
     Ok(Invocation::Flags {
         base_root: PathBuf::from(required(state_root, "--state-root")?),
-        target: required(target, "--target")?,
-        health_program: PathBuf::from(required(health_program, "--health-program")?),
+        target,
+        health_program,
         health_args,
         app_args,
     })
@@ -226,7 +255,7 @@ fn configured_id(name: &str) -> Result<u32, String> {
 }
 
 fn usage() -> String {
-    "usage:\n  sdv-fota-launcher <state-root> <health-check-program> [health-check-args...]\n  sdv-fota-launcher --state-root <base-dir> --target <vehicle|engine|brake|steering> --health-program <path> [--health-arg <arg> ...] [--app-arg <arg> ...]".to_owned()
+    "usage:\n  sdv-fota-launcher <state-root> <health-check-program> [health-check-args...]\n  sdv-fota-launcher --state-root <base-dir> --target vehicle --health-program <path> [--health-arg <arg> ...] [--app-arg <arg> ...]\n  sdv-fota-launcher --state-root <base-dir> --target <engine|brake|steering> [--app-arg <arg> ...] (active image only; no trial health check)".to_owned()
 }
 
 #[cfg(test)]
@@ -314,10 +343,6 @@ mod tests {
             "/var/lib/sdv-fota".into(),
             "--target".into(),
             "engine".into(),
-            "--health-program".into(),
-            "/usr/bin/health".into(),
-            "--health-arg".into(),
-            "--socket".into(),
         ]
         .into();
         for argument in suspicious_args {
@@ -329,12 +354,14 @@ mod tests {
         match invocation {
             Invocation::Flags {
                 target,
+                health_program,
                 health_args,
                 app_args,
                 ..
             } => {
                 assert_eq!(target, Ecu::Engine);
-                assert_eq!(health_args, ["--socket"]);
+                assert!(health_program.is_none());
+                assert!(health_args.is_empty());
                 assert_eq!(app_args, suspicious_args);
             }
             Invocation::Positional { .. } => panic!("flag invocation changed modes"),
@@ -345,8 +372,59 @@ mod tests {
             "/var/lib/sdv-fota".into(),
             "--target".into(),
             "ecu/../../vehicle".into(),
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn vehicle_flag_invocation_keeps_trial_health_options() {
+        let invocation = parse_invocation([
+            "--state-root".into(),
+            "/var/lib/sdv-fota".into(),
+            "--target".into(),
+            "vehicle".into(),
             "--health-program".into(),
-            "/usr/bin/health".into(),
+            "/usr/bin/vehicle-health".into(),
+            "--health-arg".into(),
+            "--socket".into(),
+        ])
+        .unwrap();
+        match invocation {
+            Invocation::Flags {
+                target,
+                health_program,
+                health_args,
+                ..
+            } => {
+                assert_eq!(target, Ecu::Vehicle);
+                assert_eq!(
+                    health_program,
+                    Some(PathBuf::from("/usr/bin/vehicle-health"))
+                );
+                assert_eq!(health_args, ["--socket"]);
+            }
+            Invocation::Positional { .. } => panic!("flag invocation changed modes"),
+        }
+    }
+
+    #[test]
+    fn ecu_flag_invocation_rejects_vehicle_health_options() {
+        assert!(parse_invocation([
+            "--state-root".into(),
+            "/var/lib/sdv-fota".into(),
+            "--target".into(),
+            "engine".into(),
+            "--health-program".into(),
+            "/usr/bin/sdv-picarx-health".into(),
+        ])
+        .is_err());
+        assert!(parse_invocation([
+            "--state-root".into(),
+            "/var/lib/sdv-fota".into(),
+            "--target".into(),
+            "brake".into(),
+            "--health-arg".into(),
+            "anything".into(),
         ])
         .is_err());
     }
