@@ -149,6 +149,46 @@ sudo sdv-fota verify-images --state-root /var/lib/sdv-fota
 sudo systemctl restart sdv-fota-launcher.service
 ```
 
+### Stage an individual virtual ECU image
+
+The Linux CLI can keep A/B slots, boot metadata, active version, security counter, and pending
+trial metadata separate for `engine`, `brake`, and `steering`. The `vehicle` target continues to
+use `/var/lib/sdv-fota` directly; each virtual ECU uses a fixed subdirectory under the same base,
+such as `/var/lib/sdv-fota/ecus/engine`. Target names are parsed as an enum and are not used as
+arbitrary path components. Initialize each ECU's existing active image and metadata separately
+before staging packages for it. For example:
+
+```sh
+# Provision the current Engine image and its independent A/B state.
+sudo install -d -o root -g root -m 0755 /var/lib/sdv-fota/ecus/engine/slots/a \
+  /var/lib/sdv-fota/ecus/engine/slots/b
+sudo install -o root -g root -m 0755 engine-current.bin \
+  /var/lib/sdv-fota/ecus/engine/slots/a/sdv-image.bin
+sudo sdv-fota init --state-root /var/lib/sdv-fota --target engine \
+  --active-slot a --active-version 1.0.0 --security-version 1
+
+# The signed manifest target must match the CLI target.
+sdv-fota-sign --seed /secure/release.seed --key-id release-2026 --target engine \
+  --version 1.1.0 --security-version 2 --trial-ms 5000 --config-schema 1 \
+  --signal-if-version 1 --image engine-update.bin --output engine-update.sdvf
+sudo sdv-fota install --state-root /var/lib/sdv-fota --package engine-update.sdvf \
+  --target engine --config-schema 1 --signal-if-version 1
+sudo sdv-fota status --state-root /var/lib/sdv-fota --target engine
+sudo sdv-fota verify-images --state-root /var/lib/sdv-fota --target engine
+```
+
+Use `--target brake` or `--target steering` for those state roots. `init`, `install`/`install-url`,
+`status`, `verify-images`, `record-active-integrity`, and `rollback-trial` all select the same
+target-specific root. Omitting `--target` from the state-management commands retains the legacy
+`vehicle` root. The signed package is verified and written to that ECU's inactive slot, and its
+version, security counter, and trial record stay independent from other targets.
+
+This prepares per-ECU staging and trial metadata only. The current Pi launcher still starts the
+whole vehicle application from the `vehicle` state root; it does not select a virtual ECU slot,
+start a worker trial, collect worker health, or automatically commit/roll back an ECU trial. Do not
+restart the vehicle launcher expecting an ECU-target package to run. Worker trial lifecycle and its
+health/commit connection are a follow-on integration.
+
 `status` is a diagnostic report and exits successfully even when it reports an image mismatch.
 `verify-images` checks the active image and any pending trial image, prints the same integrity
 states, and exits nonzero unless every bootable image has a verified digest. It can be used as a
@@ -216,14 +256,15 @@ report motion.
 The PiCar-X deployment uses the complete Rust Linux runtime as one `vehicle` FOTA image.
 `sdv-core::runtime::VehicleRuntime` runs VCU, Engine, Brake, and Steering as separate virtual ECU
 tasks with their own RTE state and the same virtual bus contract as the Rust simulator; this does not
-require separate physical CPUs. The Pi Linux installer accepts the `vehicle` target because
-these tasks share one A/B application image; `engine`, `brake`, and `steering` cannot be installed
-as independent Pi images yet. The Pi path can sign a
-package on a separate host, verify and stage it incrementally, and exercise
-A/B trial boot and rollback on Linux. HTTPS artifact transfer uses the device's system CA store;
-mutual TLS, private repository credentials, remote campaign orchestration, a real vehicle-state
-estimator/input peer, actual Pi 5 hardware validation, and calibrated PiCar-X output remain
-deployment work.
+require separate physical CPUs. The `vehicle` target remains a single A/B application image, while
+the Linux CLI can also stage individually signed `engine`, `brake`, or `steering` packages into
+separate fixed state roots and record independent trial metadata. Only the `vehicle` root is
+currently consumed by the Pi launcher: per-ECU worker trial startup, health reporting, and automatic
+commit/rollback are not connected. The Pi path can sign a package on a separate host, verify and
+stage it incrementally, and exercise whole-vehicle A/B trial boot and rollback on Linux. HTTPS
+artifact transfer uses the device's system CA store and can use mutual TLS. Private repository
+credentials, remote campaign orchestration, a real vehicle-state estimator/input peer, actual Pi 5
+hardware validation, and calibrated PiCar-X output remain deployment work.
 AUTOSAR Classic integration additionally requires the chosen
 DCM/Csm/NvM/MemIf/Fls/Bootloader bindings described in
 [the Classic architecture proposal](fota_classic_architecture.md).
