@@ -336,14 +336,6 @@ fn frame_crc32(bytes: &[u8]) -> u32 {
     !crc
 }
 
-#[derive(Debug)]
-struct InFlight {
-    due_tick: u64,
-    to: Node,
-    frame: Frame,
-}
-
-#[derive(Debug)]
 #[cfg(test)]
 mod frame_wire_tests {
     use super::*;
