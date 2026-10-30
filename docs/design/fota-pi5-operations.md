@@ -213,11 +213,11 @@ target-specific root. Omitting `--target` from the state-management commands ret
 `vehicle` root. The signed package is verified and written to that ECU's inactive slot, and its
 version, security counter, and trial record stay independent from other targets.
 
-This prepares per-ECU staging and trial metadata only. The current Pi launcher still starts the
-whole vehicle application from the `vehicle` state root; it does not select a virtual ECU slot,
-start a worker trial, collect worker health, or automatically commit/roll back an ECU trial. Do not
-restart the vehicle launcher expecting an ECU-target package to run. Worker trial lifecycle and its
-health/commit connection are a follow-on integration.
+This prepares per-ECU staging and trial metadata. The installed systemd unit still starts the whole
+vehicle application from the `vehicle` state root. An explicit target-aware ECU invocation can
+start only the verified active image; it does not start a pending candidate or update its trial
+metadata. Do not restart the vehicle unit expecting an ECU-target package to run. Coordinator
+worker trial lifecycle and its health/commit connection are a follow-on integration.
 
 `status` is a diagnostic report and exits successfully even when it reports an image mismatch.
 `verify-images` checks the active image and any pending trial image, prints the same integrity
@@ -263,37 +263,51 @@ the slot and security version before the launcher waits for the application proc
 why a slot was rejected. It also retains the most recent trial's outcome, slot, version, and
 security version across restarts (`committed` or `rolled_back`) for post-update diagnosis.
 
-The launcher keeps its existing positional form and also supports a target-aware form with fixed
-application arguments:
+The launcher keeps its existing positional form and adds a target-aware form with fixed application
+arguments. Use the legacy positional form only with the vehicle base state root. It retains the
+existing trial, health, commit, and rollback behavior; do not pass a path such as
+`/var/lib/sdv-fota/ecus/engine` to it, because positional mode has no ECU active-only guard. Use the
+target-aware ECU form below instead. The legacy positional form and `vehicle` target use the vehicle
+health program:
 
 ```text
-sdv-fota-launcher --state-root <base-dir> --target <vehicle|engine|brake|steering> \
-  --health-program <configured-health-check> [--health-arg <arg> ...] [--app-arg <arg> ...]
+sdv-fota-launcher --state-root <base-dir> --target vehicle \
+  --health-program <configured-vehicle-health-check> [--health-arg <arg> ...] [--app-arg <arg> ...]
 ```
 
 `vehicle` uses the base state directory; each virtual ECU resolves to its fixed `ecus/<target>`
 directory. Each repeated `--app-arg` is passed as one argument to the digest-verified slot image
 with `Command::args`; values such as spaces, semicolons, and `$()` are not shell syntax. Keep the
 launcher invocation and its arguments in root-owned service configuration; arguments are not read
-from a package manifest. The root launcher owns launch-time slot selection, commit, and rollback;
-the selected image and health check run as the configured unprivileged account and cannot update
-the protected boot records. Package installation and operator-triggered rollback remain explicit
-administrator operations through `sdv-fota`. This CLI/API
-does not connect a worker trial to the Pi coordinator: coordinator-managed output hold, trial
-socket routing cutover, worker-specific health, and commit/rollback after that cutover remain
-unconnected. The target-aware launcher can commit or roll back its selected image using its own
-health command, but that is not a live worker update procedure; do not use it for one until the
-coordinator integration exists.
+from a package manifest. The root launcher owns vehicle launch-time trial selection, commit, and
+rollback. Package installation and operator-triggered rollback remain explicit administrator
+operations through `sdv-fota`.
 
-An ECU launch requires exactly one matching app argument pair, for example
-`--app-arg --ecu --app-arg engine` when `--target engine` is selected. ECU launches use
+ECU targets have a separate active-only service form and do not take a health command:
+
+```text
+sdv-fota-launcher --state-root <base-dir> --target <engine|brake|steering> \
+  --app-arg --ecu --app-arg <matching-target> [--app-arg <worker-argument> ...]
+```
+
+An ECU launch requires exactly one matching `--ecu <target>` pair. The launcher verifies and runs
+only that ECU's recorded active slot. It does not call `select_for_boot`, decrement `boots_left`, or
+change pending trial metadata; it removes `SDV_TRIAL_SLOT` and `SDV_IMAGE_PATH` from the child
+environment and performs no health check, trial commit, or rollback. A pending candidate stays
+pending for a later coordinator-managed trial flow. The legacy positional and `vehicle` target
+trial semantics are unchanged.
+
+ECU launches use
 `SDV_FOTA_ECU_APP_UID` and `SDV_FOTA_ECU_APP_GID`, plus optional
 `SDV_FOTA_ECU_APP_GROUPS`; missing groups means an empty supplementary-group list, and the
 launcher clears inherited groups before exec. Vehicle launches keep using `SDV_FOTA_APP_*`, so
 vehicle `i2c`/`gpio` groups are not passed to an ECU image. The ECU UID/GID should identify a
 dedicated non-root account. If it is configured to the same UID as the vehicle process, this does
 not provide privilege isolation. The launcher requires `CAP_SETGID` to clear inherited groups.
-The fixed `ecus` parent must be a real launcher-owned directory; a symlink is rejected.
+The fixed `ecus` parent must be a real launcher-owned directory; a symlink is rejected. The example
+`sdv-picarx-health` command is vehicle-only and cannot validate an ECU worker. This active-only ECU
+launch is not connected to the Pi coordinator's output hold, candidate health on trial sockets,
+route cutover, or post-cutover commit/rollback, and must not be treated as that update procedure.
 
 Install the example unit from `deploy/systemd/sdv-fota-launcher.service`. Its health command checks
 the vehicle runtime's Unix socket, which reports ready only after a successful control cycle. The
@@ -321,12 +335,15 @@ tasks with their own RTE state and the same virtual bus contract as the Rust sim
 require separate physical CPUs. The `vehicle` target remains a single A/B application image, while
 the Linux CLI can also stage individually signed `engine`, `brake`, or `steering` packages into
 separate fixed state roots and record independent trial metadata. The installed systemd unit still
-uses the `vehicle` root; an explicit target-aware launcher invocation can select an ECU root, but
-the ECU-targeted launcher is not connected to the live coordinator. An ECU target requires a
-matching `--app-arg --ecu --app-arg <target>` pair and a dedicated non-root identity from
+uses the `vehicle` root; an explicit ECU-targeted launcher invocation starts only the verified
+active image and leaves trial metadata unchanged. The legacy positional launcher is vehicle-root
+only; passing an `ecus/<target>` directory to it preserves trial semantics and can consume or boot
+a pending candidate, so use the target-aware ECU form instead. An ECU target requires a matching
+`--app-arg --ecu --app-arg <target>` pair and a dedicated non-root identity from
 `SDV_FOTA_ECU_APP_UID/GID`; supplementary ECU groups default to empty. The installed
 `sdv-picarx-health` command checks vehicle runtime health and is not an ECU worker health check, so
-the example systemd unit remains vehicle-only. Virtual ECU worker processes can
+the example systemd unit remains vehicle-only. Coordinator-managed trial output hold, candidate
+health, route cutover, and post-cutover commit/rollback remain the next integration stage. Virtual ECU worker processes can
 be enabled as an alternative Linux runtime mode, but coordinator-managed worker trial startup,
 output hold, trial-socket health checks, atomic route cutover, and commit/rollback after cutover are
 not connected. The Pi path can sign a package on a separate host, verify and

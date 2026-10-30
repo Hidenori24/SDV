@@ -69,6 +69,7 @@ pub enum Error {
     DownloadFailed,
     InvalidRunIdentity,
     InvalidTargetArguments,
+    InvalidTargetLaunchMode,
     UnsafeStatePath,
     SlotIsNotActive,
 }
@@ -633,8 +634,8 @@ pub fn state_root_for_target(base_root: impl Into<PathBuf>, target: crate::Ecu) 
 
 /// Select and run one target's A/B image with fixed application arguments.
 ///
-/// ECU targets require exactly one matching `--ecu <target>` pair and a real, launcher-owned
-/// `ecus` parent directory. Arguments are passed directly to the selected image without a shell.
+/// This trial-aware API is restricted to the vehicle target. ECU targets must use one of the
+/// explicitly named active-only launch APIs so a service start cannot consume a pending trial.
 pub fn run_selected_target_image_with_app_args(
     base_root: impl Into<PathBuf>,
     target: crate::Ecu,
@@ -642,9 +643,11 @@ pub fn run_selected_target_image_with_app_args(
     health_args: &[std::ffi::OsString],
     app_args: &[std::ffi::OsString],
 ) -> Result<ExitStatus, Error> {
-    validate_target_launch(base_root.into(), target, app_args, |root| {
-        run_selected_image_with_identity(root, health_program, health_args, app_args, None, false)
-    })
+    if target != crate::Ecu::Vehicle {
+        return Err(Error::InvalidTargetLaunchMode);
+    }
+    let root = validate_target_root(base_root.into(), target, app_args)?;
+    run_selected_image_with_identity(root, health_program, health_args, app_args, None, false)
 }
 
 /// Launch one target's selected A/B image as the configured unprivileged account.
@@ -661,28 +664,72 @@ pub fn run_selected_target_image_as_with_groups_and_app_args(
     supplementary_groups: &[u32],
     app_args: &[std::ffi::OsString],
 ) -> Result<ExitStatus, Error> {
+    if target != crate::Ecu::Vehicle {
+        return Err(Error::InvalidTargetLaunchMode);
+    }
     if uid == 0 || gid == 0 || supplementary_groups.contains(&0) {
         return Err(Error::InvalidRunIdentity);
     }
-    let identity = Some((uid, gid, supplementary_groups.to_vec()));
-    validate_target_launch(base_root.into(), target, app_args, |root| {
-        run_selected_image_with_identity(
-            root,
-            health_program,
-            health_args,
-            app_args,
-            identity,
-            target != crate::Ecu::Vehicle,
-        )
-    })
+    let root = validate_target_root(base_root.into(), target, app_args)?;
+    run_selected_image_with_identity(
+        root,
+        health_program,
+        health_args,
+        app_args,
+        Some((uid, gid, supplementary_groups.to_vec())),
+        false,
+    )
 }
 
-fn validate_target_launch(
+/// Launch an ECU target's current active image without selecting, committing, or rolling back a trial.
+///
+/// This variant runs under the caller's current identity. It validates the fixed ECU state root,
+/// image integrity, and matching `--ecu <target>` application argument pair, then removes trial
+/// environment variables before starting the active image.
+pub fn run_active_target_image_with_app_args(
+    base_root: impl Into<PathBuf>,
+    target: crate::Ecu,
+    app_args: &[std::ffi::OsString],
+) -> Result<ExitStatus, Error> {
+    if target == crate::Ecu::Vehicle {
+        return Err(Error::InvalidTargetLaunchMode);
+    }
+    let root = validate_target_root(base_root.into(), target, app_args)?;
+    run_active_image_with_identity(root, app_args, None, false)
+}
+
+/// Launch an ECU target's active image under a configured identity, without trial transitions.
+///
+/// This is the service-facing ECU launcher API. It leaves pending trial metadata byte-for-byte
+/// unchanged and clears inherited supplementary groups even when `supplementary_groups` is empty.
+pub fn run_active_target_image_as_with_groups_and_app_args(
+    base_root: impl Into<PathBuf>,
+    target: crate::Ecu,
+    uid: u32,
+    gid: u32,
+    supplementary_groups: &[u32],
+    app_args: &[std::ffi::OsString],
+) -> Result<ExitStatus, Error> {
+    if target == crate::Ecu::Vehicle {
+        return Err(Error::InvalidTargetLaunchMode);
+    }
+    if uid == 0 || gid == 0 || supplementary_groups.contains(&0) {
+        return Err(Error::InvalidRunIdentity);
+    }
+    let root = validate_target_root(base_root.into(), target, app_args)?;
+    run_active_image_with_identity(
+        root,
+        app_args,
+        Some((uid, gid, supplementary_groups.to_vec())),
+        true,
+    )
+}
+
+fn validate_target_root(
     base_root: PathBuf,
     target: crate::Ecu,
     app_args: &[std::ffi::OsString],
-    launch: impl FnOnce(PathBuf) -> Result<ExitStatus, Error>,
-) -> Result<ExitStatus, Error> {
+) -> Result<PathBuf, Error> {
     if !target_app_args_match(target, app_args) {
         return Err(Error::InvalidTargetArguments);
     }
@@ -691,7 +738,7 @@ fn validate_target_launch(
         // selecting one ECU cannot redirect its boot state into another target's tree.
         ensure_secure_directory(&base_root.join("ecus"), false)?;
     }
-    launch(state_root_for_target(base_root, target))
+    Ok(state_root_for_target(base_root, target))
 }
 
 fn target_app_args_match(target: crate::Ecu, app_args: &[std::ffi::OsString]) -> bool {
@@ -838,6 +885,26 @@ fn run_selected_image_with_identity(
         // next launch starts the committed image without the trial environment.
         return Ok(ExitStatus::from_raw(0));
     }
+    child.wait().map_err(Error::Io)
+}
+
+fn run_active_image_with_identity(
+    root: PathBuf,
+    app_args: &[std::ffi::OsString],
+    identity: Option<(u32, u32, Vec<u32>)>,
+    clear_inherited_groups: bool,
+) -> Result<ExitStatus, Error> {
+    let boot = FileBootControl::new(&root);
+    let state = boot.state()?;
+    let storage = FileSlotStorage::new(&root);
+    storage.verify_executable_image(state.active)?;
+    let image = storage.image_path(state.active);
+    let mut command = command_with_identity(&image, identity.as_ref(), clear_inherited_groups);
+    command
+        .args(app_args)
+        .env_remove("SDV_TRIAL_SLOT")
+        .env_remove("SDV_IMAGE_PATH");
+    let mut child = command.spawn().map_err(Error::Io)?;
     child.wait().map_err(Error::Io)
 }
 

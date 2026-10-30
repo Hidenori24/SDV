@@ -148,6 +148,13 @@ See [the Classic architecture proposal](../docs/design/fota_classic_architecture
 See the [Pi 5 host operation workflow](../docs/design/fota-pi5-operations.md) for initial provisioning,
 package signing, staging, and trial activation.
 
+The legacy positional `sdv-fota-launcher <state-root> ...` form is for the vehicle base root only
+and retains trial selection, health, commit, and rollback. Never pass an `ecus/<target>` root to that
+form. Use the target-aware ECU form to run the digest-verified active image; it leaves pending trial
+metadata unchanged, does not set trial environment variables, and does not run trial health or
+commit/rollback. Coordinator-managed worker trial hold, candidate health, route cutover, and
+post-cutover commit/rollback are not connected yet.
+
 ## WASM API（C ABI、wasm-bindgen 不要）
 | 関数 | 説明 |
 |---|---|
