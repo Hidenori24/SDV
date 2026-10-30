@@ -11,11 +11,11 @@ User=root
 Group=root
 SupplementaryGroups=
 EnvironmentFile=/etc/default/sdv-fota-launcher
-ExecStart=/usr/bin/sdv-fota-launcher --state-root /var/lib/sdv-fota --target %i --trial-candidate --app-arg --ecu --app-arg %i --app-arg --worker-socket --app-arg /run/sdv-picarx/candidates/%i.sock --app-arg --coordinator-socket --app-arg /run/sdv-picarx/candidates/coordinator.sock
+ExecStart=/usr/bin/sdv-fota-launcher --state-root /var/lib/sdv-fota --target %i --trial-candidate --hold-socket /run/sdv-fota/control.sock --app-arg --ecu --app-arg %i --app-arg --worker-socket --app-arg /run/sdv-picarx/candidates/%i.sock --app-arg --coordinator-socket --app-arg /run/sdv-picarx/candidates/coordinator.sock
 Restart=no
 NoNewPrivileges=true
 CapabilityBoundingSet=CAP_SETUID CAP_SETGID
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/sdv-fota /run/sdv-picarx
+ReadWritePaths=/var/lib/sdv-fota /run/sdv-picarx /run/sdv-fota
 

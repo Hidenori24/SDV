@@ -13,8 +13,10 @@ use crate::package::decode_sha256;
 use serde::Serialize;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::os::fd::AsRawFd;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::net::Shutdown;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
@@ -35,6 +37,14 @@ const TRIAL_HEALTH_STABILITY_WINDOW: Duration = Duration::from_secs(2);
 const TRIAL_HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const TRIAL_PROCESS_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 const PROCESS_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const OUTPUT_HOLD_REQUEST: &[u8] = b"SDVHOLD1\n";
+const OUTPUT_HOLD_ACK: &[u8] = b"SDVHELD1\n";
+const OUTPUT_HOLD_NOT_READY: &[u8] = b"SDVNOTREADY\n";
+const OUTPUT_HOLD_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const OUTPUT_HOLD_RESPONSE_TIMEOUT: Duration = Duration::from_secs(7);
+const HOLD_SOCKET_ENV: &str = "SDV_FOTA_HOLD_SOCKET";
+const HOLD_LISTENER_FD_ENV: &str = "SDV_FOTA_HOLD_LISTENER_FD";
+const HOLD_FD_MINIMUM: RawFd = 32;
 // Linux O_NOFOLLOW: reject a final path component that is a symbolic link.
 const O_NOFOLLOW: i32 = 0x20_000;
 const UNSAFE_WRITE_BITS: u32 = 0o022;
@@ -72,6 +82,8 @@ pub enum Error {
     InvalidTargetLaunchMode,
     UnsafeStatePath,
     SlotIsNotActive,
+    OutputHoldFailed,
+    OutputHoldNotReady,
 }
 
 impl From<io::Error> for Error {
@@ -522,6 +534,112 @@ fn discard_temp_file(path: &Path) {
     let _ = fs::remove_file(path);
 }
 
+/// The root launcher owns the socket pathname and passes an already-open listener to the
+/// selected image. The application UID cannot replace this socket with a fake server.
+struct RootHoldSocket {
+    _listener: UnixListener,
+    child_fd: OwnedFd,
+    path: PathBuf,
+    identity: (u64, u64),
+}
+
+impl RootHoldSocket {
+    fn from_environment() -> Result<Option<Self>, Error> {
+        let Some(path) = std::env::var_os(HOLD_SOCKET_ENV).map(PathBuf::from) else {
+            return Ok(None);
+        };
+        Ok(Some(Self::bind(path)?))
+    }
+
+    fn bind(path: PathBuf) -> Result<Self, Error> {
+        if !path.is_absolute()
+            || path
+                .components()
+                .any(|component| matches!(component, Component::ParentDir))
+        {
+            return Err(Error::UnsafeStatePath);
+        }
+        let parent = path.parent().ok_or(Error::UnsafeStatePath)?;
+        let parent_metadata = fs::symlink_metadata(parent)?;
+        if !parent_metadata.file_type().is_dir()
+            || parent_metadata.uid() != effective_uid()
+            || parent_metadata.permissions().mode() & UNSAFE_WRITE_BITS != 0
+        {
+            return Err(Error::UnsafeStatePath);
+        }
+        let listener = UnixListener::bind(&path)?;
+        let initial = fs::symlink_metadata(&path)?;
+        if !initial.file_type().is_socket() || initial.uid() != effective_uid() {
+            return Err(Error::UnsafeStatePath);
+        }
+        // Keep the inherited listener away from descriptors used internally by Command::spawn.
+        // SAFETY: fcntl duplicates a valid listening socket descriptor; ownership is transferred
+        // to `OwnedFd` below.
+        let child_fd =
+            unsafe { libc::fcntl(listener.as_raw_fd(), libc::F_DUPFD_CLOEXEC, HOLD_FD_MINIMUM) };
+        if child_fd == -1 {
+            let identity = (initial.dev(), initial.ino());
+            drop(listener);
+            remove_owned_socket_path(&path, identity);
+            return Err(Error::Io(io::Error::last_os_error()));
+        }
+        // SAFETY: `fcntl(F_DUPFD_CLOEXEC)` returned a fresh owned descriptor.
+        let child_fd = unsafe { OwnedFd::from_raw_fd(child_fd) };
+        let mut hold_socket = Self {
+            _listener: listener,
+            child_fd,
+            path,
+            identity: (initial.dev(), initial.ino()),
+        };
+        fs::set_permissions(&hold_socket.path, fs::Permissions::from_mode(0o600))?;
+        let metadata = fs::symlink_metadata(&hold_socket.path)?;
+        if !metadata.file_type().is_socket()
+            || metadata.uid() != effective_uid()
+            || metadata.permissions().mode() & 0o777 != 0o600
+        {
+            return Err(Error::UnsafeStatePath);
+        }
+        hold_socket.identity = (metadata.dev(), metadata.ino());
+        Ok(hold_socket)
+    }
+
+    fn pass_to(&self, command: &mut Command) {
+        let listener_fd = self.child_fd.as_raw_fd();
+        command.env(HOLD_LISTENER_FD_ENV, listener_fd.to_string());
+        // SAFETY: the child clears close-on-exec on the already-open root-owned listener so the
+        // selected application can accept on the inherited endpoint. It does not overwrite any
+        // descriptor that Command uses for its exec-error reporting pipe.
+        unsafe {
+            command.pre_exec(move || {
+                let flags = libc::fcntl(listener_fd, libc::F_GETFD);
+                if flags == -1
+                    || libc::fcntl(listener_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1
+                {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+}
+
+impl Drop for RootHoldSocket {
+    fn drop(&mut self) {
+        remove_owned_socket_path(&self.path, self.identity);
+    }
+}
+
+fn remove_owned_socket_path(path: &Path, identity: (u64, u64)) {
+    if let Ok(metadata) = fs::symlink_metadata(path) {
+        if metadata.file_type().is_socket()
+            && metadata.uid() == effective_uid()
+            && (metadata.dev(), metadata.ino()) == identity
+        {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
 /// Select and run the configured A/B image. A trial image is committed only after the supplied
 /// health command exits successfully before the manifest's trial window expires.
 pub fn run_selected_image(
@@ -738,6 +856,7 @@ pub fn run_trial_candidate_target_image_as_with_groups_and_app_args(
     gid: u32,
     supplementary_groups: &[u32],
     app_args: &[std::ffi::OsString],
+    hold_socket: &Path,
 ) -> Result<ExitStatus, Error> {
     if uid == 0 || gid == 0 || supplementary_groups.contains(&0) {
         return Err(Error::InvalidRunIdentity);
@@ -748,6 +867,7 @@ pub fn run_trial_candidate_target_image_as_with_groups_and_app_args(
         Some((uid, gid, supplementary_groups.to_vec())),
         true,
         app_args,
+        hold_socket,
     )
 }
 
@@ -757,8 +877,9 @@ pub fn run_trial_candidate_target_image_with_app_args(
     base_root: impl Into<PathBuf>,
     target: crate::Ecu,
     app_args: &[std::ffi::OsString],
+    hold_socket: &Path,
 ) -> Result<ExitStatus, Error> {
-    run_trial_candidate_image(base_root.into(), target, None, false, app_args)
+    run_trial_candidate_image(base_root.into(), target, None, false, app_args, hold_socket)
 }
 
 fn run_trial_candidate_image(
@@ -767,6 +888,7 @@ fn run_trial_candidate_image(
     identity: Option<(u32, u32, Vec<u32>)>,
     clear_inherited_groups: bool,
     app_args: &[std::ffi::OsString],
+    hold_socket: &Path,
 ) -> Result<ExitStatus, Error> {
     if target == crate::Ecu::Vehicle {
         return Err(Error::InvalidTargetLaunchMode);
@@ -785,16 +907,107 @@ fn run_trial_candidate_image(
     let storage = FileSlotStorage::new(&root);
     storage.verify_executable_image(trial.slot)?;
     let image = storage.image_path(trial.slot);
+    request_output_hold(hold_socket, effective_uid())?;
     let mut command = command_with_identity(&image, identity.as_ref(), clear_inherited_groups);
     command
         .args(app_args)
         .env_remove("SDV_TRIAL_SLOT")
+        .env_remove(HOLD_LISTENER_FD_ENV)
+        .env_remove("SDV_FOTA_PENDING_ECU_TRIAL")
         .env("SDV_TRIAL_CANDIDATE_SLOT", slot_name(trial.slot))
         .env("SDV_IMAGE_PATH", &image);
     let mut child = command.spawn().map_err(Error::Io)?;
     drop(_boot_lock);
     drop(_update_lock);
     child.wait().map_err(Error::Io)
+}
+
+fn request_output_hold(path: &Path, expected_server_uid: u32) -> Result<(), Error> {
+    let deadline = Instant::now() + OUTPUT_HOLD_CONNECT_TIMEOUT;
+    let (mut stream, identity) = loop {
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound && Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+            Err(error) => return Err(Error::Io(error)),
+        };
+        if !metadata.file_type().is_socket()
+            || metadata.uid() != expected_server_uid
+            || metadata.permissions().mode() & 0o777 != 0o600
+        {
+            return Err(Error::OutputHoldFailed);
+        }
+        match UnixStream::connect(path) {
+            Ok(stream) => break (stream, (metadata.dev(), metadata.ino())),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                ) && Instant::now() < deadline =>
+            {
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => return Err(Error::Io(error)),
+        }
+    };
+    let current = fs::symlink_metadata(path).map_err(Error::Io)?;
+    if !current.file_type().is_socket()
+        || current.uid() != expected_server_uid
+        || current.permissions().mode() & 0o777 != 0o600
+        || (current.dev(), current.ino()) != identity
+        || peer_uid(stream.as_raw_fd()).map_err(Error::Io)? != expected_server_uid
+    {
+        return Err(Error::OutputHoldFailed);
+    }
+    stream
+        .set_read_timeout(Some(OUTPUT_HOLD_RESPONSE_TIMEOUT))
+        .map_err(Error::Io)?;
+    stream
+        .set_write_timeout(Some(OUTPUT_HOLD_RESPONSE_TIMEOUT))
+        .map_err(Error::Io)?;
+    stream.write_all(OUTPUT_HOLD_REQUEST).map_err(Error::Io)?;
+    stream.shutdown(Shutdown::Write).map_err(Error::Io)?;
+    let mut response = Vec::with_capacity(OUTPUT_HOLD_NOT_READY.len());
+    loop {
+        let mut byte = [0u8; 1];
+        stream.read_exact(&mut byte).map_err(Error::Io)?;
+        response.push(byte[0]);
+        if byte[0] == b'\n' {
+            break;
+        }
+        if response.len() >= OUTPUT_HOLD_NOT_READY.len() {
+            return Err(Error::OutputHoldFailed);
+        }
+    }
+    let mut trailing = [0u8; 1];
+    match stream.read(&mut trailing) {
+        Ok(0) if response.as_slice() == OUTPUT_HOLD_ACK => Ok(()),
+        Ok(0) if response.as_slice() == OUTPUT_HOLD_NOT_READY => Err(Error::OutputHoldNotReady),
+        Ok(_) => Err(Error::OutputHoldFailed),
+        Err(error) => Err(Error::Io(error)),
+    }
+}
+
+fn peer_uid(fd: i32) -> io::Result<u32> {
+    let mut credentials = std::mem::MaybeUninit::<libc::ucred>::uninit();
+    let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: `credentials` is writable and the supplied length is its exact structure size.
+    let result = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            credentials.as_mut_ptr().cast(),
+            &mut length,
+        )
+    };
+    if result != 0 || length as usize != std::mem::size_of::<libc::ucred>() {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: getsockopt succeeded and returned a complete `ucred` structure.
+    Ok(unsafe { credentials.assume_init() }.uid)
 }
 
 fn validate_target_root(
@@ -891,6 +1104,8 @@ fn run_selected_image_with_identity(
     identity: Option<(u32, u32, Vec<u32>)>,
     clear_inherited_groups: bool,
 ) -> Result<ExitStatus, Error> {
+    let hold_socket = RootHoldSocket::from_environment()?;
+    let ecu_trial_pending = has_pending_ecu_trial(&root)?;
     let mut boot = FileBootControl::new(&root);
     let decision = boot.select_for_boot()?;
     let storage = FileSlotStorage::new(&root);
@@ -911,7 +1126,18 @@ fn run_selected_image_with_identity(
     };
     let mut image_command =
         command_with_identity(&image, identity.as_ref(), clear_inherited_groups);
+    match hold_socket.as_ref() {
+        Some(hold_socket) => hold_socket.pass_to(&mut image_command),
+        None => {
+            image_command.env_remove(HOLD_LISTENER_FD_ENV);
+        }
+    }
     image_command.args(app_args);
+    if ecu_trial_pending {
+        image_command.env("SDV_FOTA_PENDING_ECU_TRIAL", "1");
+    } else {
+        image_command.env_remove("SDV_FOTA_PENDING_ECU_TRIAL");
+    }
     if decision.trial {
         image_command
             .env("SDV_TRIAL_SLOT", slot_name(decision.slot))
@@ -960,6 +1186,39 @@ fn run_selected_image_with_identity(
     child.wait().map_err(Error::Io)
 }
 
+fn has_pending_ecu_trial(base_root: &Path) -> Result<bool, Error> {
+    let ecus_root = base_root.join("ecus");
+    let metadata = match fs::symlink_metadata(&ecus_root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(Error::Io(error)),
+    };
+    if !metadata.file_type().is_dir()
+        || metadata.uid() != effective_uid()
+        || metadata.permissions().mode() & UNSAFE_WRITE_BITS != 0
+    {
+        return Err(Error::UnsafeStatePath);
+    }
+
+    for target in [crate::Ecu::Engine, crate::Ecu::Brake, crate::Ecu::Steering] {
+        let ecu_root = state_root_for_target(base_root, target);
+        match fs::symlink_metadata(&ecu_root) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(Error::Io(error)),
+            Ok(metadata)
+                if metadata.file_type().is_dir()
+                    && metadata.uid() == effective_uid()
+                    && metadata.permissions().mode() & UNSAFE_WRITE_BITS == 0 => {}
+            Ok(_) => return Err(Error::UnsafeStatePath),
+        }
+        let (_, state) = FileBootControl::new(&ecu_root).load()?;
+        if state.trial.is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn run_active_image_with_identity(
     root: PathBuf,
     app_args: &[std::ffi::OsString],
@@ -975,6 +1234,8 @@ fn run_active_image_with_identity(
     command
         .args(app_args)
         .env_remove("SDV_TRIAL_SLOT")
+        .env_remove(HOLD_LISTENER_FD_ENV)
+        .env_remove("SDV_FOTA_PENDING_ECU_TRIAL")
         .env_remove("SDV_IMAGE_PATH");
     let mut child = command.spawn().map_err(Error::Io)?;
     child.wait().map_err(Error::Io)
@@ -1536,5 +1797,38 @@ fn slot_name(slot: Slot) -> &'static str {
     match slot {
         Slot::A => "a",
         Slot::B => "b",
+    }
+}
+
+#[cfg(test)]
+mod output_hold_fd_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_PATH: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn root_hold_listener_is_inherited_by_exec_without_clobbering_command_pipe() {
+        let path = std::env::temp_dir().join(format!(
+            "sdv-fota-hold-fd-{}-{}",
+            std::process::id(),
+            NEXT_PATH.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        let socket_path = path.join("control.sock");
+        let hold_socket = RootHoldSocket::bind(socket_path.clone()).unwrap();
+
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "test -S \"/proc/self/fd/$SDV_FOTA_HOLD_LISTENER_FD\""]);
+        hold_socket.pass_to(&mut command);
+        let status = command.status().unwrap();
+
+        assert!(status.success());
+        assert!(socket_path.exists());
+        drop(hold_socket);
+        assert!(!socket_path.exists());
+        fs::remove_dir(path).unwrap();
     }
 }
