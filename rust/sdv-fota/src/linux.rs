@@ -16,7 +16,7 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
@@ -166,11 +166,7 @@ impl HttpsPackageSource {
             command.args(["--max-redirs", "0"]);
         }
         if let (Some(certificate), Some(key)) = (client_certificate, client_key) {
-            command
-                .arg("--cert")
-                .arg(certificate)
-                .arg("--key")
-                .arg(key);
+            command.arg("--cert").arg(certificate).arg("--key").arg(key);
         }
         let mut child = command
             .arg("--")
@@ -187,24 +183,62 @@ impl HttpsPackageSource {
 }
 
 fn validate_client_identity_file(path: &Path, private_key: bool) -> Result<(), Error> {
-    let parent = path
+    let absolute_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    if absolute_path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(Error::UnsafeClientCredentials);
+    }
+
+    let owner = unsafe { geteuid() };
+    let parent = absolute_path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let parent_metadata = fs::symlink_metadata(parent)?;
-    let metadata = fs::symlink_metadata(path)?;
-    let owner = unsafe { geteuid() };
-    let parent_mode = parent_metadata.permissions().mode();
+        .unwrap_or_else(|| Path::new("/"));
+    validate_client_identity_parent_chain(parent, owner)?;
+
+    let metadata = fs::symlink_metadata(&absolute_path)?;
     let mode = metadata.permissions().mode();
-    if !parent_metadata.file_type().is_dir()
-        || parent_metadata.uid() != owner
-        || parent_mode & UNSAFE_WRITE_BITS != 0
-        || !metadata.file_type().is_file()
+    if !metadata.file_type().is_file()
         || metadata.uid() != owner
         || mode & UNSAFE_WRITE_BITS != 0
         || (private_key && mode & 0o077 != 0)
     {
         return Err(Error::UnsafeClientCredentials);
+    }
+    Ok(())
+}
+
+/// Check every directory entry leading to the credential file. A private immediate directory is
+/// insufficient when an untrusted writable ancestor could rename or replace that directory after
+/// validation. Root-owned sticky directories such as /tmp are safe ancestors because users
+/// cannot remove or replace entries they do not own there.
+fn validate_client_identity_parent_chain(parent: &Path, owner: u32) -> Result<(), Error> {
+    let mut current = parent;
+    let mut immediate = true;
+    loop {
+        let metadata = fs::symlink_metadata(current)?;
+        let mode = metadata.permissions().mode();
+        let owned_by_trusted_account = metadata.uid() == owner || metadata.uid() == 0;
+        let protected_sticky_directory = metadata.uid() == 0 && mode & 0o1000 != 0;
+        if !metadata.file_type().is_dir()
+            || !owned_by_trusted_account
+            || (immediate && metadata.uid() != owner)
+            || (mode & UNSAFE_WRITE_BITS != 0 && !protected_sticky_directory)
+        {
+            return Err(Error::UnsafeClientCredentials);
+        }
+
+        if current == Path::new("/") {
+            break;
+        }
+        current = current.parent().ok_or(Error::UnsafeClientCredentials)?;
+        immediate = false;
     }
     Ok(())
 }
