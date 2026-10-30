@@ -1,10 +1,15 @@
 #![cfg(target_os = "linux")]
 
-use sdv_fota::linux::{run_selected_image, FileBootControl, FileSlotStorage, HttpsPackageSource};
+use sdv_fota::linux::{
+    run_selected_image, run_selected_image_with_app_args,
+    run_selected_target_image_as_with_groups_and_app_args, run_selected_target_image_with_app_args,
+    state_root_for_target, FileBootControl, FileSlotStorage, HttpsPackageSource,
+};
 use sdv_fota::{
-    encode_package, BootControl, ImageStorage, Slot, TrialImage, TrialOutcome, VersionString,
+    encode_package, BootControl, Ecu, ImageStorage, Slot, TrialImage, TrialOutcome, VersionString,
 };
 use sdv_sec::{ed25519_public_key, ed25519_sign, sha256};
+use std::ffi::OsString;
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -44,6 +49,20 @@ fn write_slot_image(root: &Path, slot: Slot, contents: &str) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     write_executable(&path, contents);
     storage.record_image_integrity(slot).unwrap();
+}
+
+fn write_arg_recording_image(root: &Path, slot: Slot, log_path: &Path, stay_alive_for_trial: bool) {
+    let log_path = log_path.to_string_lossy().replace('\'', "'\\''");
+    let trial_behavior = if stay_alive_for_trial {
+        "if [ \"${SDV_TRIAL_SLOT:-}\" = b ]; then exec sleep 8; fi\n"
+    } else {
+        ""
+    };
+    write_slot_image(
+        root,
+        slot,
+        &format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{log_path}'\n{trial_behavior}exit 0\n"),
+    );
 }
 
 #[test]
@@ -392,6 +411,224 @@ fn linux_launcher_commits_trial_after_health_command_succeeds() {
     assert_eq!(state.active, Slot::B);
     assert_eq!(state.active_version, "1.1.0");
     assert!(state.trial.is_none());
+}
+
+#[test]
+fn launcher_usage_errors_keep_the_legacy_exit_code() {
+    let missing_arguments = Command::new(env!("CARGO_BIN_EXE_sdv-fota-launcher"))
+        .output()
+        .unwrap();
+    assert_eq!(missing_arguments.status.code(), Some(2));
+
+    let invalid_target = Command::new(env!("CARGO_BIN_EXE_sdv-fota-launcher"))
+        .args([
+            "--state-root",
+            "/var/lib/sdv-fota",
+            "--target",
+            "ecu/../../vehicle",
+            "--health-program",
+            "/usr/bin/health",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(invalid_target.status.code(), Some(2));
+}
+
+#[test]
+fn launcher_passes_each_fixed_app_argument_without_shell_interpretation_on_active_and_trial() {
+    let root = TempRoot::new();
+    let mut boot = FileBootControl::new(&root.0);
+    boot.initialize(Slot::A, "1.0.0", 1).unwrap();
+
+    let sentinel = root.0.join("shell-command-ran");
+    let arguments = [
+        OsString::from("one argument with spaces"),
+        OsString::from(format!("; touch {}", sentinel.display())),
+        OsString::from(format!("$(touch {})", sentinel.display())),
+        OsString::from(format!("`touch {}`", sentinel.display())),
+    ];
+    let active_log = root.0.join("active-arguments.log");
+    write_arg_recording_image(&root.0, Slot::A, &active_log, false);
+
+    let active =
+        run_selected_image_with_app_args(&root.0, Path::new("/bin/true"), &[], &arguments).unwrap();
+    assert!(active.success());
+    assert_eq!(
+        fs::read_to_string(&active_log)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        arguments
+            .iter()
+            .map(|argument| argument.to_str())
+            .collect::<Option<Vec<_>>>()
+            .unwrap()
+    );
+    assert!(!sentinel.exists());
+
+    let trial_log = root.0.join("trial-arguments.log");
+    write_arg_recording_image(&root.0, Slot::B, &trial_log, true);
+    boot.schedule_trial(TrialImage {
+        slot: Slot::B,
+        version: fixed_version("1.1.0"),
+        security_version: 2,
+        boots_left: 2,
+        trial_window_ms: 5_000,
+    })
+    .unwrap();
+
+    let trial =
+        run_selected_image_with_app_args(&root.0, Path::new("/bin/true"), &[], &arguments).unwrap();
+    assert!(trial.success());
+    assert_eq!(
+        fs::read_to_string(&trial_log)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        arguments
+            .iter()
+            .map(|argument| argument.to_str())
+            .collect::<Option<Vec<_>>>()
+            .unwrap()
+    );
+    assert!(!sentinel.exists());
+    assert_eq!(boot.state().unwrap().active, Slot::B);
+}
+
+#[test]
+fn selecting_one_target_trial_does_not_change_another_ecus_ab_state() {
+    let root = TempRoot::new();
+    let engine_root = state_root_for_target(&root.0, Ecu::Engine);
+    let brake_root = state_root_for_target(&root.0, Ecu::Brake);
+    assert_eq!(engine_root, root.0.join("ecus/engine"));
+    assert_eq!(brake_root, root.0.join("ecus/brake"));
+
+    let mut engine_boot = FileBootControl::new(&engine_root);
+    engine_boot.initialize(Slot::A, "1.0.0", 1).unwrap();
+    write_slot_image(&engine_root, Slot::A, "#!/bin/sh\nexit 0\n");
+    write_slot_image(&engine_root, Slot::B, "#!/bin/sh\nexec sleep 8\n");
+    engine_boot
+        .schedule_trial(TrialImage {
+            slot: Slot::B,
+            version: fixed_version("1.1.0"),
+            security_version: 2,
+            boots_left: 2,
+            trial_window_ms: 5_000,
+        })
+        .unwrap();
+
+    let mut brake_boot = FileBootControl::new(&brake_root);
+    brake_boot.initialize(Slot::A, "2.0.0", 3).unwrap();
+    brake_boot
+        .schedule_trial(TrialImage {
+            slot: Slot::B,
+            version: fixed_version("2.1.0"),
+            security_version: 4,
+            boots_left: 2,
+            trial_window_ms: 5_000,
+        })
+        .unwrap();
+    let brake_before = brake_boot.state().unwrap();
+
+    let status = run_selected_image_with_app_args(
+        &engine_root,
+        Path::new("/bin/true"),
+        &[],
+        &["--ecu".into(), "engine".into()],
+    )
+    .unwrap();
+    assert!(status.success());
+
+    let engine_state = engine_boot.state().unwrap();
+    assert_eq!(engine_state.active, Slot::B);
+    assert_eq!(engine_state.active_version, "1.1.0");
+    assert!(engine_state.trial.is_none());
+    assert_eq!(brake_boot.state().unwrap(), brake_before);
+}
+
+#[test]
+fn ecu_target_launcher_rejects_missing_duplicate_or_mismatched_ecu_selector() {
+    let root = TempRoot::new();
+    let engine_root = state_root_for_target(&root.0, Ecu::Engine);
+    fs::create_dir_all(&root.0.join("ecus")).unwrap();
+    let mut boot = FileBootControl::new(&engine_root);
+    boot.initialize(Slot::A, "1.0.0", 1).unwrap();
+    boot.schedule_trial(TrialImage {
+        slot: Slot::B,
+        version: fixed_version("1.1.0"),
+        security_version: 2,
+        boots_left: 2,
+        trial_window_ms: 5_000,
+    })
+    .unwrap();
+
+    for args in [
+        vec!["--worker-socket".into(), "/run/worker.sock".into()],
+        vec!["--ecu".into(), "brake".into()],
+        vec![
+            "--ecu".into(),
+            "engine".into(),
+            "--ecu".into(),
+            "engine".into(),
+        ],
+    ] {
+        assert!(matches!(
+            run_selected_target_image_as_with_groups_and_app_args(
+                &root.0,
+                Ecu::Engine,
+                Path::new("/bin/true"),
+                &[],
+                1000,
+                1000,
+                &[],
+                &args,
+            ),
+            Err(sdv_fota::linux::Error::InvalidTargetArguments)
+        ));
+        assert!(matches!(
+            run_selected_target_image_with_app_args(
+                &root.0,
+                Ecu::Engine,
+                Path::new("/bin/true"),
+                &[],
+                &args,
+            ),
+            Err(sdv_fota::linux::Error::InvalidTargetArguments)
+        ));
+        assert_eq!(boot.state().unwrap().trial.unwrap().boots_left, 2);
+    }
+}
+
+#[test]
+fn ecu_target_launcher_rejects_an_ecus_symlink_ancestor() {
+    let root = TempRoot::new();
+    let redirected = root.0.join("redirected-ecus");
+    fs::create_dir_all(&redirected).unwrap();
+    std::os::unix::fs::symlink(&redirected, root.0.join("ecus")).unwrap();
+
+    assert!(matches!(
+        run_selected_target_image_as_with_groups_and_app_args(
+            &root.0,
+            Ecu::Engine,
+            Path::new("/bin/true"),
+            &[],
+            1000,
+            1000,
+            &[],
+            &["--ecu".into(), "engine".into()],
+        ),
+        Err(sdv_fota::linux::Error::UnsafeStatePath)
+    ));
+    assert!(matches!(
+        run_selected_target_image_with_app_args(
+            &root.0,
+            Ecu::Engine,
+            Path::new("/bin/true"),
+            &[],
+            &["--ecu".into(), "engine".into()],
+        ),
+        Err(sdv_fota::linux::Error::UnsafeStatePath)
+    ));
 }
 
 #[test]

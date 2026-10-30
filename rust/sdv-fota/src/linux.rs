@@ -68,6 +68,7 @@ pub enum Error {
     UnsafeClientCredentials,
     DownloadFailed,
     InvalidRunIdentity,
+    InvalidTargetArguments,
     UnsafeStatePath,
     SlotIsNotActive,
 }
@@ -527,7 +528,28 @@ pub fn run_selected_image(
     health_program: &Path,
     health_args: &[std::ffi::OsString],
 ) -> Result<ExitStatus, Error> {
-    run_selected_image_with_identity(root.into(), health_program, health_args, None)
+    run_selected_image_with_identity(root.into(), health_program, health_args, &[], None, false)
+}
+
+/// Select and run the configured A/B image with fixed application arguments.
+///
+/// Arguments are passed as individual operating-system strings to the selected image. They are
+/// never interpreted by a shell and do not select the executable; the executable always comes
+/// from the integrity-verified slot image.
+pub fn run_selected_image_with_app_args(
+    root: impl Into<PathBuf>,
+    health_program: &Path,
+    health_args: &[std::ffi::OsString],
+    app_args: &[std::ffi::OsString],
+) -> Result<ExitStatus, Error> {
+    run_selected_image_with_identity(
+        root.into(),
+        health_program,
+        health_args,
+        app_args,
+        None,
+        false,
+    )
 }
 
 /// Select and run an image and its health command under the configured unprivileged identity.
@@ -557,6 +579,30 @@ pub fn run_selected_image_as_with_groups(
     gid: u32,
     supplementary_groups: &[u32],
 ) -> Result<ExitStatus, Error> {
+    run_selected_image_as_with_groups_and_app_args(
+        root,
+        health_program,
+        health_args,
+        uid,
+        gid,
+        supplementary_groups,
+        &[],
+    )
+}
+
+/// Select and run the configured A/B image with fixed arguments and explicit supplementary groups.
+///
+/// The image arguments are passed directly to the integrity-verified slot executable via
+/// `Command::args`; no shell command string is constructed.
+pub fn run_selected_image_as_with_groups_and_app_args(
+    root: impl Into<PathBuf>,
+    health_program: &Path,
+    health_args: &[std::ffi::OsString],
+    uid: u32,
+    gid: u32,
+    supplementary_groups: &[u32],
+    app_args: &[std::ffi::OsString],
+) -> Result<ExitStatus, Error> {
     if uid == 0 || gid == 0 || supplementary_groups.contains(&0) {
         return Err(Error::InvalidRunIdentity);
     }
@@ -564,11 +610,132 @@ pub fn run_selected_image_as_with_groups(
         root.into(),
         health_program,
         health_args,
+        app_args,
         Some((uid, gid, supplementary_groups.to_vec())),
+        false,
     )
 }
 
-fn command_with_identity(program: &Path, identity: Option<&(u32, u32, Vec<u32>)>) -> Command {
+/// Resolve one fixed ECU A/B state root below the configured base directory.
+///
+/// The vehicle target uses the base directory; each virtual ECU uses its own fixed subdirectory.
+/// This mapping is intentionally derived from the closed `Ecu` enum rather than a caller-supplied
+/// path component.
+pub fn state_root_for_target(base_root: impl Into<PathBuf>, target: crate::Ecu) -> PathBuf {
+    let base_root = base_root.into();
+    match target {
+        crate::Ecu::Vehicle => base_root,
+        crate::Ecu::Engine => base_root.join("ecus").join("engine"),
+        crate::Ecu::Brake => base_root.join("ecus").join("brake"),
+        crate::Ecu::Steering => base_root.join("ecus").join("steering"),
+    }
+}
+
+/// Select and run one target's A/B image with fixed application arguments.
+///
+/// ECU targets require exactly one matching `--ecu <target>` pair and a real, launcher-owned
+/// `ecus` parent directory. Arguments are passed directly to the selected image without a shell.
+pub fn run_selected_target_image_with_app_args(
+    base_root: impl Into<PathBuf>,
+    target: crate::Ecu,
+    health_program: &Path,
+    health_args: &[std::ffi::OsString],
+    app_args: &[std::ffi::OsString],
+) -> Result<ExitStatus, Error> {
+    validate_target_launch(base_root.into(), target, app_args, |root| {
+        run_selected_image_with_identity(root, health_program, health_args, app_args, None, false)
+    })
+}
+
+/// Launch one target's selected A/B image as the configured unprivileged account.
+///
+/// ECU targets require exactly one `--ecu <target>` pair in `app_args`. They clear inherited
+/// supplementary groups before exec, even when `supplementary_groups` is empty.
+pub fn run_selected_target_image_as_with_groups_and_app_args(
+    base_root: impl Into<PathBuf>,
+    target: crate::Ecu,
+    health_program: &Path,
+    health_args: &[std::ffi::OsString],
+    uid: u32,
+    gid: u32,
+    supplementary_groups: &[u32],
+    app_args: &[std::ffi::OsString],
+) -> Result<ExitStatus, Error> {
+    if uid == 0 || gid == 0 || supplementary_groups.contains(&0) {
+        return Err(Error::InvalidRunIdentity);
+    }
+    let identity = Some((uid, gid, supplementary_groups.to_vec()));
+    validate_target_launch(base_root.into(), target, app_args, |root| {
+        run_selected_image_with_identity(
+            root,
+            health_program,
+            health_args,
+            app_args,
+            identity,
+            target != crate::Ecu::Vehicle,
+        )
+    })
+}
+
+fn validate_target_launch(
+    base_root: PathBuf,
+    target: crate::Ecu,
+    app_args: &[std::ffi::OsString],
+    launch: impl FnOnce(PathBuf) -> Result<ExitStatus, Error>,
+) -> Result<ExitStatus, Error> {
+    if !target_app_args_match(target, app_args) {
+        return Err(Error::InvalidTargetArguments);
+    }
+    if target != crate::Ecu::Vehicle {
+        // ECU roots share this fixed, root-provisioned ancestor. Reject an ancestor symlink so
+        // selecting one ECU cannot redirect its boot state into another target's tree.
+        ensure_secure_directory(&base_root.join("ecus"), false)?;
+    }
+    launch(state_root_for_target(base_root, target))
+}
+
+fn target_app_args_match(target: crate::Ecu, app_args: &[std::ffi::OsString]) -> bool {
+    let expected = match target {
+        crate::Ecu::Vehicle => return true,
+        crate::Ecu::Engine => "engine",
+        crate::Ecu::Brake => "brake",
+        crate::Ecu::Steering => "steering",
+    };
+    let mut found = false;
+    let mut index = 0;
+    while index < app_args.len() {
+        let Some(option) = app_args[index].to_str() else {
+            index += 1;
+            continue;
+        };
+        match option {
+            "--ecu" => {
+                if found
+                    || app_args.get(index + 1).and_then(|value| value.to_str()) != Some(expected)
+                {
+                    return false;
+                }
+                found = true;
+                index += 2;
+            }
+            "--worker-socket" | "--coordinator-socket" => {
+                if app_args.get(index + 1).is_none() {
+                    return false;
+                }
+                index += 2;
+            }
+            _ if option.starts_with("--") => return false,
+            _ => index += 1,
+        }
+    }
+    found
+}
+
+fn command_with_identity(
+    program: &Path,
+    identity: Option<&(u32, u32, Vec<u32>)>,
+    clear_inherited_groups: bool,
+) -> Command {
     let mut command = Command::new(program);
     if let Some((uid, gid, groups)) = identity {
         let uid = *uid;
@@ -578,7 +745,13 @@ fn command_with_identity(program: &Path, identity: Option<&(u32, u32, Vec<u32>)>
         // allocation or locking in this callback. The groups buffer is owned by the closure.
         unsafe {
             command.pre_exec(move || {
-                if (!groups.is_empty() && setgroups(groups.len(), groups.as_ptr()) != 0)
+                let should_set_groups = !groups.is_empty() || clear_inherited_groups;
+                let group_list = if groups.is_empty() {
+                    std::ptr::null()
+                } else {
+                    groups.as_ptr()
+                };
+                if (should_set_groups && setgroups(groups.len(), group_list) != 0)
                     || setgid(gid) != 0
                     || setuid(uid) != 0
                 {
@@ -595,7 +768,9 @@ fn run_selected_image_with_identity(
     root: PathBuf,
     health_program: &Path,
     health_args: &[std::ffi::OsString],
+    app_args: &[std::ffi::OsString],
     identity: Option<(u32, u32, Vec<u32>)>,
+    clear_inherited_groups: bool,
 ) -> Result<ExitStatus, Error> {
     let mut boot = FileBootControl::new(&root);
     let decision = boot.select_for_boot()?;
@@ -615,7 +790,9 @@ fn run_selected_image_with_identity(
     } else {
         0
     };
-    let mut image_command = command_with_identity(&image, identity.as_ref());
+    let mut image_command =
+        command_with_identity(&image, identity.as_ref(), clear_inherited_groups);
+    image_command.args(app_args);
     if decision.trial {
         image_command
             .env("SDV_TRIAL_SLOT", slot_name(decision.slot))
@@ -645,6 +822,7 @@ fn run_selected_image_with_identity(
             health_args,
             Duration::from_millis(u64::from(trial_window_ms)),
             identity.as_ref(),
+            clear_inherited_groups,
         ) {
             let _ = child.kill();
             let _ = child.wait();
@@ -657,7 +835,7 @@ fn run_selected_image_with_identity(
         }
         stop_trial_process_for_restart(&mut child)?;
         // Report the successful commit to callers. The systemd unit uses Restart=always, so its
-        // next launch starts the committed image without SDV_TRIAL_SLOT.
+        // next launch starts the committed image without the trial environment.
         return Ok(ExitStatus::from_raw(0));
     }
     child.wait().map_err(Error::Io)
@@ -695,6 +873,7 @@ fn wait_for_trial_health(
     health_args: &[std::ffi::OsString],
     timeout: Duration,
     identity: Option<&(u32, u32, Vec<u32>)>,
+    clear_inherited_groups: bool,
 ) -> Result<(), Error> {
     let started = Instant::now();
     let stability_window = TRIAL_HEALTH_STABILITY_WINDOW.min(timeout / 2);
@@ -722,7 +901,8 @@ fn wait_for_trial_health(
                 return Err(Error::Io(error));
             }
         }
-        let mut health_command = command_with_identity(health_program, identity);
+        let mut health_command =
+            command_with_identity(health_program, identity, clear_inherited_groups);
         health_command
             .args(health_args)
             .env("SDV_TRIAL_SLOT", slot_name(slot))

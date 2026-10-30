@@ -1,4 +1,6 @@
-use sdv_fota::linux::{FileBootControl, FilePackageSource, FileSlotStorage, HttpsPackageSource};
+use sdv_fota::linux::{
+    state_root_for_target, FileBootControl, FilePackageSource, FileSlotStorage, HttpsPackageSource,
+};
 use sdv_fota::{
     BootControl, Ecu, FotaInstaller, PackageSource, Slot, ValidationContext, MAX_MANIFEST_BYTES,
 };
@@ -219,7 +221,7 @@ fn install_from_options(
     let source_value = required_option(&mut options, source_option)?;
     let target_ecu = required_option(&mut options, "--target")?;
     let target_ecu = parse_target(&target_ecu)?;
-    let state_root = target_state_root(base_root, target_ecu);
+    let state_root = state_root_for_target(base_root, target_ecu);
     let config_schema = required_u32(&mut options, "--config-schema", "config schema")?;
     let signal_if_version = required_u32(
         &mut options,
@@ -390,16 +392,7 @@ fn selected_state_root(options: &mut BTreeMap<String, OsString>) -> Result<PathB
         .map(|value| parse_target(&value))
         .transpose()?
         .unwrap_or(Ecu::Vehicle);
-    Ok(target_state_root(base_root, target))
-}
-
-fn target_state_root(base_root: PathBuf, target: Ecu) -> PathBuf {
-    match target {
-        Ecu::Vehicle => base_root,
-        Ecu::Engine => base_root.join("ecus").join("engine"),
-        Ecu::Brake => base_root.join("ecus").join("brake"),
-        Ecu::Steering => base_root.join("ecus").join("steering"),
-    }
+    Ok(state_root_for_target(base_root, target))
 }
 
 fn parse_slot(value: &OsStr) -> Result<Slot, String> {
@@ -452,7 +445,7 @@ fn usage() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_named_options, parse_target, target_state_root};
+    use super::{parse_named_options, parse_target, state_root_for_target};
     use sdv_fota::Ecu;
     use std::collections::BTreeMap;
     use std::ffi::OsString;
@@ -463,19 +456,19 @@ mod tests {
         let base = PathBuf::from("/var/lib/sdv-fota");
 
         assert_eq!(
-            target_state_root(base.clone(), Ecu::Vehicle),
+            state_root_for_target(base.clone(), Ecu::Vehicle),
             PathBuf::from("/var/lib/sdv-fota")
         );
         assert_eq!(
-            target_state_root(base.clone(), Ecu::Engine),
+            state_root_for_target(base.clone(), Ecu::Engine),
             PathBuf::from("/var/lib/sdv-fota/ecus/engine")
         );
         assert_eq!(
-            target_state_root(base.clone(), Ecu::Brake),
+            state_root_for_target(base.clone(), Ecu::Brake),
             PathBuf::from("/var/lib/sdv-fota/ecus/brake")
         );
         assert_eq!(
-            target_state_root(base, Ecu::Steering),
+            state_root_for_target(base, Ecu::Steering),
             PathBuf::from("/var/lib/sdv-fota/ecus/steering")
         );
         assert_eq!(
