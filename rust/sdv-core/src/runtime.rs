@@ -52,6 +52,18 @@ pub struct EcuTaskOutput {
     pub alive: Frame,
 }
 
+/// Failure when a host dispatches ECU cycles to an external backend.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ExternalEcuCycleError<E> {
+    /// External dispatch is unsupported while any local ECU task is disabled.
+    DisabledTask(VirtualEcuId),
+    /// The external dispatcher failed after the cycle began. The runtime is then poisoned and
+    /// must be discarded because a subset of workers may already have advanced.
+    Dispatch(E),
+    /// A previous external cycle failed; this runtime cannot safely be reused.
+    Poisoned,
+}
+
 impl VirtualEcuId {
     fn node(self) -> Node {
         match self {
@@ -171,6 +183,7 @@ pub struct VehicleRuntime {
     plant_alive: u64,
     bus: Bus,
     tick: u64,
+    external_cycle_poisoned: bool,
 }
 
 impl VehicleRuntime {
@@ -188,6 +201,7 @@ impl VehicleRuntime {
             plant_alive: 0,
             bus: Bus::new(0),
             tick: 0,
+            external_cycle_poisoned: false,
         }
     }
 
@@ -228,6 +242,61 @@ impl VehicleRuntime {
         platform_alive: bool,
     ) -> VehicleActuation {
         let tick = self.tick;
+        let incoming = self.begin_cycle(input);
+        let outputs = [
+            self.engine.step_10ms(&incoming[0]),
+            self.brake.step_10ms(&incoming[1]),
+            self.steering.step_10ms(&incoming[2]),
+        ];
+        self.finish_cycle(tick, outputs, vehicle_state, platform_alive)
+    }
+
+    /// Execute one cycle while Engine, Brake, and Steering are dispatched by an external
+    /// coordinator such as the Linux Unix-datagram worker adapter.
+    ///
+    /// This method owns the same VCU transmit, receive-age, bus routing, vehicle-state, watchdog,
+    /// and tick sequencing as [`Self::step_10ms`]. The dispatcher receives all three sets of frames
+    /// delivered by the in-process bus and must return one command/alive output per ECU. A batch
+    /// callback lets a platform send every worker request before it waits for any response. If
+    /// dispatch fails after any worker has advanced, the runtime must be
+    /// abandoned: a caller must stop the platform and must not retry this cycle with the same
+    /// runtime or workers.
+    pub fn step_10ms_with_external_ecus<E>(
+        &mut self,
+        input: DriverInput,
+        vehicle_state: VehicleState,
+        platform_alive: bool,
+        mut dispatch: impl FnMut(u64, [&[Frame]; 3]) -> Result<[EcuTaskOutput; 3], E>,
+    ) -> Result<VehicleActuation, ExternalEcuCycleError<E>> {
+        if self.external_cycle_poisoned {
+            return Err(ExternalEcuCycleError::Poisoned);
+        }
+        for (id, enabled) in [
+            (VirtualEcuId::Engine, self.engine.enabled),
+            (VirtualEcuId::Brake, self.brake.enabled),
+            (VirtualEcuId::Steering, self.steering.enabled),
+        ] {
+            if !enabled {
+                return Err(ExternalEcuCycleError::DisabledTask(id));
+            }
+        }
+        let tick = self.tick;
+        let incoming = self.begin_cycle(input);
+        let outputs = match dispatch(
+            tick,
+            [&incoming[0], &incoming[1], &incoming[2]].map(Vec::as_slice),
+        ) {
+            Ok(outputs) => outputs.map(Some),
+            Err(error) => {
+                self.external_cycle_poisoned = true;
+                return Err(ExternalEcuCycleError::Dispatch(error));
+            }
+        };
+        Ok(self.finish_cycle(tick, outputs, vehicle_state, platform_alive))
+    }
+
+    fn begin_cycle(&mut self, input: DriverInput) -> [Vec<Frame>; 3] {
+        let tick = self.tick;
         self.vcu.rte.input = input;
         if self.vcu.enabled {
             self.bus.send(tick, Frame::Safety(self.vcu.rte.safety));
@@ -235,17 +304,17 @@ impl VehicleRuntime {
                 self.bus.send(tick, Frame::DriverInput(self.vcu.rte.input));
             }
         }
+        self.deliver_to_ecus()
+    }
 
-        let incoming = self.deliver_to_ecus();
-        if let Some(output) = self.engine.step_10ms(&incoming[0]) {
-            self.bus.send(tick, output.command);
-            self.bus.send(tick, output.alive);
-        }
-        if let Some(output) = self.brake.step_10ms(&incoming[1]) {
-            self.bus.send(tick, output.command);
-            self.bus.send(tick, output.alive);
-        }
-        if let Some(output) = self.steering.step_10ms(&incoming[2]) {
+    fn finish_cycle(
+        &mut self,
+        tick: u64,
+        outputs: [Option<EcuTaskOutput>; 3],
+        vehicle_state: VehicleState,
+        platform_alive: bool,
+    ) -> VehicleActuation {
+        for output in outputs.into_iter().flatten() {
             self.bus.send(tick, output.command);
             self.bus.send(tick, output.alive);
         }
@@ -313,7 +382,7 @@ impl Default for VehicleRuntime {
 
 #[cfg(test)]
 mod tests {
-    use super::{VehicleRuntime, VirtualEcuId};
+    use super::{VehicleRuntime, VirtualEcuId, ECU_STEP_S};
     use crate::rte::DriverInput;
     use crate::sim::{Sim, SystemState};
 
@@ -411,6 +480,100 @@ mod tests {
             assert_eq!(actual.command, expected.cmd);
             assert_eq!(actual.safety, expected.safety);
         }
+    }
+
+    #[test]
+    fn external_ecu_dispatch_matches_the_in_process_cycle_boundary() {
+        use super::{EcuTaskOutput, VirtualEcuTask};
+        use crate::config::Config;
+        use crate::model::VehicleState;
+
+        let config = Config::default();
+        let mut local = VehicleRuntime::new(config.clone());
+        let mut dispatched = VehicleRuntime::new(config.clone());
+        let mut tasks = [
+            VirtualEcuTask::new(VirtualEcuId::Engine, &config),
+            VirtualEcuTask::new(VirtualEcuId::Brake, &config),
+            VirtualEcuTask::new(VirtualEcuId::Steering, &config),
+        ];
+
+        for cycle in 0..250_u64 {
+            let input = DriverInput {
+                throttle: if cycle % 60 < 30 { 0.4 } else { 0.0 },
+                brake: if cycle % 60 < 30 { 0.0 } else { 0.2 },
+                steer: if cycle % 40 < 20 { 0.1 } else { -0.1 },
+            };
+            let mut state = VehicleState::default();
+            state.t = cycle as f32 * ECU_STEP_S;
+            state.v = input.throttle - input.brake;
+            local.set_estop_request(cycle == 180);
+            dispatched.set_estop_request(cycle == 180);
+
+            let expected = local.step_10ms(input, state, true);
+            let actual = dispatched
+                .step_10ms_with_external_ecus(input, state, true, |cycle_id, frames| {
+                    assert_eq!(cycle_id, cycle);
+                    let engine: EcuTaskOutput = tasks[0]
+                        .step_10ms(frames[0])
+                        .expect("enabled Engine task emits one response");
+                    let brake: EcuTaskOutput = tasks[1]
+                        .step_10ms(frames[1])
+                        .expect("enabled Brake task emits one response");
+                    let steering: EcuTaskOutput = tasks[2]
+                        .step_10ms(frames[2])
+                        .expect("enabled Steering task emits one response");
+                    Ok::<_, ()>([engine, brake, steering])
+                })
+                .unwrap();
+            assert_eq!(actual, expected, "actuation diverged at cycle {cycle}");
+        }
+    }
+
+    #[test]
+    fn external_dispatch_rejects_disabled_tasks_and_poisons_after_worker_failure() {
+        use super::ExternalEcuCycleError;
+        use crate::model::VehicleState;
+
+        let mut disabled = VehicleRuntime::default();
+        disabled.set_ecu_enabled(VirtualEcuId::Engine, false);
+        let mut dispatched = false;
+        let result = disabled.step_10ms_with_external_ecus(
+            DriverInput::default(),
+            VehicleState::default(),
+            true,
+            |_, _| -> Result<[super::EcuTaskOutput; 3], &'static str> {
+                dispatched = true;
+                unreachable!("disabled tasks must be rejected before contacting workers")
+            },
+        );
+        assert_eq!(
+            result,
+            Err(ExternalEcuCycleError::DisabledTask(VirtualEcuId::Engine))
+        );
+        assert!(!dispatched);
+        assert_eq!(disabled.tick(), 0);
+
+        let mut failed = VehicleRuntime::default();
+        let result = failed.step_10ms_with_external_ecus(
+            DriverInput::default(),
+            VehicleState::default(),
+            true,
+            |_, _| Err::<[super::EcuTaskOutput; 3], _>("worker failure"),
+        );
+        assert_eq!(
+            result,
+            Err(ExternalEcuCycleError::Dispatch("worker failure"))
+        );
+        let result = failed.step_10ms_with_external_ecus(
+            DriverInput::default(),
+            VehicleState::default(),
+            true,
+            |_, _| -> Result<[super::EcuTaskOutput; 3], &'static str> {
+                unreachable!("a poisoned runtime must not dispatch another cycle")
+            },
+        );
+        assert_eq!(result, Err(ExternalEcuCycleError::Poisoned));
+        assert_eq!(failed.tick(), 0);
     }
 
     #[test]

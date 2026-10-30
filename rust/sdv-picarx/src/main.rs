@@ -14,6 +14,7 @@ use sdv_core::rte::ActuatorCmd;
 use sdv_core::runtime::VehicleActuation;
 use sdv_core::runtime::VehicleRuntime;
 use sdv_core::runtime_host::{self, SystemClock, ECU_PERIOD};
+use sdv_picarx::ecu_process_coordinator::{EcuProcessCoordinator, EcuProcessVehicleExecutor};
 use sdv_picarx::linux_gpio::LinuxMotorDirections;
 use sdv_picarx::linux_i2c::I2cTransport;
 use sdv_picarx::linux_input::{Error as InputError, UnixDatagramInputSource};
@@ -36,8 +37,31 @@ struct HostConfig {
     input_max_age_ms: u64,
     trial_stationary_speed_tolerance_mps: f32,
     trial_stationary_throttle_tolerance: f32,
+    #[serde(default)]
+    virtual_ecu_workers: Option<VirtualEcuWorkerConfig>,
     motor: MotorConfig,
     vehicle: VehicleConfig,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VirtualEcuWorkerConfig {
+    binary: PathBuf,
+    socket_directory: PathBuf,
+}
+
+impl VirtualEcuWorkerConfig {
+    fn is_valid(&self) -> bool {
+        let safe_path = |path: &PathBuf| {
+            path.is_absolute()
+                && !path
+                    .components()
+                    .any(|component| matches!(component, std::path::Component::ParentDir))
+        };
+        safe_path(&self.binary)
+            && safe_path(&self.socket_directory)
+            && !self.binary.starts_with(&self.socket_directory)
+    }
 }
 
 impl HostConfig {
@@ -51,6 +75,10 @@ impl HostConfig {
             || self.trial_stationary_throttle_tolerance < 0.0
             || self.left_direction_line == self.right_direction_line
             || self.input_socket == self.health_socket
+            || self
+                .virtual_ecu_workers
+                .as_ref()
+                .is_some_and(|workers| !workers.is_valid())
             || !motor.is_valid()
             || !vehicle.is_valid()
         {
@@ -340,17 +368,45 @@ fn run() -> Result<(), String> {
 
     let platform = PiCarX::new(inputs, actuators, vehicle_calibration)
         .map_err(|error| format!("cannot initialize PiCar-X platform: {error}"))?;
-    let reporting_platform = HealthReportingPlatform {
+    let mut reporting_platform = HealthReportingPlatform {
         platform,
         health,
         trial_mode,
     };
-    let mut executor = VehicleExecutor::new(VehicleRuntime::default(), reporting_platform);
-    let result = runtime_host::run(&mut executor, &mut SystemClock::default(), || {
-        shutdown.load(Ordering::Relaxed)
-    });
+    let result = match config.virtual_ecu_workers {
+        Some(worker_config) => {
+            let coordinator = match EcuProcessCoordinator::spawn(
+                worker_config.binary,
+                worker_config.socket_directory,
+            ) {
+                Ok(coordinator) => coordinator,
+                Err(error) => {
+                    let stop_error = reporting_platform.stop().err();
+                    return Err(format!(
+                        "cannot start virtual ECU workers: {error}; motor stop result: {stop_error:?}"
+                    ));
+                }
+            };
+            let mut executor = EcuProcessVehicleExecutor::new(
+                VehicleRuntime::default(),
+                reporting_platform,
+                coordinator,
+            );
+            runtime_host::run(&mut executor, &mut SystemClock::default(), || {
+                shutdown.load(Ordering::Relaxed)
+            })
+            .map_err(|error| format!("vehicle worker runtime stopped: {error:?}"))
+        }
+        None => {
+            let mut executor = VehicleExecutor::new(VehicleRuntime::default(), reporting_platform);
+            runtime_host::run(&mut executor, &mut SystemClock::default(), || {
+                shutdown.load(Ordering::Relaxed)
+            })
+            .map_err(|error| format!("vehicle runtime stopped: {error:?}"))
+        }
+    };
     health_server.shutdown();
-    result.map_err(|error| format!("vehicle runtime stopped: {error:?}"))
+    result
 }
 
 fn config_path() -> Result<PathBuf, String> {
@@ -397,6 +453,19 @@ mod tests {
         let fota_config: HostConfig =
             serde_json::from_str(include_str!("../config/pi5.fota.disabled.example.json")).unwrap();
         assert!(fota_config.calibrations().is_ok());
+        assert!(fota_config.virtual_ecu_workers.is_none());
+
+        let worker_config: HostConfig = serde_json::from_str(include_str!(
+            "../config/pi5.worker-processes.disabled.example.json"
+        ))
+        .unwrap();
+        assert!(worker_config.calibrations().is_ok());
+        assert!(worker_config.virtual_ecu_workers.is_some());
+        let unsafe_worker_path =
+            include_str!("../config/pi5.worker-processes.disabled.example.json")
+                .replace("/usr/bin/sdv-picarx-ecu-worker", "../sdv-picarx-ecu-worker");
+        let unsafe_worker_config: HostConfig = serde_json::from_str(&unsafe_worker_path).unwrap();
+        assert!(unsafe_worker_config.calibrations().is_err());
     }
 
     #[test]
