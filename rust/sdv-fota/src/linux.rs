@@ -159,6 +159,12 @@ impl HttpsPackageSource {
             "--output",
             "-",
         ]);
+        if client_certificate.is_some() {
+            // The device identity is authorized for the configured artifact origin only. Keep
+            // redirects enabled for the package response, but fail before following any redirect
+            // so curl cannot present this certificate to a different HTTPS host.
+            command.args(["--max-redirs", "0"]);
+        }
         if let (Some(certificate), Some(key)) = (client_certificate, client_key) {
             command
                 .arg("--cert")
