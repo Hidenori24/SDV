@@ -1136,6 +1136,7 @@ fn install_url_streams_https_package_through_curl_ingress() {
         certificate.display(),
         private_key.display()
     )));
+    assert!(captured_args.contains("--max-redirs\n0\n"));
     assert_eq!(
         fs::read(FileSlotStorage::new(&root.0).image_path(Slot::B)).unwrap(),
         payload
