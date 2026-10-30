@@ -166,11 +166,7 @@ impl HttpsPackageSource {
             command.args(["--max-redirs", "0"]);
         }
         if let (Some(certificate), Some(key)) = (client_certificate, client_key) {
-            command
-                .arg("--cert")
-                .arg(certificate)
-                .arg("--key")
-                .arg(key);
+            command.arg("--cert").arg(certificate).arg("--key").arg(key);
         }
         let mut child = command
             .arg("--")
@@ -241,9 +237,7 @@ fn validate_client_identity_parent_chain(parent: &Path, owner: u32) -> Result<()
         if current == Path::new("/") {
             break;
         }
-        current = current
-            .parent()
-            .ok_or(Error::UnsafeClientCredentials)?;
+        current = current.parent().ok_or(Error::UnsafeClientCredentials)?;
         immediate = false;
     }
     Ok(())
