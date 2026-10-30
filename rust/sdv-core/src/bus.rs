@@ -441,6 +441,7 @@ mod frame_wire_tests {
             Frame::decode_wire(&bytes[..length]),
             Err(FrameWireError::InvalidMagic)
         );
+        bytes[0] ^= 1;
         assert_eq!(
             Frame::decode_wire(&bytes[..length - 1]),
             Err(FrameWireError::InvalidLength)
@@ -450,7 +451,6 @@ mod frame_wire_tests {
             Err(FrameWireError::InvalidLength)
         );
 
-        bytes[0] ^= 1;
         bytes[6] += 1;
         assert_eq!(
             Frame::decode_wire(&bytes[..length]),
