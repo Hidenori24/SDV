@@ -8,7 +8,10 @@ use std::fmt;
 use std::io;
 use std::os::unix::net::UnixDatagram;
 
-use sdv_core::bus::{Frame, FrameWireError, Node, FRAME_WIRE_MAX_SIZE};
+use sdv_core::bus::{
+    Frame, FrameWireError, Node, ALIVE_BRAKE_INDEX, ALIVE_ENGINE_INDEX, ALIVE_STEERING_INDEX,
+    FRAME_WIRE_MAX_SIZE,
+};
 use sdv_core::config::Config;
 use sdv_core::runtime::{EcuTaskOutput, VirtualEcuId, VirtualEcuTask};
 
@@ -21,6 +24,10 @@ const CHECKSUM_SIZE: usize = 4;
 const CYCLE_ID_START: usize = 6;
 const FRAME_COUNT_OFFSET: usize = 14;
 const FRAME_RECORD_OVERHEAD: usize = 1;
+const RESPONSE_FRAME_COUNT: usize = 2;
+const ECU_ID_ENGINE: u8 = 1;
+const ECU_ID_BRAKE: u8 = 2;
+const ECU_ID_STEERING: u8 = 3;
 
 /// Maximum request or response datagram size: fixed header, two maximal frames, and CRC32.
 pub const WORKER_DATAGRAM_MAX_SIZE: usize =
@@ -208,7 +215,7 @@ pub fn decode_response(datagram: &[u8]) -> Result<WorkerResponse, WorkerError> {
     let ecu_id = decode_ecu_id(datagram[5])?;
     let cycle_id = read_cycle_id(datagram);
     let frame_count = usize::from(datagram[FRAME_COUNT_OFFSET]);
-    if frame_count != 2 {
+    if frame_count != RESPONSE_FRAME_COUNT {
         return Err(WorkerError::InvalidResponseFrames);
     }
 
@@ -329,7 +336,7 @@ fn encode_response(
     response[4] = WORKER_PROTOCOL_VERSION;
     response[5] = encode_ecu_id(ecu_id);
     response[CYCLE_ID_START..CYCLE_ID_START + 8].copy_from_slice(&cycle_id.to_le_bytes());
-    response[FRAME_COUNT_OFFSET] = 2;
+    response[FRAME_COUNT_OFFSET] = RESPONSE_FRAME_COUNT as u8;
 
     let mut cursor = HEADER_SIZE;
     for frame in [output.command, output.alive] {
@@ -367,28 +374,32 @@ fn valid_response_frames(ecu_id: VirtualEcuId, command: Frame, alive: Frame) -> 
             | (VirtualEcuId::Brake, Frame::CmdBrake(_))
             | (VirtualEcuId::Steering, Frame::CmdSteer(_))
     );
-    let alive_matches = matches!(
-        (ecu_id, alive),
-        (VirtualEcuId::Engine, Frame::Alive { index: 0, .. })
-            | (VirtualEcuId::Brake, Frame::Alive { index: 1, .. })
-            | (VirtualEcuId::Steering, Frame::Alive { index: 2, .. })
-    );
+    let alive_matches =
+        matches!(alive, Frame::Alive { index, .. } if index == ecu_alive_index(ecu_id));
     command_matches && alive_matches
+}
+
+fn ecu_alive_index(ecu_id: VirtualEcuId) -> usize {
+    match ecu_id {
+        VirtualEcuId::Engine => ALIVE_ENGINE_INDEX,
+        VirtualEcuId::Brake => ALIVE_BRAKE_INDEX,
+        VirtualEcuId::Steering => ALIVE_STEERING_INDEX,
+    }
 }
 
 fn encode_ecu_id(ecu_id: VirtualEcuId) -> u8 {
     match ecu_id {
-        VirtualEcuId::Engine => 1,
-        VirtualEcuId::Brake => 2,
-        VirtualEcuId::Steering => 3,
+        VirtualEcuId::Engine => ECU_ID_ENGINE,
+        VirtualEcuId::Brake => ECU_ID_BRAKE,
+        VirtualEcuId::Steering => ECU_ID_STEERING,
     }
 }
 
 fn decode_ecu_id(value: u8) -> Result<VirtualEcuId, WorkerError> {
     match value {
-        1 => Ok(VirtualEcuId::Engine),
-        2 => Ok(VirtualEcuId::Brake),
-        3 => Ok(VirtualEcuId::Steering),
+        ECU_ID_ENGINE => Ok(VirtualEcuId::Engine),
+        ECU_ID_BRAKE => Ok(VirtualEcuId::Brake),
+        ECU_ID_STEERING => Ok(VirtualEcuId::Steering),
         _ => Err(WorkerError::InvalidEcuId),
     }
 }
@@ -449,7 +460,7 @@ mod tests {
         datagram[checksum_offset..].copy_from_slice(&checksum.to_le_bytes());
     }
 
-    fn input_frames(throttle: f32) -> [Frame; 2] {
+    fn input_frames(throttle: f32) -> [Frame; MAX_INPUT_FRAMES] {
         [
             Frame::Safety(Safety::default()),
             Frame::DriverInput(DriverInput {
@@ -487,7 +498,7 @@ mod tests {
             assert_eq!(
                 response.alive,
                 Frame::Alive {
-                    index: 0,
+                    index: ALIVE_ENGINE_INDEX,
                     counter: if cycle_id == 4 { 1 } else { 2 },
                 }
             );
@@ -522,7 +533,7 @@ mod tests {
                 assert_eq!(
                     response.alive,
                     Frame::Alive {
-                        index: encode_ecu_id(ecu_id) as usize - 1,
+                        index: ecu_alive_index(ecu_id),
                         counter: if cycle_id == 10 { 1 } else { 2 },
                     }
                 );
@@ -550,7 +561,7 @@ mod tests {
                 .unwrap()
                 .alive,
             Frame::Alive {
-                index: 0,
+                index: ALIVE_ENGINE_INDEX,
                 counter: 1,
             }
         );
@@ -571,7 +582,7 @@ mod tests {
                 .unwrap()
                 .alive,
             Frame::Alive {
-                index: 0,
+                index: ALIVE_ENGINE_INDEX,
                 counter: 2,
             }
         );
@@ -638,7 +649,7 @@ mod tests {
                 .unwrap()
                 .alive,
             Frame::Alive {
-                index: 0,
+                index: ALIVE_ENGINE_INDEX,
                 counter: 1,
             }
         );
