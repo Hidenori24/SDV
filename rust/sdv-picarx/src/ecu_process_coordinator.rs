@@ -139,6 +139,7 @@ impl<P: VehiclePlatform> HostCycleExecutor for EcuProcessVehicleExecutor<P> {
 const SOCKET_MODE: u32 = 0o600;
 const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
 const WORKER_STARTUP_TIMEOUT: Duration = Duration::from_secs(2);
+const EXTERNAL_WORKER_STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 const WORKER_STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(1);
 const NANOS_PER_SECOND: u64 = 1_000_000_000;
 const COORDINATOR_SOCKET_NAME: &str = "coordinator.sock";
@@ -264,10 +265,10 @@ struct WorkerProcess {
     ecu: VirtualEcuId,
     socket_path: PathBuf,
     socket_identity: Option<SocketIdentity>,
-    child: Child,
+    child: Option<Child>,
 }
 
-/// Owns one Unix datagram reply socket and one process per virtual ECU.
+/// Owns one Unix datagram reply socket and coordinates one worker per virtual ECU.
 pub struct EcuProcessCoordinator {
     socket: UnixDatagram,
     socket_path: PathBuf,
@@ -276,6 +277,7 @@ pub struct EcuProcessCoordinator {
     socket_directory_identity: SocketIdentity,
     owner: u32,
     workers: Vec<WorkerProcess>,
+    owns_workers: bool,
     last_cycle_id: Option<u64>,
 }
 
@@ -294,29 +296,12 @@ impl EcuProcessCoordinator {
         let socket_directory_identity = directory_identity(&socket_directory, owner)?;
         let startup_deadline = Instant::now() + WORKER_STARTUP_TIMEOUT;
 
-        let socket_path = socket_directory.join(COORDINATOR_SOCKET_NAME);
-        ensure_path_absent(&socket_path)?;
-        let socket = UnixDatagram::bind(&socket_path)?;
-        let identity = socket_identity(&socket_path, owner)?;
-        let mut socket_guard = SocketPathGuard {
-            path: socket_path.clone(),
-            owner,
-            identity: Some(identity),
-        };
-        fs::set_permissions(&socket_path, fs::Permissions::from_mode(SOCKET_MODE))?;
-        validate_owned_socket(&socket_path, owner, &identity)?;
-        socket_guard.identity = None;
-
-        let mut coordinator = Self {
-            socket,
-            socket_path,
-            socket_identity: identity,
-            socket_directory: socket_directory.clone(),
+        let mut coordinator = Self::bind_coordinator_socket(
+            socket_directory.clone(),
             socket_directory_identity,
             owner,
-            workers: Vec::with_capacity(ECU_IDS.len()),
-            last_cycle_id: None,
-        };
+            true,
+        )?;
 
         for (ecu, socket_name) in ECU_IDS.into_iter().zip(WORKER_SOCKET_NAMES) {
             let worker_socket = socket_directory.join(socket_name);
@@ -354,13 +339,76 @@ impl EcuProcessCoordinator {
                 ecu,
                 socket_path: worker_socket,
                 socket_identity: None,
-                child,
+                child: Some(child),
             });
             // Capture each worker's socket identity before starting the next process. If a later
             // spawn/readiness check fails, Drop can reap this child and remove only its socket.
             coordinator.wait_for_worker(coordinator.workers.len() - 1, startup_deadline)?;
         }
         Ok(coordinator)
+    }
+
+    /// Connect to the three independently managed worker sockets in `socket_directory`.
+    ///
+    /// The coordinator creates and owns only `coordinator.sock`; worker processes and their
+    /// socket inodes remain owned by their service managers. Each worker socket must be an
+    /// owner-only Unix datagram socket created by this effective UID in the validated private
+    /// socket directory.
+    pub fn connect_external(socket_directory: impl AsRef<Path>) -> Result<Self, Error> {
+        let owner = unsafe { libc::geteuid() };
+        let socket_directory = socket_directory.as_ref().to_path_buf();
+        let socket_directory_identity =
+            validate_existing_socket_directory(&socket_directory, owner)?;
+        let mut coordinator = Self::bind_coordinator_socket(
+            socket_directory,
+            socket_directory_identity,
+            owner,
+            false,
+        )?;
+        let startup_deadline = Instant::now() + EXTERNAL_WORKER_STARTUP_TIMEOUT;
+
+        for (ecu, socket_name) in ECU_IDS.into_iter().zip(WORKER_SOCKET_NAMES) {
+            coordinator.workers.push(WorkerProcess {
+                ecu,
+                socket_path: coordinator.socket_directory.join(socket_name),
+                socket_identity: None,
+                child: None,
+            });
+            coordinator
+                .wait_for_external_worker(coordinator.workers.len() - 1, startup_deadline)?;
+        }
+        Ok(coordinator)
+    }
+
+    fn bind_coordinator_socket(
+        socket_directory: PathBuf,
+        socket_directory_identity: SocketIdentity,
+        owner: u32,
+        owns_workers: bool,
+    ) -> Result<Self, Error> {
+        let socket_path = socket_directory.join(COORDINATOR_SOCKET_NAME);
+        ensure_path_absent(&socket_path)?;
+        let socket = UnixDatagram::bind(&socket_path)?;
+        let identity = socket_identity(&socket_path, owner)?;
+        let mut socket_guard = SocketPathGuard {
+            path: socket_path.clone(),
+            owner,
+            identity: Some(identity),
+        };
+        fs::set_permissions(&socket_path, fs::Permissions::from_mode(SOCKET_MODE))?;
+        validate_owned_socket(&socket_path, owner, &identity)?;
+        socket_guard.identity = None;
+        Ok(Self {
+            socket,
+            socket_path,
+            socket_identity: identity,
+            socket_directory,
+            socket_directory_identity,
+            owner,
+            workers: Vec::with_capacity(ECU_IDS.len()),
+            owns_workers,
+            last_cycle_id: None,
+        })
     }
 
     /// Generate a boot-monotonic wire cycle ID. It is independent from the runtime's 10 ms tick,
@@ -486,7 +534,13 @@ impl EcuProcessCoordinator {
                         device: metadata.dev(),
                         inode: metadata.ino(),
                     });
-                    if let Some(status) = worker.child.try_wait()? {
+                    if let Some(status) = worker
+                        .child
+                        .as_mut()
+                        .map(Child::try_wait)
+                        .transpose()?
+                        .flatten()
+                    {
                         return Err(Error::WorkerExited {
                             ecu: worker.ecu,
                             status,
@@ -497,13 +551,52 @@ impl EcuProcessCoordinator {
                     }
                 }
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    if let Some(status) = worker.child.try_wait()? {
+                    if let Some(status) = worker
+                        .child
+                        .as_mut()
+                        .map(Child::try_wait)
+                        .transpose()?
+                        .flatten()
+                    {
                         return Err(Error::WorkerExited {
                             ecu: worker.ecu,
                             status,
                         });
                     }
                 }
+                Err(error) => return Err(Error::Io(error)),
+            }
+            if Instant::now() >= deadline {
+                return Err(Error::WorkerStartupTimeout(worker.ecu));
+            }
+            thread::sleep(WORKER_STARTUP_POLL_INTERVAL);
+        }
+    }
+
+    fn wait_for_external_worker(&mut self, index: usize, deadline: Instant) -> Result<(), Error> {
+        let worker = &mut self.workers[index];
+        loop {
+            match fs::symlink_metadata(&worker.socket_path) {
+                Ok(metadata) => {
+                    if !metadata.file_type().is_socket() || metadata.uid() != self.owner {
+                        return Err(Error::InvalidWorkerSocket(worker.ecu));
+                    }
+                    let identity = SocketIdentity {
+                        device: metadata.dev(),
+                        inode: metadata.ino(),
+                    };
+                    if let Some(previous) = worker.socket_identity {
+                        if previous.device != identity.device || previous.inode != identity.inode {
+                            return Err(Error::InvalidWorkerSocket(worker.ecu));
+                        }
+                    } else {
+                        worker.socket_identity = Some(identity);
+                    }
+                    if metadata.permissions().mode() & 0o777 == SOCKET_MODE {
+                        return Ok(());
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => return Err(Error::Io(error)),
             }
             if Instant::now() >= deadline {
@@ -531,11 +624,13 @@ impl EcuProcessCoordinator {
             &self.socket_directory_identity,
         )
         .map_err(|_| Error::UnsafeSocketPath)?;
-        if let Some(status) = self.workers[index].child.try_wait()? {
-            return Err(Error::WorkerExited {
-                ecu: self.workers[index].ecu,
-                status,
-            });
+        if let Some(child) = self.workers[index].child.as_mut() {
+            if let Some(status) = child.try_wait()? {
+                return Err(Error::WorkerExited {
+                    ecu: self.workers[index].ecu,
+                    status,
+                });
+            }
         }
         let identity = self.workers[index]
             .socket_identity
@@ -548,9 +643,13 @@ impl EcuProcessCoordinator {
 
 impl Drop for EcuProcessCoordinator {
     fn drop(&mut self) {
-        for worker in &mut self.workers {
-            let _ = worker.child.kill();
-            let _ = worker.child.wait();
+        if self.owns_workers {
+            for worker in &mut self.workers {
+                if let Some(child) = worker.child.as_mut() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
         }
         if validate_private_directory(
             &self.socket_directory,
@@ -559,9 +658,11 @@ impl Drop for EcuProcessCoordinator {
         )
         .is_ok()
         {
-            for worker in &self.workers {
-                if let Some(identity) = &worker.socket_identity {
-                    remove_socket_if_same(&worker.socket_path, self.owner, identity);
+            if self.owns_workers {
+                for worker in &self.workers {
+                    if let Some(identity) = &worker.socket_identity {
+                        remove_socket_if_same(&worker.socket_path, self.owner, identity);
+                    }
                 }
             }
             remove_socket_if_same(&self.socket_path, self.owner, &self.socket_identity);
@@ -614,6 +715,15 @@ fn prepare_socket_directory(path: &Path, owner: u32) -> Result<(), Error> {
         Err(error) => return Err(Error::Io(error)),
     }
     Ok(())
+}
+
+fn validate_existing_socket_directory(path: &Path, owner: u32) -> Result<SocketIdentity, Error> {
+    if !safe_absolute_path(path) {
+        return Err(Error::UnsafeSocketPath);
+    }
+    let parent = path.parent().ok_or(Error::UnsafeSocketPath)?;
+    validate_directory_chain(parent, owner)?;
+    directory_identity(path, owner)
 }
 
 fn validate_worker_executable(path: &Path, owner: u32) -> Result<(), Error> {

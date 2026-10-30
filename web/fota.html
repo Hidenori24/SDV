@@ -119,14 +119,30 @@ sudo systemctl enable --now sdv-fota-launcher.service</code></pre>
   </section>
   <section class="card">
     <h2>適用範囲</h2>
-    <p>Pi/Linux runtimeは既定で既存のin-process ECU経路を使います。仮想ECUを別processにする場合は、vehicle configへ次の設定を追加します。</p>
+    <p>Pi/Linux runtimeは既定で既存のin-process ECU経路を使います。coordinatorがworker processをspawnする既存モードは、vehicle configへ次の設定を追加します。</p>
 <pre><code>"virtual_ecu_workers": {
   "binary": "/usr/bin/sdv-picarx-ecu-worker",
   "socket_directory": "/run/sdv-picarx/workers"
 }</code></pre>
-    <p>coordinatorがsensor/inputとGPIO/I²C actuatorを所有し、Engine、Brake、Steering workerへ各10ms cycleのrequestを一括送信します。全workerのECU ID・peer path・boot内単調増加cycle IDが一致したresponseを期限内にそろえたときだけ出力します。欠落、timeout、malformedまたはstale response、期限超過ではsafe-stopし、partial/stale commandを適用しません。workerはhost serviceのUID・supplementary groups・capabilitiesを継承するため、このprocess modeはprivilege boundaryではありません。実運用binaryはroot-ownedとし、将来はroot管理のper-ECU service boundaryで権限を分離する必要があります。設定を省略すると既存in-process経路を維持します。</p>
+    <p>systemd管理のworkerへ接続する場合は <code>mode: external</code> を明示して <code>binary</code> を省略し、coordinatorが既存のEngine、Brake、Steering socketを使います。省略したmodeは互換性のため <code>spawn</code> なので、binaryの指定漏れでexternalへ切り替わることはありません。coordinatorは自分の <code>coordinator.sock</code> だけを作成・削除し、3つのworker socketが安全に検証されるまでcycleを始めません。worker processの起動・停止・socket削除は行いません。</p>
+<pre><code>sudo install -o root -g root -m 0644 rust/sdv-picarx/config/pi5.external-workers.disabled.example.json /etc/sdv-picarx/vehicle.json
+sudo install -m 0644 deploy/systemd/sdv-fota-launcher.service /etc/systemd/system/
+sudo install -m 0644 deploy/systemd/sdv-fota-ecu@.service /etc/systemd/system/
+sudo install -m 0644 deploy/systemd/sdv-fota-workers.target /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl stop sdv-fota-workers.target
+sudo systemctl restart sdv-fota-launcher.service
+sudo systemctl enable --now sdv-fota-workers.target</code></pre>
+    <p>各serviceは <code>sdv-fota-launcher --target engine|brake|steering</code> のactive-only経路を使い、固定したmatching <code>--ecu</code> とsocket argvを渡します。host launcher起動直後にcoordinator socketがまだ無い場合、workerはbounded retryし、host coordinatorも全worker socketのreadinessを待ってからruntime cycleを開始します。worker serviceはhost launcherのrestartに追随します。</p>
+    <p>最初のsocket権限設計ではroot所有の <code>/etc/default/sdv-fota-launcher</code> で <code>SDV_FOTA_ECU_APP_UID/GID</code> を既存 <code>sdv-app</code> の数値UID/GIDにし、<code>SDV_FOTA_ECU_APP_GROUPS=</code> を空にします。workerにgpio/i2c supplementary groupは渡しません。同じUIDを共有するため、この構成はOS privilege isolationではありません。coordinatorはsensor/inputとGPIO/I²C actuatorを所有し、全workerのECU ID・peer path・boot内単調増加cycle IDが一致したresponseを期限内にそろえたときだけ出力します。欠落、timeout、malformedまたはstale response、期限超過ではsafe-stopし、partial/stale commandを適用しません。設定の <code>binary</code> を指定すれば従来のcoordinator spawn mode、<code>virtual_ecu_workers</code> 全体を省略すれば既存in-process経路を維持します。</p>
+    <p>externalから戻す場合はhostとworker targetを両方停止し、targetをdisableしてからroot-owned configをspawnまたはin-process用に差し替え、hostだけ再起動します。externalへ戻す場合も、hostがactiveなら先にhostとtargetをstopし、configを置いてhostをstart/restartして再読込させてからtargetをenable/startします。targetだけ停止した状態でexternal hostを動かすとworkerが欠落し、hostはsafe-stopしてrestartを繰り返します。</p>
+<pre><code>sudo systemctl stop sdv-fota-launcher.service sdv-fota-workers.target
+sudo systemctl disable sdv-fota-workers.target
+# install the root-owned spawn-mode or in-process vehicle config
+sudo install -o root -g root -m 0644 /path/to/vehicle-config.json /etc/sdv-picarx/vehicle.json
+sudo systemctl start sdv-fota-launcher.service</code></pre>
     <ul>
-      <li>車両全体は既存互換の <code>vehicle</code> A/B imageを使います。Linux CLIは <code>engine</code>、<code>brake</code>、<code>steering</code> の個別signed packageを独立stageし、target別trial metadataを記録できます。worker process mode自体はopt-inで動きますが、個別ECU packageのslot選択・trial worker起動・health・自動commit/rollbackはlauncherに接続されていません。</li>
+      <li>車両全体は既存互換の <code>vehicle</code> A/B imageを使います。Linux CLIは <code>engine</code>、<code>brake</code>、<code>steering</code> の個別signed packageを独立stageし、target別trial metadataを記録できます。ECU worker serviceはactive imageだけを起動します。個別ECU candidate/trial、output hold、candidate health、socket route cutover、coordinator管理のcommit/rollbackはまだ未接続です。</li>
       <li>Pi OS、EEPROM、boot partition、raw deviceは書き換えません。</li>
       <li>Linux上の自動テストはありますが、Pi 5実機でのGPIO/I²C、入力・状態推定プロセス、校正、電源断・再起動・復旧試験はまだ必要です。</li>
       <li>AUTOSAR Classic実機には、採用BSW/MCAL、DCM、NvM、Flash、Bootloaderへの個別接続が必要です。</li>

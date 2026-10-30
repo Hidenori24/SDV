@@ -50,7 +50,7 @@ sudo install -o root -g root -m 0644 rust/sdv-picarx/config/pi5.fota.disabled.ex
 sudo install -o root -g root -m 0755 rust/sdv-picarx/target/release/sdv-picarx /var/lib/sdv-fota/slots/a/sdv-image.bin
 sudo sdv-fota init --state-root /var/lib/sdv-fota --active-slot a \
   --active-version 1.0.0 --security-version 1
-printf 'SDV_FOTA_APP_UID=%s\nSDV_FOTA_APP_GID=%s\nSDV_PICARX_CONFIG=/etc/sdv-picarx/vehicle.json\n' "$(id -u sdv-app)" "$(id -g sdv-app)" | sudo tee /etc/default/sdv-fota-launcher >/dev/null
+printf 'SDV_FOTA_APP_UID=%s\nSDV_FOTA_APP_GID=%s\nSDV_FOTA_ECU_APP_UID=%s\nSDV_FOTA_ECU_APP_GID=%s\nSDV_FOTA_ECU_APP_GROUPS=\nSDV_PICARX_CONFIG=/etc/sdv-picarx/vehicle.json\n' "$(id -u sdv-app)" "$(id -g sdv-app)" "$(id -u sdv-app)" "$(id -g sdv-app)" | sudo tee /etc/default/sdv-fota-launcher >/dev/null
 sudo chown root:root /etc/default/sdv-fota-launcher
 sudo chmod 0644 /etc/default/sdv-fota-launcher
 ```
@@ -61,8 +61,8 @@ be writable by group or other users. The tools never follow symlinked state root
 images, boot records, or lock files. Update images and boot records are created through unique, exclusive
 temporary files before being atomically renamed into place.
 
-The existing Pi host keeps Engine, Brake, and Steering in-process by default. To opt into worker
-processes, add this object to `/etc/sdv-picarx/vehicle.json`:
+The existing Pi host keeps Engine, Brake, and Steering in-process by default. To have the vehicle
+coordinator spawn the worker processes, add this object to `/etc/sdv-picarx/vehicle.json`:
 
 ```json
 "virtual_ecu_workers": {
@@ -79,12 +79,74 @@ miss stop the platform without applying partial or previous-cycle commands. The 
 is owner-only; worker and coordinator socket cleanup checks the recorded inode. The worker executable
 must be a regular executable owned by root or the host account and cannot be group/other writable.
 Install a root-owned executable for deployment; host-owned executables are accepted for local
-testing. Workers inherit the vehicle service's UID, supplementary groups, and capabilities, so this
-mode is process separation only, not a privilege boundary. The worker code does not open GPIO/I2C;
-future privilege separation needs root-managed per-ECU services with their own credentials and
-device access policy. The worker processes exit if the coordinator is killed. Omitting this object leaves the existing
-in-process runtime unchanged. Details and a disabled-output sample config are in
+testing. Spawned workers inherit the vehicle service's UID, supplementary groups, and capabilities,
+so this mode is process separation only, not a privilege boundary.
+
+For systemd-managed ECU worker processes, initialize a verified active image under each per-ECU
+state root and install the external-worker sample config, which explicitly selects `mode: external`
+and omits `binary`. The default mode is `spawn` for compatibility; a missing spawn binary is rejected
+instead of silently changing modes:
+
+```sh
+sudo install -o root -g root -m 0644 rust/sdv-picarx/config/pi5.external-workers.disabled.example.json /etc/sdv-picarx/vehicle.json
+sudo install -m 0644 deploy/systemd/sdv-fota-launcher.service /etc/systemd/system/
+sudo install -m 0644 deploy/systemd/sdv-fota-ecu@.service /etc/systemd/system/
+sudo install -m 0644 deploy/systemd/sdv-fota-workers.target /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl stop sdv-fota-workers.target
+sudo systemctl restart sdv-fota-launcher.service
+sudo systemctl enable --now sdv-fota-workers.target
+```
+
+With `mode` set to `external` and `binary` omitted, the host binds `coordinator.sock`, waits for all
+three existing worker sockets, and neither starts nor stops worker processes or removes their socket paths. It owns only
+the coordinator socket. The worker target starts the `engine`, `brake`, and `steering` service
+instances after the host launcher; the units use fixed matching `--target`/`--ecu` values and the
+FOTA launcher's active-only ECU API. They retry while the vehicle application starts and the
+coordinator socket is unavailable. The coordinator does not begin its 10 ms task cycle until all
+three worker sockets pass readiness checks. Each worker holds a mode-0600 per-socket lock, refuses
+a second live instance, and reclaims only an unresponsive socket owned by the expected UID after
+rechecking the socket inode. This also lets systemd restart a worker after SIGKILL leaves a stale
+socket path behind. The host unit prepares the private worker directory before the app starts;
+external-connect mode requires that existing directory and does not create it.
+
+For this initial socket permission design, set `SDV_FOTA_ECU_APP_UID/GID` to the existing
+`sdv-app` UID/GID and `SDV_FOTA_ECU_APP_GROUPS=` empty. ECU services therefore receive no `gpio` or
+`i2c` supplementary groups. They share the vehicle process UID, so this is not OS privilege
+isolation; a dedicated ECU account can be introduced later. The worker code does not open GPIO/I2C.
+This PR does not implement ECU candidate/trial startup, output hold, candidate health, socket route
+cutover, or coordinator-managed commit/rollback; those belong to the next update integration stage.
+Omitting `virtual_ecu_workers` leaves the in-process runtime unchanged. Details and disabled-output
+sample configs are in
 [`rust/sdv-picarx/README.md`](../../rust/sdv-picarx/README.md).
+
+To switch from external workers to coordinator-spawn or in-process mode, stop both the host and
+worker target, disable the target, install the root-owned vehicle config for the selected mode, and
+start the host launcher alone:
+
+```sh
+sudo systemctl stop sdv-fota-launcher.service sdv-fota-workers.target
+sudo systemctl disable sdv-fota-workers.target
+# Install a root-owned config with mode=spawn and a binary, or omit virtual_ecu_workers entirely.
+sudo install -o root -g root -m 0644 /path/to/vehicle-config.json /etc/sdv-picarx/vehicle.json
+sudo systemctl start sdv-fota-launcher.service
+```
+
+To return to external mode, stop the host and worker target before changing configuration; `start`
+does not reload the EnvironmentFile or vehicle config while the host unit is already active. Confirm
+each ECU active slot and integrity record is provisioned, install the `mode: external` config, start
+the host service, then enable the worker target. The worker units follow host launcher restarts and
+retry coordinator startup; stopping only the workers target while
+the external host config is active leaves the host fail-closed and causes its systemd restart policy
+to retry until all worker sockets return.
+
+```sh
+sudo systemctl stop sdv-fota-launcher.service sdv-fota-workers.target
+sudo install -o root -g root -m 0644 rust/sdv-picarx/config/pi5.external-workers.disabled.example.json /etc/sdv-picarx/vehicle.json
+sudo install -m 0644 deploy/systemd/sdv-fota-launcher.service /etc/systemd/system/
+sudo systemctl start sdv-fota-launcher.service
+sudo systemctl enable --now sdv-fota-workers.target
+```
 
 When upgrading a Pi provisioned by an earlier version without image digests, first replace the
 `sdv-fota` binary while the existing launcher is still running. Verify the active slot image against

@@ -1,0 +1,9 @@
+[Unit]
+Description=SDV external virtual ECU worker processes
+Requires=sdv-fota-launcher.service
+After=sdv-fota-launcher.service
+PartOf=sdv-fota-launcher.service
+Wants=sdv-fota-ecu@engine.service sdv-fota-ecu@brake.service sdv-fota-ecu@steering.service
+
+[Install]
+WantedBy=multi-user.target

@@ -1,13 +1,15 @@
 use std::collections::BTreeMap;
 use std::env;
 use std::ffi::{OsStr, OsString};
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io;
-use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixDatagram;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::thread;
 use std::time::Duration;
 
 use sdv_core::config::Config;
@@ -18,6 +20,8 @@ use signal_hook::flag;
 
 const SOCKET_MODE: u32 = 0o600;
 const SOCKET_READ_TIMEOUT: Duration = Duration::from_millis(100);
+const COORDINATOR_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+const COORDINATOR_STARTUP_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 const UNSAFE_WRITE_BITS: u32 = 0o022;
 
 struct BoundWorkerSocket {
@@ -26,6 +30,63 @@ struct BoundWorkerSocket {
     device: u64,
     inode: u64,
     owner: u32,
+    _path_lock: WorkerPathLock,
+}
+
+struct WorkerPathLock {
+    _file: fs::File,
+}
+
+impl WorkerPathLock {
+    fn acquire(worker_path: &Path, owner: u32) -> io::Result<Self> {
+        let file_name = worker_path.file_name().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "worker socket path has no name",
+            )
+        })?;
+        let mut lock_name = file_name.to_os_string();
+        lock_name.push(".lock");
+        let lock_path = worker_path.with_file_name(lock_name);
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&lock_path)?;
+        let descriptor_metadata = file.metadata()?;
+        let path_metadata = fs::symlink_metadata(&lock_path)?;
+        if !descriptor_metadata.file_type().is_file()
+            || !path_metadata.file_type().is_file()
+            || descriptor_metadata.uid() != owner
+            || path_metadata.uid() != owner
+            || descriptor_metadata.permissions().mode() & 0o777 != 0o600
+            || path_metadata.permissions().mode() & 0o777 != 0o600
+            || descriptor_metadata.dev() != path_metadata.dev()
+            || descriptor_metadata.ino() != path_metadata.ino()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "worker socket lock must be a mode 0600 regular file owned by this user",
+            ));
+        }
+        // SAFETY: `file` owns a valid descriptor for the lifetime of the returned lock guard.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let error = io::Error::last_os_error();
+            if matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::PermissionDenied
+            ) {
+                return Err(io::Error::new(
+                    io::ErrorKind::AddrInUse,
+                    "another ECU worker owns this socket path",
+                ));
+            }
+            return Err(error);
+        }
+        Ok(Self { _file: file })
+    }
 }
 
 struct WorkerSocketPathGuard {
@@ -83,16 +144,8 @@ impl BoundWorkerSocket {
         let owner = unsafe { libc::geteuid() };
         validate_socket_parent(&worker_path, owner)?;
         validate_coordinator_socket(coordinator_path, owner)?;
-        match fs::symlink_metadata(&worker_path) {
-            Ok(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::AddrInUse,
-                    "worker socket path already exists; refusing to replace it",
-                ))
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
+        let path_lock = WorkerPathLock::acquire(&worker_path, owner)?;
+        remove_stale_worker_socket(&worker_path, owner)?;
 
         let socket = UnixDatagram::bind(&worker_path)?;
         let mut path_guard = WorkerSocketPathGuard::new(worker_path.clone(), owner);
@@ -110,6 +163,7 @@ impl BoundWorkerSocket {
             device: metadata.dev(),
             inode: metadata.ino(),
             owner,
+            _path_lock: path_lock,
         };
         path_guard.disarm();
 
@@ -135,6 +189,55 @@ impl Drop for BoundWorkerSocket {
     }
 }
 
+fn remove_stale_worker_socket(path: &Path, owner: u32) -> io::Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if !metadata.file_type().is_socket()
+        || metadata.uid() != owner
+        || metadata.permissions().mode() & 0o600 != 0o600
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "existing worker path is not an owner-only socket owned by this user",
+        ));
+    }
+
+    // The parent is a validated owner-only directory. A SIGKILL between bind and chmod can
+    // leave the socket with the process umask's mode, so stale cleanup accepts owner read/write
+    // access here; an active socket is detected below and the normal bound socket must be 0600.
+    let probe = UnixDatagram::unbound()?;
+    match probe.connect(path) {
+        Ok(()) => Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            "an active ECU worker already owns this socket path",
+        )),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+            ) =>
+        {
+            let current = fs::symlink_metadata(path)?;
+            if !current.file_type().is_socket()
+                || current.uid() != owner
+                || current.permissions().mode() & 0o600 != 0o600
+                || current.dev() != metadata.dev()
+                || current.ino() != metadata.ino()
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::AddrInUse,
+                    "worker socket path changed during stale-path validation",
+                ));
+            }
+            fs::remove_file(path)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn main() {
     if let Err(error) = run(env::args_os().skip(1)) {
         eprintln!("sdv-picarx-ecu-worker: {error}");
@@ -154,8 +257,11 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), String> {
     flag::register(SIGTERM, Arc::clone(&shutdown))
         .map_err(|error| format!("cannot register SIGTERM handler: {error}"))?;
 
-    let socket = BoundWorkerSocket::bind(worker_path, &coordinator_path)
-        .map_err(|error| format!("cannot bind worker socket: {error}"))?;
+    let socket = match bind_after_coordinator_ready(worker_path, &coordinator_path, &shutdown) {
+        Ok(socket) => socket,
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => return Ok(()),
+        Err(error) => return Err(format!("cannot bind worker socket: {error}")),
+    };
     let mut worker = VirtualEcuWorker::new(ecu_id, &Config::default());
     while !shutdown.load(Ordering::Relaxed) {
         match worker.serve_once(&socket.socket) {
@@ -176,6 +282,35 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn bind_after_coordinator_ready(
+    worker_path: PathBuf,
+    coordinator_path: &Path,
+    shutdown: &AtomicBool,
+) -> io::Result<BoundWorkerSocket> {
+    let deadline = std::time::Instant::now() + COORDINATOR_STARTUP_TIMEOUT;
+    loop {
+        match BoundWorkerSocket::bind(worker_path.clone(), coordinator_path) {
+            Ok(socket) => return Ok(socket),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                ) && !shutdown.load(Ordering::Relaxed)
+                    && std::time::Instant::now() < deadline =>
+            {
+                thread::sleep(COORDINATOR_STARTUP_RETRY_INTERVAL);
+            }
+            Err(error) => return Err(error),
+        }
+        if shutdown.load(Ordering::Relaxed) {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "worker startup interrupted before coordinator became ready",
+            ));
+        }
+    }
 }
 
 fn parse_named_options(
@@ -255,6 +390,7 @@ fn validate_socket_parent(path: &Path, owner: u32) -> io::Result<()> {
         if !metadata.file_type().is_dir()
             || !owned_by_trusted_account
             || (immediate && metadata.uid() != owner)
+            || (immediate && mode & 0o077 != 0)
             || (mode & UNSAFE_WRITE_BITS != 0 && !protected_sticky_directory)
         {
             return Err(io::Error::new(

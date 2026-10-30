@@ -65,10 +65,13 @@ ECU id, a strictly increasing cycle id, and zero to two encoded bus frames; resp
 cycle id and contain that ECU's command and alive frame. The adapter rejects oversized or malformed
 packets, wrong ECU/frame routing, and repeated or reversed cycle ids before advancing the task.
 `serve_once` does not create socket paths or schedule cycles. On Pi/Linux, an optional
-`virtual_ecu_workers` host setting starts one worker process for each ECU. The vehicle coordinator
-remains the sole owner of GPIO, I2C, sensor input, and actuator output. CRC32 detects accidental
-packet corruption but does not authenticate a peer, so the coordinator validates socket ownership,
-mode, peer path, ECU id, and cycle id.
+`virtual_ecu_workers` host setting starts one worker process for each ECU. The default `spawn` mode
+requires a worker `binary` and keeps the existing coordinator-managed process behavior. The
+`external` mode must be explicit and omits `binary`; it connects to worker processes managed outside
+the vehicle process. In both cases the vehicle coordinator remains the sole owner of GPIO, I2C,
+sensor input, and actuator output. CRC32 detects accidental packet corruption but does not
+authenticate a peer, so the coordinator validates socket ownership, mode, peer path, ECU id, and
+cycle id.
 
 The Linux `sdv-picarx-ecu-worker` executable binds one worker socket, connects to an already
 running coordinator socket, then handles requests until SIGINT or SIGTERM. It accepts only absolute
@@ -99,7 +102,7 @@ It accepts one named option, `--config <file.json>`. The JSON config contains:
 | `gpio_chip`, `left_direction_line`, `right_direction_line` | GPIO chip device path and line offsets |
 | `input_socket`, `input_max_age_ms` | Local input socket path and maximum input age |
 | `trial_stationary_speed_tolerance_mps`, `trial_stationary_throttle_tolerance` | Maximum estimated speed and requested throttle accepted by the FOTA trial health check |
-| `virtual_ecu_workers` | Optional worker process mode. Set `binary` to the trusted worker executable and `socket_directory` to a private runtime directory. Omit the field to keep the in-process ECU tasks. |
+| `virtual_ecu_workers` | Optional worker-process mode. `mode` defaults to `spawn` for existing configs and requires a trusted `binary`; set `mode` to `external` and omit `binary` to connect to externally managed workers. Invalid mode/binary combinations are rejected. Omit the whole field to keep in-process ECU tasks. |
 | `motor` | Forward direction polarity and measured minimum/maximum PWM duty |
 | `vehicle` | Measured drive and steering calibration used by the ECU adapter |
 
@@ -131,16 +134,54 @@ The coordinator starts Engine, Brake, and Steering workers and sends all three c
 before waiting for responses. It accepts only one matching response from each worker before the
 remaining 10 ms host-cycle budget expires. Missing workers, invalid packets, stale/duplicate
 responses, or a missed deadline stop the platform; partial or previous-cycle commands are not
-applied. The `socket_directory` is owner-only and owned by the host account; the coordinator and
-worker sockets are owner-only and cleaned only when their recorded inode still matches. The worker
-binary must be a regular executable owned by root or the host account, with no group/other write
-permission. Install a root-owned binary in production; host-owned binaries are accepted for local
-testing. Workers inherit the host process UID, supplementary groups, and capabilities, so this
-process mode is not a privilege boundary even though workers do not open GPIO/I2C. A future
-root-managed per-ECU service boundary is needed for privilege separation. Worker processes receive
-a parent-death signal so they exit if the host is killed.
-Worker mode requires all three ECU tasks to be enabled; a disabled task is rejected before the
-external cycle starts. Omitting `virtual_ecu_workers` preserves the existing in-process runtime path.
+applied. The `socket_directory` is owner-only and owned by the host account; sockets are owner-only
+and validated against their recorded inodes. In spawn mode, the worker binary must be a regular
+executable owned by root or the host account, with no group/other write permission. Install a
+root-owned binary in production; host-owned binaries are accepted for local testing. Spawned workers
+inherit the host process UID, supplementary groups, and capabilities, so this process mode is not a
+privilege boundary even though workers do not open GPIO/I2C. A future root-managed per-ECU service
+boundary is needed for privilege separation. Worker processes receive a parent-death signal so they
+exit if the host is killed.
+
+To connect to separately launched workers, use
+`config/pi5.external-workers.disabled.example.json`; it explicitly sets `mode` to `external` and
+omits `binary`. Omitting `mode` defaults to `spawn`, so a missing spawn `binary` is rejected instead
+of silently switching modes. The coordinator creates only `coordinator.sock`, waits for all three pre-existing worker
+sockets, and never starts, stops, or removes those worker processes or socket paths. The supplied
+systemd template starts each ECU through the FOTA launcher's active-only target form. During this
+first integration, ECU services use the existing `sdv-app` UID/GID with empty supplementary groups;
+they receive no `gpio` or `i2c` groups. Sharing the vehicle UID does not create OS privilege
+isolation. Each worker holds a mode-0600 per-socket lock, refuses a second live instance, and only
+reclaims an owner-owned stale socket in the private directory after the socket is unresponsive and
+its inode is rechecked. The host systemd unit prepares the private directory; external mode requires
+that existing directory. The coordinator remains responsible for fail-closed output application if any worker is
+missing or returns an invalid response. ECU trial/candidate startup, output hold, candidate health,
+socket cutover, and commit/rollback are not connected yet.
+
+Install and enable the worker units after initializing an active image in each ECU state root and
+installing the target-aware FOTA launcher configuration:
+
+```sh
+sudo install -m 0644 deploy/systemd/sdv-fota-ecu@.service /etc/systemd/system/
+sudo install -m 0644 deploy/systemd/sdv-fota-workers.target /etc/systemd/system/
+sudo install -m 0644 deploy/systemd/sdv-fota-launcher.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl stop sdv-fota-workers.target
+sudo systemctl restart sdv-fota-launcher.service
+sudo systemctl enable --now sdv-fota-workers.target
+```
+
+`binary` remains set in `config/pi5.worker-processes.disabled.example.json` for the original
+coordinator-spawn mode. Omitting `virtual_ecu_workers` preserves the existing in-process runtime
+path.
+
+To switch away from external mode, stop the host and worker target, disable the target, install the
+root-owned spawn or in-process vehicle config, then start only the host launcher. To return to
+external mode, stop the host and worker target before changing config, confirm each ECU has an
+initialized active image, install the external config, start the host launcher, then enable and start
+`sdv-fota-workers.target`. Leaving the external config
+active while stopping the target makes the host fail closed and restart because its workers are
+missing.
 
 Per-ECU FOTA package staging and trial metadata use separate state roots, but the FOTA launcher does
 not yet select worker images or connect per-ECU trial health, commit, or rollback.
