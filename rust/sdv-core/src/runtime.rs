@@ -25,21 +25,122 @@ pub enum VirtualEcuId {
     Steering,
 }
 
-struct EcuTask<S> {
+/// One independent, platform-neutral Engine, Brake, or Steering task.
+///
+/// The task owns its RTE and SWC state. Call `step_10ms` once per 10 ms cycle with the frames
+/// delivered to it by a platform bus adapter. Its output contains the task's actuator command and
+/// alive frame; the adapter decides how to transmit those frames.
+pub struct VirtualEcuTask {
+    id: VirtualEcuId,
     rte: Rte,
-    swc: S,
+    swc: EcuSwc,
     alive: u64,
     enabled: bool,
+    failsafe: FailsafeParams,
 }
 
-impl<S> EcuTask<S> {
-    fn new(swc: S) -> Self {
+enum EcuSwc {
+    Engine(EngineSwc),
+    Brake(BrakeSwc),
+    Steering(SteeringSwc),
+}
+
+/// The two bus frames emitted by one virtual ECU task cycle.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EcuTaskOutput {
+    pub command: Frame,
+    pub alive: Frame,
+}
+
+impl VirtualEcuId {
+    fn node(self) -> Node {
+        match self {
+            Self::Engine => Node::Engine,
+            Self::Brake => Node::Brake,
+            Self::Steering => Node::Steering,
+        }
+    }
+
+    fn alive_index(self) -> usize {
+        match self {
+            Self::Engine => ALIVE_ENGINE_INDEX,
+            Self::Brake => ALIVE_BRAKE_INDEX,
+            Self::Steering => ALIVE_STEERING_INDEX,
+        }
+    }
+}
+
+impl VirtualEcuTask {
+    /// Create one virtual ECU task with its ECU-specific and shared failsafe parameters.
+    pub fn new(id: VirtualEcuId, config: &Config) -> Self {
+        let swc = match id {
+            VirtualEcuId::Engine => EcuSwc::Engine(EngineSwc::new(config.engine_params())),
+            VirtualEcuId::Brake => EcuSwc::Brake(BrakeSwc::new(config.brake_params())),
+            VirtualEcuId::Steering => {
+                EcuSwc::Steering(SteeringSwc::new(config.steering_params()))
+            }
+        };
         Self {
+            id,
             rte: Rte::default(),
             swc,
             alive: 0,
             enabled: true,
+            failsafe: config.failsafe_params(),
         }
+    }
+
+    pub fn id(&self) -> VirtualEcuId {
+        self.id
+    }
+
+    /// Enable or stop this task. A stopped task still receives frames, but emits no output.
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+    }
+
+    /// Advance one 10 ms task cycle and return its actuator and alive frames.
+    ///
+    /// Receive ages advance before frames are applied, matching the in-process vehicle bus cycle.
+    /// Frames not addressed to this ECU are ignored. A disabled task keeps receiving frames but
+    /// emits neither a command nor an alive heartbeat.
+    pub fn step_10ms(&mut self, incoming: &[Frame]) -> Option<EcuTaskOutput> {
+        self.rte.rx_age.driver = self.rte.rx_age.driver.saturating_add(1);
+        self.rte.rx_age.safety = self.rte.rx_age.safety.saturating_add(1);
+        let node = self.id.node();
+        for frame in incoming {
+            if frame.receivers().contains(&node) {
+                frame.apply(&mut self.rte);
+            }
+        }
+
+        if !self.enabled {
+            return None;
+        }
+
+        failsafe::apply(&mut self.rte, &self.failsafe);
+        let command = match &mut self.swc {
+            EcuSwc::Engine(swc) => {
+                swc.main_10ms(&mut self.rte);
+                Frame::CmdDrive(self.rte.cmd.drive_accel_cmd)
+            }
+            EcuSwc::Brake(swc) => {
+                swc.main_10ms(&mut self.rte);
+                Frame::CmdBrake(self.rte.cmd.brake_decel_cmd)
+            }
+            EcuSwc::Steering(swc) => {
+                swc.main_10ms(&mut self.rte, ECU_STEP_S);
+                Frame::CmdSteer(self.rte.cmd.steer_angle_cmd)
+            }
+        };
+        self.alive = self.alive.wrapping_add(1);
+        Some(EcuTaskOutput {
+            command,
+            alive: Frame::Alive {
+                index: self.id.alive_index(),
+                counter: self.alive,
+            },
+        })
     }
 }
 
@@ -65,13 +166,12 @@ pub struct VehicleActuation {
 /// adapter supplies measured/estimated vehicle state and reports whether its I/O path is alive.
 pub struct VehicleRuntime {
     vcu: VcuTask,
-    engine: EcuTask<EngineSwc>,
-    brake: EcuTask<BrakeSwc>,
-    steering: EcuTask<SteeringSwc>,
+    engine: VirtualEcuTask,
+    brake: VirtualEcuTask,
+    steering: VirtualEcuTask,
     plant_rte: Rte,
     plant_alive: u64,
     bus: Bus,
-    failsafe: FailsafeParams,
     tick: u64,
 }
 
@@ -83,13 +183,12 @@ impl VehicleRuntime {
                 swc: SafetySwc::new(config.safety_params()),
                 enabled: true,
             },
-            engine: EcuTask::new(EngineSwc::new(config.engine_params())),
-            brake: EcuTask::new(BrakeSwc::new(config.brake_params())),
-            steering: EcuTask::new(SteeringSwc::new(config.steering_params())),
+            engine: VirtualEcuTask::new(VirtualEcuId::Engine, &config),
+            brake: VirtualEcuTask::new(VirtualEcuId::Brake, &config),
+            steering: VirtualEcuTask::new(VirtualEcuId::Steering, &config),
             plant_rte: Rte::default(),
             plant_alive: 0,
             bus: Bus::new(0),
-            failsafe: config.failsafe_params(),
             tick: 0,
         }
     }
@@ -102,9 +201,9 @@ impl VehicleRuntime {
     /// Enable or stop one virtual ECU task. A stopped task sends no output or alive frame.
     pub fn set_ecu_enabled(&mut self, ecu: VirtualEcuId, enabled: bool) {
         match ecu {
-            VirtualEcuId::Engine => self.engine.enabled = enabled,
-            VirtualEcuId::Brake => self.brake.enabled = enabled,
-            VirtualEcuId::Steering => self.steering.enabled = enabled,
+            VirtualEcuId::Engine => self.engine.set_enabled(enabled),
+            VirtualEcuId::Brake => self.brake.set_enabled(enabled),
+            VirtualEcuId::Steering => self.steering.set_enabled(enabled),
         }
     }
 
@@ -132,66 +231,25 @@ impl VehicleRuntime {
     ) -> VehicleActuation {
         let tick = self.tick;
         self.vcu.rte.input = input;
-        for rte in [
-            &mut self.engine.rte,
-            &mut self.brake.rte,
-            &mut self.steering.rte,
-        ] {
-            rte.rx_age.driver = rte.rx_age.driver.saturating_add(1);
-            rte.rx_age.safety = rte.rx_age.safety.saturating_add(1);
-        }
-
         if self.vcu.enabled {
             self.bus.send(tick, Frame::Safety(self.vcu.rte.safety));
             if tick % 2 == 1 {
                 self.bus.send(tick, Frame::DriverInput(self.vcu.rte.input));
             }
         }
-        self.deliver();
 
-        if self.engine.enabled {
-            failsafe::apply(&mut self.engine.rte, &self.failsafe);
-            self.engine.swc.main_10ms(&mut self.engine.rte);
-            self.engine.alive = self.engine.alive.wrapping_add(1);
-            self.bus
-                .send(tick, Frame::CmdDrive(self.engine.rte.cmd.drive_accel_cmd));
-            self.bus.send(
-                tick,
-                Frame::Alive {
-                    index: ALIVE_ENGINE_INDEX,
-                    counter: self.engine.alive,
-                },
-            );
+        let incoming = self.deliver_to_ecus();
+        if let Some(output) = self.engine.step_10ms(&incoming[0]) {
+            self.bus.send(tick, output.command);
+            self.bus.send(tick, output.alive);
         }
-        if self.brake.enabled {
-            failsafe::apply(&mut self.brake.rte, &self.failsafe);
-            self.brake.swc.main_10ms(&mut self.brake.rte);
-            self.brake.alive = self.brake.alive.wrapping_add(1);
-            self.bus
-                .send(tick, Frame::CmdBrake(self.brake.rte.cmd.brake_decel_cmd));
-            self.bus.send(
-                tick,
-                Frame::Alive {
-                    index: ALIVE_BRAKE_INDEX,
-                    counter: self.brake.alive,
-                },
-            );
+        if let Some(output) = self.brake.step_10ms(&incoming[1]) {
+            self.bus.send(tick, output.command);
+            self.bus.send(tick, output.alive);
         }
-        if self.steering.enabled {
-            failsafe::apply(&mut self.steering.rte, &self.failsafe);
-            self.steering
-                .swc
-                .main_10ms(&mut self.steering.rte, ECU_STEP_S);
-            self.steering.alive = self.steering.alive.wrapping_add(1);
-            self.bus
-                .send(tick, Frame::CmdSteer(self.steering.rte.cmd.steer_angle_cmd));
-            self.bus.send(
-                tick,
-                Frame::Alive {
-                    index: ALIVE_STEERING_INDEX,
-                    counter: self.steering.alive,
-                },
-            );
+        if let Some(output) = self.steering.step_10ms(&incoming[2]) {
+            self.bus.send(tick, output.command);
+            self.bus.send(tick, output.alive);
         }
         self.deliver();
 
@@ -221,13 +279,28 @@ impl VehicleRuntime {
         output
     }
 
+    fn deliver_to_ecus(&mut self) -> [Vec<Frame>; 3] {
+        let mut incoming: [Vec<Frame>; 3] = std::array::from_fn(|_| Vec::new());
+        for (node, frame) in self.bus.deliver(self.tick) {
+            match node {
+                Node::Vcu => frame.apply(&mut self.vcu.rte),
+                Node::Engine => incoming[0].push(frame),
+                Node::Brake => incoming[1].push(frame),
+                Node::Steering => incoming[2].push(frame),
+                Node::Plant => frame.apply(&mut self.plant_rte),
+            }
+        }
+        incoming
+    }
+
     fn deliver(&mut self) {
         for (node, frame) in self.bus.deliver(self.tick) {
             match node {
                 Node::Vcu => frame.apply(&mut self.vcu.rte),
-                Node::Engine => frame.apply(&mut self.engine.rte),
-                Node::Brake => frame.apply(&mut self.brake.rte),
-                Node::Steering => frame.apply(&mut self.steering.rte),
+                Node::Engine | Node::Brake | Node::Steering => {
+                    // The vehicle runtime routes ECU input frames before stepping the tasks.
+                    // ECU output frames are addressed only to the VCU or Plant.
+                }
                 Node::Plant => frame.apply(&mut self.plant_rte),
             }
         }
@@ -245,6 +318,79 @@ mod tests {
     use super::{VehicleRuntime, VirtualEcuId};
     use crate::rte::DriverInput;
     use crate::sim::{Sim, SystemState};
+
+    #[test]
+    fn individual_ecu_tasks_exchange_their_own_command_and_alive_frames() {
+        use super::VirtualEcuTask;
+        use crate::bus::{Frame, ALIVE_BRAKE_INDEX, ALIVE_ENGINE_INDEX, ALIVE_STEERING_INDEX};
+        use crate::config::Config;
+        use crate::rte::{DriverInput, Safety};
+
+        let input = [
+            Frame::Safety(Safety::default()),
+            Frame::DriverInput(DriverInput {
+                throttle: 0.5,
+                brake: 0.25,
+                steer: 0.1,
+            }),
+        ];
+        for (ecu, alive_index) in [
+            (VirtualEcuId::Engine, ALIVE_ENGINE_INDEX),
+            (VirtualEcuId::Brake, ALIVE_BRAKE_INDEX),
+            (VirtualEcuId::Steering, ALIVE_STEERING_INDEX),
+        ] {
+            let mut task = VirtualEcuTask::new(ecu, &Config::default());
+            let first = task.step_10ms(&input).expect("enabled ECU emits one cycle");
+            assert!(match ecu {
+                VirtualEcuId::Engine => matches!(first.command, Frame::CmdDrive(_)),
+                VirtualEcuId::Brake => matches!(first.command, Frame::CmdBrake(_)),
+                VirtualEcuId::Steering => matches!(first.command, Frame::CmdSteer(_)),
+            });
+            assert_eq!(
+                first.alive,
+                Frame::Alive {
+                    index: alive_index,
+                    counter: 1,
+                }
+            );
+
+            let second = task.step_10ms(&[]).expect("enabled ECU emits next cycle");
+            assert!(match ecu {
+                VirtualEcuId::Engine => matches!(second.command, Frame::CmdDrive(_)),
+                VirtualEcuId::Brake => matches!(second.command, Frame::CmdBrake(_)),
+                VirtualEcuId::Steering => matches!(second.command, Frame::CmdSteer(_)),
+            });
+            assert_eq!(
+                second.alive,
+                Frame::Alive {
+                    index: alive_index,
+                    counter: 2,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn disabled_individual_task_receives_frames_but_emits_no_frames() {
+        use super::VirtualEcuTask;
+        use crate::bus::{Frame, ALIVE_ENGINE_INDEX};
+        use crate::config::Config;
+        use crate::rte::Safety;
+
+        let mut task = VirtualEcuTask::new(VirtualEcuId::Engine, &Config::default());
+        task.set_enabled(false);
+        assert!(task.step_10ms(&[Frame::Safety(Safety::default())]).is_none());
+
+        task.set_enabled(true);
+        let output = task.step_10ms(&[]).expect("re-enabled ECU executes");
+        assert_eq!(
+            output.alive,
+            Frame::Alive {
+                index: ALIVE_ENGINE_INDEX,
+                counter: 1,
+            }
+        );
+    }
 
     #[test]
     fn platform_runtime_matches_virtual_simulation_actuation() {
