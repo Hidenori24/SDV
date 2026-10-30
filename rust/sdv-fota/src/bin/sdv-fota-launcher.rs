@@ -1,6 +1,7 @@
 use sdv_fota::linux::{
     run_active_target_image_as_with_groups_and_app_args, run_selected_image_as_with_groups,
     run_selected_target_image_as_with_groups_and_app_args,
+    run_trial_candidate_target_image_as_with_groups_and_app_args,
 };
 use sdv_fota::Ecu;
 use std::ffi::{OsStr, OsString};
@@ -18,6 +19,7 @@ enum Invocation {
         health_program: Option<PathBuf>,
         health_args: Vec<OsString>,
         app_args: Vec<OsString>,
+        trial_candidate: bool,
     },
 }
 
@@ -69,19 +71,28 @@ fn run(
             health_program,
             health_args,
             app_args,
+            trial_candidate,
         } => match target {
-            Ecu::Vehicle => run_selected_target_image_as_with_groups_and_app_args(
-                base_root,
-                target,
-                health_program
-                    .as_deref()
-                    .expect("vehicle invocation requires a health program"),
-                &health_args,
-                uid,
-                gid,
-                &groups,
-                &app_args,
-            ),
+            Ecu::Vehicle if !trial_candidate => {
+                run_selected_target_image_as_with_groups_and_app_args(
+                    base_root,
+                    target,
+                    health_program
+                        .as_deref()
+                        .expect("vehicle invocation requires a health program"),
+                    &health_args,
+                    uid,
+                    gid,
+                    &groups,
+                    &app_args,
+                )
+            }
+            Ecu::Vehicle => Err(sdv_fota::linux::Error::InvalidTargetLaunchMode),
+            Ecu::Engine | Ecu::Brake | Ecu::Steering if trial_candidate => {
+                run_trial_candidate_target_image_as_with_groups_and_app_args(
+                    base_root, target, uid, gid, &groups, &app_args,
+                )
+            }
             Ecu::Engine | Ecu::Brake | Ecu::Steering => {
                 run_active_target_image_as_with_groups_and_app_args(
                     base_root, target, uid, gid, &groups, &app_args,
@@ -122,12 +133,23 @@ fn parse_flag_invocation(args: &[OsString]) -> Result<Invocation, String> {
     let mut health_program = None;
     let mut health_args = Vec::new();
     let mut app_args = Vec::new();
+    let mut trial_candidate = false;
     let mut args = args.iter();
 
     while let Some(option) = args.next() {
         let option = option
             .to_str()
             .ok_or_else(|| format!("option must be valid UTF-8\n{}", usage()))?;
+        if option == "--trial-candidate" {
+            if trial_candidate {
+                return Err(format!(
+                    "option supplied more than once: {option}\n{}",
+                    usage()
+                ));
+            }
+            trial_candidate = true;
+            continue;
+        }
         let value = args
             .next()
             .ok_or_else(|| format!("missing value for {option}\n{}", usage()))?;
@@ -160,12 +182,19 @@ fn parse_flag_invocation(args: &[OsString]) -> Result<Invocation, String> {
         }
         _ => {}
     }
+    if trial_candidate && target == Ecu::Vehicle {
+        return Err(format!(
+            "--trial-candidate requires an ECU target\n{}",
+            usage()
+        ));
+    }
     Ok(Invocation::Flags {
         base_root: PathBuf::from(required(state_root, "--state-root")?),
         target,
         health_program,
         health_args,
         app_args,
+        trial_candidate,
     })
 }
 
@@ -255,7 +284,7 @@ fn configured_id(name: &str) -> Result<u32, String> {
 }
 
 fn usage() -> String {
-    "usage:\n  sdv-fota-launcher <state-root> <health-check-program> [health-check-args...]\n  sdv-fota-launcher --state-root <base-dir> --target vehicle --health-program <path> [--health-arg <arg> ...] [--app-arg <arg> ...]\n  sdv-fota-launcher --state-root <base-dir> --target <engine|brake|steering> [--app-arg <arg> ...] (active image only; no trial health check)".to_owned()
+    "usage:\n  sdv-fota-launcher <state-root> <health-check-program> [health-check-args...]\n  sdv-fota-launcher --state-root <base-dir> --target vehicle --health-program <path> [--health-arg <arg> ...] [--app-arg <arg> ...]\n  sdv-fota-launcher --state-root <base-dir> --target <engine|brake|steering> [--app-arg <arg> ...] (active image only)\n  sdv-fota-launcher --state-root <base-dir> --target <engine|brake|steering> --trial-candidate [--app-arg <arg> ...] (pending image, shadow only; no metadata changes)".to_owned()
 }
 
 #[cfg(test)]
@@ -425,6 +454,52 @@ mod tests {
             "brake".into(),
             "--health-arg".into(),
             "anything".into(),
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn trial_candidate_mode_is_explicit_and_ecu_only() {
+        let invocation = parse_invocation([
+            "--state-root".into(),
+            "/var/lib/sdv-fota".into(),
+            "--target".into(),
+            "engine".into(),
+            "--trial-candidate".into(),
+            "--app-arg".into(),
+            "--ecu".into(),
+            "--app-arg".into(),
+            "engine".into(),
+        ])
+        .unwrap();
+        match invocation {
+            Invocation::Flags {
+                trial_candidate,
+                app_args,
+                ..
+            } => {
+                assert!(trial_candidate);
+                assert_eq!(app_args, ["--ecu", "engine"]);
+            }
+            Invocation::Positional { .. } => panic!("candidate mode used positional CLI"),
+        }
+        assert!(parse_invocation([
+            "--state-root".into(),
+            "/var/lib/sdv-fota".into(),
+            "--target".into(),
+            "vehicle".into(),
+            "--health-program".into(),
+            "/usr/bin/health".into(),
+            "--trial-candidate".into(),
+        ])
+        .is_err());
+        assert!(parse_invocation([
+            "--state-root".into(),
+            "/var/lib/sdv-fota".into(),
+            "--target".into(),
+            "brake".into(),
+            "--trial-candidate".into(),
+            "--trial-candidate".into(),
         ])
         .is_err());
     }

@@ -51,6 +51,8 @@ struct VirtualEcuWorkerConfig {
     #[serde(default)]
     binary: Option<PathBuf>,
     socket_directory: PathBuf,
+    #[serde(default)]
+    candidate_socket_directory: Option<PathBuf>,
 }
 
 #[derive(Deserialize, Clone, Copy, Default, PartialEq, Eq)]
@@ -70,11 +72,20 @@ impl VirtualEcuWorkerConfig {
                     .any(|component| matches!(component, std::path::Component::ParentDir))
         };
         let mode_matches_binary = match self.mode {
-            VirtualEcuWorkerMode::Spawn => self.binary.as_ref().is_some_and(safe_path),
+            VirtualEcuWorkerMode::Spawn => {
+                self.binary.as_ref().is_some_and(safe_path)
+                    && self.candidate_socket_directory.is_none()
+            }
             VirtualEcuWorkerMode::External => self.binary.is_none(),
         };
         mode_matches_binary
             && safe_path(&self.socket_directory)
+            && self
+                .candidate_socket_directory
+                .as_ref()
+                .map_or(true, |candidate| {
+                    safe_path(candidate) && candidate != &self.socket_directory
+                })
             && self
                 .binary
                 .as_ref()
@@ -394,9 +405,15 @@ fn run() -> Result<(), String> {
     let result = match config.virtual_ecu_workers {
         Some(worker_config) => {
             let coordinator_result = match worker_config.mode {
-                VirtualEcuWorkerMode::External => {
-                    EcuProcessCoordinator::connect_external(worker_config.socket_directory)
-                }
+                VirtualEcuWorkerMode::External => match worker_config.candidate_socket_directory {
+                    Some(candidate_directory) => {
+                        EcuProcessCoordinator::connect_external_with_candidates(
+                            worker_config.socket_directory,
+                            candidate_directory,
+                        )
+                    }
+                    None => EcuProcessCoordinator::connect_external(worker_config.socket_directory),
+                },
                 VirtualEcuWorkerMode::Spawn => EcuProcessCoordinator::spawn(
                     worker_config
                         .binary
@@ -507,7 +524,10 @@ mod tests {
             .virtual_ecu_workers
             .as_ref()
             .is_some_and(|workers| {
-                workers.mode == VirtualEcuWorkerMode::External && workers.binary.is_none()
+                workers.mode == VirtualEcuWorkerMode::External
+                    && workers.binary.is_none()
+                    && workers.candidate_socket_directory
+                        == Some(PathBuf::from("/run/sdv-picarx/candidates"))
             }));
 
         let implicit_spawn_without_binary =
@@ -516,6 +536,15 @@ mod tests {
         let implicit_spawn_config: HostConfig =
             serde_json::from_str(&implicit_spawn_without_binary).unwrap();
         assert!(implicit_spawn_config.calibrations().is_err());
+
+        let candidate_spawn_config = include_str!("../config/pi5.worker-processes.disabled.example.json")
+            .replace(
+                "\"socket_directory\": \"/run/sdv-picarx/workers\"",
+                "\"socket_directory\": \"/run/sdv-picarx/workers\", \"candidate_socket_directory\": \"/run/sdv-picarx/candidates\"",
+            );
+        let invalid_candidate_spawn: HostConfig =
+            serde_json::from_str(&candidate_spawn_config).unwrap();
+        assert!(invalid_candidate_spawn.calibrations().is_err());
 
         let legacy_spawn_config: HostConfig = serde_json::from_str(include_str!(
             "../config/pi5.worker-processes.disabled.example.json"

@@ -3,7 +3,8 @@
 use sdv_fota::linux::{
     run_active_target_image_as_with_groups_and_app_args, run_active_target_image_with_app_args,
     run_selected_image, run_selected_image_with_app_args, run_selected_target_image_with_app_args,
-    state_root_for_target, FileBootControl, FileSlotStorage, HttpsPackageSource,
+    run_trial_candidate_target_image_with_app_args, state_root_for_target, FileBootControl,
+    FileSlotStorage, HttpsPackageSource,
 };
 use sdv_fota::{
     encode_package, BootControl, Ecu, ImageStorage, Slot, TrialImage, TrialOutcome, VersionString,
@@ -711,6 +712,148 @@ if [ -n "${{SDV_TRIAL_SLOT:-}}" ] || [ -n "${{SDV_IMAGE_PATH:-}}" ]; then exit 4
         fs::read(engine_root.join("bootctl.b")).unwrap(),
         boot_b_before
     );
+}
+
+#[test]
+fn ecu_trial_candidate_runs_pending_image_without_changing_any_boot_metadata() {
+    let root = TempRoot::new();
+    fs::create_dir_all(root.0.join("ecus")).unwrap();
+    let engine_root = state_root_for_target(&root.0, Ecu::Engine);
+    let candidate_log = root.0.join("candidate-ecu-argv.txt");
+    let candidate_env = root.0.join("candidate-ecu-env.txt");
+    let mut boot = FileBootControl::new(&engine_root);
+    boot.initialize(Slot::A, "1.0.0", 7).unwrap();
+    write_slot_image(&engine_root, Slot::A, "#!/bin/sh\nexit 0\n");
+    write_slot_image(
+        &engine_root,
+        Slot::B,
+        &format!(
+            r#"#!/bin/sh
+printf '%s\n' "$@" > '{}'
+printf '%s|%s\n' "${{SDV_TRIAL_SLOT:-}}" "${{SDV_TRIAL_CANDIDATE_SLOT:-}}" > '{}'
+"#,
+            candidate_log.display(),
+            candidate_env.display(),
+        ),
+    );
+    boot.schedule_trial(TrialImage {
+        slot: Slot::B,
+        version: fixed_version("1.1.0"),
+        security_version: 8,
+        boots_left: 3,
+        trial_window_ms: 5_000,
+    })
+    .unwrap();
+    let state_before = boot.state().unwrap();
+    let record_a_before = fs::read(engine_root.join("bootctl.a")).unwrap();
+    let record_b_before = fs::read(engine_root.join("bootctl.b")).unwrap();
+    let active_digest_before = fs::read(
+        FileSlotStorage::new(&engine_root)
+            .image_path(Slot::A)
+            .with_file_name("sdv-image.sha256"),
+    )
+    .unwrap();
+    let candidate_digest_before = fs::read(
+        FileSlotStorage::new(&engine_root)
+            .image_path(Slot::B)
+            .with_file_name("sdv-image.sha256"),
+    )
+    .unwrap();
+    let app_args = [
+        OsString::from("--ecu"),
+        OsString::from("engine"),
+        OsString::from("--worker-socket"),
+        OsString::from("/run/sdv-picarx/candidates/engine.sock"),
+        OsString::from("one argument with spaces"),
+    ];
+
+    let status =
+        run_trial_candidate_target_image_with_app_args(&root.0, Ecu::Engine, &app_args).unwrap();
+
+    assert!(status.success());
+    assert_eq!(
+        fs::read_to_string(candidate_log)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        [
+            "--ecu",
+            "engine",
+            "--worker-socket",
+            "/run/sdv-picarx/candidates/engine.sock",
+            "one argument with spaces",
+        ]
+    );
+    assert_eq!(fs::read_to_string(candidate_env).unwrap().trim(), "|b");
+    assert_eq!(boot.state().unwrap(), state_before);
+    assert_eq!(
+        fs::read(engine_root.join("bootctl.a")).unwrap(),
+        record_a_before
+    );
+    assert_eq!(
+        fs::read(engine_root.join("bootctl.b")).unwrap(),
+        record_b_before
+    );
+    assert_eq!(
+        fs::read(
+            FileSlotStorage::new(&engine_root)
+                .image_path(Slot::A)
+                .with_file_name("sdv-image.sha256"),
+        )
+        .unwrap(),
+        active_digest_before
+    );
+    assert_eq!(
+        fs::read(
+            FileSlotStorage::new(&engine_root)
+                .image_path(Slot::B)
+                .with_file_name("sdv-image.sha256"),
+        )
+        .unwrap(),
+        candidate_digest_before
+    );
+}
+
+#[test]
+fn ecu_trial_candidate_releases_image_update_lock_after_exec_starts() {
+    let root = TempRoot::new();
+    fs::create_dir_all(root.0.join("ecus")).unwrap();
+    let engine_root = state_root_for_target(&root.0, Ecu::Engine);
+    let started_marker = root.0.join("candidate-started");
+    let mut boot = FileBootControl::new(&engine_root);
+    boot.initialize(Slot::A, "1.0.0", 7).unwrap();
+    write_slot_image(&engine_root, Slot::A, "#!/bin/sh\nexit 0\n");
+    write_slot_image(
+        &engine_root,
+        Slot::B,
+        &format!("#!/bin/sh\ntouch '{}'\nsleep 1\n", started_marker.display()),
+    );
+    boot.schedule_trial(TrialImage {
+        slot: Slot::B,
+        version: fixed_version("1.1.0"),
+        security_version: 8,
+        boots_left: 3,
+        trial_window_ms: 5_000,
+    })
+    .unwrap();
+    let root_path = root.0.clone();
+    let candidate = std::thread::spawn(move || {
+        run_trial_candidate_target_image_with_app_args(
+            root_path,
+            Ecu::Engine,
+            &[OsString::from("--ecu"), OsString::from("engine")],
+        )
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !started_marker.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(started_marker.exists(), "candidate image did not start");
+
+    let mut storage = FileSlotStorage::new(&engine_root);
+    assert!(storage.begin_inactive_image(Slot::A, 1).is_ok());
+    drop(storage);
+    assert!(candidate.join().unwrap().unwrap().success());
 }
 
 #[test]

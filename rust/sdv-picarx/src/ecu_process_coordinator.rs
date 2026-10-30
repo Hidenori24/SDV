@@ -13,7 +13,10 @@ use std::os::unix::net::UnixDatagram;
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::thread;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use sdv_core::bus::Frame;
@@ -141,9 +144,12 @@ const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
 const WORKER_STARTUP_TIMEOUT: Duration = Duration::from_secs(2);
 const EXTERNAL_WORKER_STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 const WORKER_STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(1);
+const MAX_CANDIDATE_DATAGRAMS_PER_CYCLE: usize = 3;
+const CANDIDATE_RESPONSE_TIMEOUT_CYCLES: u8 = 2;
 const NANOS_PER_SECOND: u64 = 1_000_000_000;
 const COORDINATOR_SOCKET_NAME: &str = "coordinator.sock";
 const WORKER_SOCKET_NAMES: [&str; 3] = ["engine.sock", "brake.sock", "steering.sock"];
+const CANDIDATE_SOCKET_NAMES: [&str; 3] = ["engine.sock", "brake.sock", "steering.sock"];
 const ECU_IDS: [VirtualEcuId; 3] = [
     VirtualEcuId::Engine,
     VirtualEcuId::Brake,
@@ -171,6 +177,30 @@ pub enum Error {
     DeadlineExceeded,
     MonotonicClock(io::Error),
     CycleIdExhausted,
+}
+
+/// Candidate-side validation result. Candidate failures never change active worker results.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CandidateFailure {
+    UnsafeSocket,
+    Send,
+    Protocol,
+    WrongEcu,
+    WrongCycle,
+    DuplicateResponse,
+    Timeout,
+}
+
+/// Shadow-candidate state for one ECU. `Ready` means the response for the most recently sent
+/// candidate request matched; a new outstanding request changes the state back to `Pending`.
+/// Candidate output is always discarded and is never actuator input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CandidateStatus {
+    Disabled,
+    Unavailable,
+    Pending,
+    Ready,
+    Failed(CandidateFailure),
 }
 
 impl fmt::Display for Error {
@@ -241,7 +271,7 @@ impl From<WorkerError> for Error {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct SocketIdentity {
     device: u64,
     inode: u64,
@@ -268,6 +298,38 @@ struct WorkerProcess {
     child: Option<Child>,
 }
 
+struct CandidateWorkerProcess {
+    ecu: VirtualEcuId,
+    socket_path: PathBuf,
+    socket_identity: Option<SocketIdentity>,
+}
+
+struct CandidateCycleSnapshot {
+    cycle_id: u64,
+    deadline: Instant,
+    request_buffers: [[u8; WORKER_DATAGRAM_MAX_SIZE]; 3],
+    request_lengths: [usize; 3],
+}
+
+struct CandidateShadowWorker {
+    socket: UnixDatagram,
+    _socket_path_guard: SocketPathGuard,
+    socket_path: PathBuf,
+    socket_identity: SocketIdentity,
+    socket_directory: PathBuf,
+    socket_directory_identity: SocketIdentity,
+    owner: u32,
+    workers: Vec<CandidateWorkerProcess>,
+    statuses: [CandidateStatus; 3],
+    shared_statuses: Arc<Mutex<[CandidateStatus; 3]>>,
+    shared_last_response_cycle: Arc<Mutex<[Option<u64>; 3]>>,
+    pending_cycle: [Option<u64>; 3],
+    pending_age: [u8; 3],
+    last_response_cycle: [Option<u64>; 3],
+    last_logged_ready_identity: [Option<SocketIdentity>; 3],
+    dropped_cycles: Arc<AtomicUsize>,
+}
+
 /// Owns one Unix datagram reply socket and coordinates one worker per virtual ECU.
 pub struct EcuProcessCoordinator {
     socket: UnixDatagram,
@@ -277,6 +339,11 @@ pub struct EcuProcessCoordinator {
     socket_directory_identity: SocketIdentity,
     owner: u32,
     workers: Vec<WorkerProcess>,
+    candidate_sender: Option<SyncSender<CandidateCycleSnapshot>>,
+    candidate_dropped_cycles: Option<Arc<AtomicUsize>>,
+    candidate_statuses: Arc<Mutex<[CandidateStatus; 3]>>,
+    candidate_last_response_cycles: Arc<Mutex<[Option<u64>; 3]>>,
+    candidate_thread: Option<JoinHandle<()>>,
     owns_workers: bool,
     last_cycle_id: Option<u64>,
 }
@@ -355,8 +422,29 @@ impl EcuProcessCoordinator {
     /// owner-only Unix datagram socket created by this effective UID in the validated private
     /// socket directory.
     pub fn connect_external(socket_directory: impl AsRef<Path>) -> Result<Self, Error> {
+        Self::connect_external_inner(socket_directory.as_ref(), None)
+    }
+
+    /// Connect to active worker sockets and optionally shadow the same cycle to candidate worker
+    /// sockets in a separate private directory. Candidate sockets are optional and are never part
+    /// of active readiness. Candidate responses are validated and discarded; candidate faults do
+    /// not fail the active ECU cycle.
+    pub fn connect_external_with_candidates(
+        socket_directory: impl AsRef<Path>,
+        candidate_socket_directory: impl AsRef<Path>,
+    ) -> Result<Self, Error> {
+        Self::connect_external_inner(
+            socket_directory.as_ref(),
+            Some(candidate_socket_directory.as_ref()),
+        )
+    }
+
+    fn connect_external_inner(
+        socket_directory: &Path,
+        candidate_socket_directory: Option<&Path>,
+    ) -> Result<Self, Error> {
         let owner = unsafe { libc::geteuid() };
-        let socket_directory = socket_directory.as_ref().to_path_buf();
+        let socket_directory = socket_directory.to_path_buf();
         let socket_directory_identity =
             validate_existing_socket_directory(&socket_directory, owner)?;
         let mut coordinator = Self::bind_coordinator_socket(
@@ -365,6 +453,29 @@ impl EcuProcessCoordinator {
             owner,
             false,
         )?;
+        if let Some(candidate_directory) = candidate_socket_directory {
+            match start_candidate_shadow_worker(
+                candidate_directory,
+                &coordinator.socket_directory,
+                owner,
+                Arc::clone(&coordinator.candidate_statuses),
+                Arc::clone(&coordinator.candidate_last_response_cycles),
+            ) {
+                Ok((sender, dropped_cycles, worker)) => {
+                    coordinator.candidate_sender = Some(sender);
+                    coordinator.candidate_dropped_cycles = Some(dropped_cycles);
+                    coordinator.candidate_thread = Some(worker);
+                }
+                Err(error) => {
+                    if let Ok(mut statuses) = coordinator.candidate_statuses.lock() {
+                        *statuses = [CandidateStatus::Failed(CandidateFailure::UnsafeSocket); 3];
+                    }
+                    // Candidate setup is optional. A candidate socket/configuration fault must
+                    // not prevent the active coordinator from starting.
+                    eprintln!("SDV shadow candidate subsystem unavailable: {error}");
+                }
+            }
+        }
         let startup_deadline = Instant::now() + EXTERNAL_WORKER_STARTUP_TIMEOUT;
 
         for (ecu, socket_name) in ECU_IDS.into_iter().zip(WORKER_SOCKET_NAMES) {
@@ -406,6 +517,11 @@ impl EcuProcessCoordinator {
             socket_directory_identity,
             owner,
             workers: Vec::with_capacity(ECU_IDS.len()),
+            candidate_sender: None,
+            candidate_dropped_cycles: None,
+            candidate_statuses: Arc::new(Mutex::new([CandidateStatus::Disabled; 3])),
+            candidate_last_response_cycles: Arc::new(Mutex::new([None; 3])),
+            candidate_thread: None,
             owns_workers,
             last_cycle_id: None,
         })
@@ -422,6 +538,32 @@ impl EcuProcessCoordinator {
         };
         self.last_cycle_id = Some(cycle_id);
         Ok(cycle_id)
+    }
+
+    /// Return per-ECU shadow-candidate status in Engine, Brake, Steering order.
+    pub fn candidate_statuses(&self) -> [CandidateStatus; 3] {
+        if self
+            .candidate_thread
+            .as_ref()
+            .is_some_and(JoinHandle::is_finished)
+        {
+            return [CandidateStatus::Failed(CandidateFailure::Protocol); 3];
+        }
+        self.candidate_statuses
+            .lock()
+            .map(|statuses| *statuses)
+            .unwrap_or([CandidateStatus::Failed(CandidateFailure::Protocol); 3])
+    }
+
+    /// Return the last candidate response cycle validated per ECU.
+    ///
+    /// This is a diagnostic watermark only. It does not make an outstanding candidate request
+    /// ready for routing and is never used as active-worker or vehicle-health evidence.
+    pub fn candidate_last_validated_cycles(&self) -> [Option<u64>; 3] {
+        self.candidate_last_response_cycles
+            .lock()
+            .map(|cycles| *cycles)
+            .unwrap_or([None; 3])
     }
 
     /// Send all ECU inputs first, then collect and validate the matching response from each
@@ -485,10 +627,10 @@ impl EcuProcessCoordinator {
                 }
                 Err(error) => return Err(Error::Io(error)),
             };
+            let peer_path = peer.as_pathname().ok_or(Error::UnknownPeer)?;
             if received > WORKER_DATAGRAM_MAX_SIZE {
                 return Err(Error::WorkerProtocol(WorkerError::InvalidLength));
             }
-            let peer_path = peer.as_pathname().ok_or(Error::UnknownPeer)?;
             let worker_index = self
                 .workers
                 .iter()
@@ -519,7 +661,34 @@ impl EcuProcessCoordinator {
             let missing_index = outputs.iter().position(Option::is_none).unwrap_or(0);
             return Err(Error::MissingResponse(ECU_IDS[missing_index]));
         };
+        self.queue_candidate_cycle(cycle_id, deadline, request_buffers, request_lengths);
         Ok([engine, brake, steering])
+    }
+
+    fn queue_candidate_cycle(
+        &self,
+        cycle_id: u64,
+        deadline: Instant,
+        request_buffers: [[u8; WORKER_DATAGRAM_MAX_SIZE]; 3],
+        request_lengths: [usize; 3],
+    ) {
+        let (Some(sender), Some(dropped_cycles)) = (
+            self.candidate_sender.as_ref(),
+            self.candidate_dropped_cycles.as_ref(),
+        ) else {
+            return;
+        };
+        let snapshot = CandidateCycleSnapshot {
+            cycle_id,
+            deadline,
+            request_buffers,
+            request_lengths,
+        };
+        if matches!(sender.try_send(snapshot), Err(TrySendError::Full(_))) {
+            let _ = dropped_cycles.try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                Some(count.saturating_add(1))
+            });
+        }
     }
 
     fn wait_for_worker(&mut self, index: usize, deadline: Instant) -> Result<(), Error> {
@@ -643,6 +812,10 @@ impl EcuProcessCoordinator {
 
 impl Drop for EcuProcessCoordinator {
     fn drop(&mut self) {
+        self.candidate_sender.take();
+        if let Some(worker) = self.candidate_thread.take() {
+            let _ = worker.join();
+        }
         if self.owns_workers {
             for worker in &mut self.workers {
                 if let Some(child) = worker.child.as_mut() {
@@ -667,6 +840,338 @@ impl Drop for EcuProcessCoordinator {
             }
             remove_socket_if_same(&self.socket_path, self.owner, &self.socket_identity);
         }
+    }
+}
+
+fn start_candidate_shadow_worker(
+    candidate_directory: &Path,
+    active_directory: &Path,
+    owner: u32,
+    shared_statuses: Arc<Mutex<[CandidateStatus; 3]>>,
+    shared_last_response_cycle: Arc<Mutex<[Option<u64>; 3]>>,
+) -> Result<
+    (
+        SyncSender<CandidateCycleSnapshot>,
+        Arc<AtomicUsize>,
+        JoinHandle<()>,
+    ),
+    Error,
+> {
+    if candidate_directory == active_directory {
+        return Err(Error::UnsafeSocketPath);
+    }
+    let socket_directory_identity = validate_existing_socket_directory(candidate_directory, owner)?;
+    let socket_path = candidate_directory.join(COORDINATOR_SOCKET_NAME);
+    ensure_path_absent(&socket_path)?;
+    let socket = UnixDatagram::bind(&socket_path)?;
+    let socket_identity = socket_identity(&socket_path, owner)?;
+    let socket_path_guard = SocketPathGuard {
+        path: socket_path.clone(),
+        owner,
+        identity: Some(socket_identity),
+    };
+    fs::set_permissions(&socket_path, fs::Permissions::from_mode(SOCKET_MODE))?;
+    validate_owned_socket(&socket_path, owner, &socket_identity)?;
+    socket.set_nonblocking(true)?;
+
+    let dropped_cycles = Arc::new(AtomicUsize::new(0));
+    let worker = CandidateShadowWorker {
+        socket,
+        _socket_path_guard: socket_path_guard,
+        socket_path,
+        socket_identity,
+        socket_directory: candidate_directory.to_path_buf(),
+        socket_directory_identity,
+        owner,
+        workers: ECU_IDS
+            .into_iter()
+            .zip(CANDIDATE_SOCKET_NAMES)
+            .map(|(ecu, socket_name)| CandidateWorkerProcess {
+                ecu,
+                socket_path: candidate_directory.join(socket_name),
+                socket_identity: None,
+            })
+            .collect(),
+        statuses: [CandidateStatus::Unavailable; 3],
+        shared_statuses: Arc::clone(&shared_statuses),
+        shared_last_response_cycle: Arc::clone(&shared_last_response_cycle),
+        pending_cycle: [None; 3],
+        pending_age: [0; 3],
+        last_response_cycle: [None; 3],
+        last_logged_ready_identity: [None; 3],
+        dropped_cycles: Arc::clone(&dropped_cycles),
+    };
+    if let Ok(mut statuses) = shared_statuses.lock() {
+        *statuses = [CandidateStatus::Unavailable; 3];
+    } else {
+        return Err(Error::UnsafeSocketPath);
+    }
+    if let Ok(mut cycles) = shared_last_response_cycle.lock() {
+        *cycles = [None; 3];
+    } else {
+        return Err(Error::UnsafeSocketPath);
+    }
+    let (sender, receiver) = sync_channel(1);
+    let handle = thread::Builder::new()
+        .name("sdv-shadow-ecu-worker".to_owned())
+        .spawn(move || worker.run(receiver))?;
+    Ok((sender, dropped_cycles, handle))
+}
+
+impl CandidateShadowWorker {
+    fn run(mut self, receiver: Receiver<CandidateCycleSnapshot>) {
+        while let Ok(snapshot) = receiver.recv() {
+            self.process_snapshot(snapshot);
+        }
+    }
+
+    fn process_snapshot(&mut self, snapshot: CandidateCycleSnapshot) {
+        let previous_statuses = self.statuses;
+        let skipped_cycles = self
+            .dropped_cycles
+            .swap(0, Ordering::Relaxed)
+            .min(u8::MAX as usize) as u8;
+        // Expire pending work before considering queued responses. A delayed reply after dropped
+        // active snapshots must not reset its age and masquerade as current candidate evidence.
+        self.advance_candidate_timeouts(skipped_cycles);
+        self.drain_candidate_responses();
+        if Instant::now() < snapshot.deadline {
+            self.send_candidate_requests(&snapshot);
+        }
+        // Count this active cycle whether the snapshot was fresh or too late to shadow.
+        self.advance_candidate_timeouts(1);
+        self.log_candidate_status_changes(previous_statuses);
+        if let Ok(mut statuses) = self.shared_statuses.lock() {
+            *statuses = self.statuses;
+        }
+        if let Ok(mut cycles) = self.shared_last_response_cycle.lock() {
+            *cycles = self.last_response_cycle;
+        }
+    }
+
+    fn send_candidate_requests(&mut self, snapshot: &CandidateCycleSnapshot) {
+        if validate_private_directory(
+            &self.socket_directory,
+            self.owner,
+            &self.socket_directory_identity,
+        )
+        .is_err()
+            || !self.validate_coordinator_socket()
+        {
+            self.fail_all_candidates(CandidateFailure::UnsafeSocket);
+            return;
+        }
+
+        for index in 0..self.workers.len() {
+            if self.pending_cycle[index].is_some() {
+                if matches!(self.statuses[index], CandidateStatus::Failed(_)) {
+                    self.pending_cycle[index] = None;
+                } else {
+                    self.statuses[index] = CandidateStatus::Pending;
+                    continue;
+                }
+            }
+            let worker = &mut self.workers[index];
+            let metadata = match fs::symlink_metadata(&worker.socket_path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    worker.socket_identity = None;
+                    self.statuses[index] = CandidateStatus::Unavailable;
+                    continue;
+                }
+                Err(_) => {
+                    self.statuses[index] = CandidateStatus::Failed(CandidateFailure::UnsafeSocket);
+                    continue;
+                }
+            };
+            if !metadata.file_type().is_socket()
+                || metadata.uid() != self.owner
+                || metadata.permissions().mode() & 0o777 != SOCKET_MODE
+            {
+                worker.socket_identity = None;
+                self.statuses[index] = CandidateStatus::Failed(CandidateFailure::UnsafeSocket);
+                continue;
+            }
+            let current_identity = SocketIdentity {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+            };
+            if matches!(self.statuses[index], CandidateStatus::Failed(_))
+                && worker.socket_identity.is_some_and(|previous| {
+                    previous.device == current_identity.device
+                        && previous.inode == current_identity.inode
+                })
+            {
+                continue;
+            }
+            if matches!(self.statuses[index], CandidateStatus::Failed(_)) {
+                self.statuses[index] = CandidateStatus::Unavailable;
+            }
+            worker.socket_identity = Some(current_identity);
+            match self.socket.send_to(
+                &snapshot.request_buffers[index][..snapshot.request_lengths[index]],
+                &worker.socket_path,
+            ) {
+                Ok(sent) if sent == snapshot.request_lengths[index] => {
+                    self.pending_cycle[index] = Some(snapshot.cycle_id);
+                    self.pending_age[index] = 0;
+                    self.statuses[index] = CandidateStatus::Pending;
+                }
+                _ => self.statuses[index] = CandidateStatus::Failed(CandidateFailure::Send),
+            }
+        }
+    }
+
+    fn drain_candidate_responses(&mut self) {
+        if validate_private_directory(
+            &self.socket_directory,
+            self.owner,
+            &self.socket_directory_identity,
+        )
+        .is_err()
+            || !self.validate_coordinator_socket()
+        {
+            self.fail_all_candidates(CandidateFailure::UnsafeSocket);
+            return;
+        }
+        let mut response_buffer = [0; WORKER_DATAGRAM_MAX_SIZE + 1];
+        for _ in 0..MAX_CANDIDATE_DATAGRAMS_PER_CYCLE {
+            let (received, peer) = match self.socket.recv_from(&mut response_buffer) {
+                Ok(response) => response,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(_) => {
+                    self.fail_all_candidates(CandidateFailure::UnsafeSocket);
+                    break;
+                }
+            };
+            let Some(peer_path) = peer.as_pathname() else {
+                continue;
+            };
+            let Some(index) = self
+                .workers
+                .iter()
+                .position(|worker| worker.socket_path == peer_path)
+            else {
+                continue;
+            };
+            if matches!(self.statuses[index], CandidateStatus::Failed(_)) {
+                continue;
+            }
+            if !self.candidate_worker_identity_is_current(index) {
+                self.statuses[index] = CandidateStatus::Failed(CandidateFailure::UnsafeSocket);
+                self.pending_cycle[index] = None;
+                continue;
+            }
+            if received > WORKER_DATAGRAM_MAX_SIZE {
+                self.statuses[index] = CandidateStatus::Failed(CandidateFailure::Protocol);
+                self.pending_cycle[index] = None;
+                continue;
+            }
+            let response = match decode_response(&response_buffer[..received]) {
+                Ok(response) => response,
+                Err(_) => {
+                    self.statuses[index] = CandidateStatus::Failed(CandidateFailure::Protocol);
+                    self.pending_cycle[index] = None;
+                    continue;
+                }
+            };
+            let Some(expected_cycle) = self.pending_cycle[index] else {
+                let failure = if self.last_response_cycle[index] == Some(response.cycle_id) {
+                    CandidateFailure::DuplicateResponse
+                } else {
+                    CandidateFailure::Protocol
+                };
+                self.statuses[index] = CandidateStatus::Failed(failure);
+                continue;
+            };
+            if response.ecu_id != self.workers[index].ecu {
+                self.statuses[index] = CandidateStatus::Failed(CandidateFailure::WrongEcu);
+                self.pending_cycle[index] = None;
+                continue;
+            }
+            if response.cycle_id != expected_cycle {
+                self.statuses[index] = CandidateStatus::Failed(CandidateFailure::WrongCycle);
+                self.pending_cycle[index] = None;
+                continue;
+            }
+            self.pending_cycle[index] = None;
+            self.pending_age[index] = 0;
+            self.last_response_cycle[index] = Some(expected_cycle);
+            // Candidate output is deliberately discarded. This event means one matching reply
+            // was seen; it is not stable health and never permits route promotion.
+            self.statuses[index] = CandidateStatus::Ready;
+            self.log_candidate_ready(index);
+        }
+    }
+
+    fn advance_candidate_timeouts(&mut self, elapsed_cycles: u8) {
+        for index in 0..self.pending_cycle.len() {
+            if self.pending_cycle[index].is_none()
+                || matches!(self.statuses[index], CandidateStatus::Failed(_))
+            {
+                continue;
+            }
+            self.pending_age[index] = self.pending_age[index].saturating_add(elapsed_cycles);
+            if self.pending_age[index] >= CANDIDATE_RESPONSE_TIMEOUT_CYCLES {
+                self.pending_cycle[index] = None;
+                self.statuses[index] = CandidateStatus::Failed(CandidateFailure::Timeout);
+            } else {
+                self.statuses[index] = CandidateStatus::Pending;
+            }
+        }
+    }
+
+    fn fail_all_candidates(&mut self, failure: CandidateFailure) {
+        self.statuses = [CandidateStatus::Failed(failure); 3];
+        self.pending_cycle = [None; 3];
+    }
+
+    fn log_candidate_ready(&mut self, index: usize) {
+        let identity = self.workers[index].socket_identity;
+        if identity.is_some() && identity != self.last_logged_ready_identity[index] {
+            eprintln!("SDV shadow candidate {:?} status: Ready", ECU_IDS[index]);
+            self.last_logged_ready_identity[index] = identity;
+        }
+    }
+
+    fn log_candidate_status_changes(&mut self, previous: [CandidateStatus; 3]) {
+        for index in 0..self.statuses.len() {
+            match self.statuses[index] {
+                CandidateStatus::Unavailable => self.last_logged_ready_identity[index] = None,
+                CandidateStatus::Failed(_) => {
+                    self.last_logged_ready_identity[index] = None;
+                    if self.statuses[index] != previous[index] {
+                        eprintln!(
+                            "SDV shadow candidate {:?} status: {:?}",
+                            ECU_IDS[index], self.statuses[index]
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn validate_coordinator_socket(&self) -> bool {
+        validate_owned_socket(&self.socket_path, self.owner, &self.socket_identity).is_ok()
+    }
+
+    fn candidate_worker_identity_is_current(&self, index: usize) -> bool {
+        let Some(expected_identity) = self.workers[index].socket_identity.as_ref() else {
+            return false;
+        };
+        validate_private_directory(
+            &self.socket_directory,
+            self.owner,
+            &self.socket_directory_identity,
+        )
+        .is_ok()
+            && validate_owned_socket(
+                &self.workers[index].socket_path,
+                self.owner,
+                expected_identity,
+            )
+            .is_ok()
     }
 }
 
