@@ -1254,6 +1254,44 @@ fn install_url_rejects_credentials_beneath_a_writable_ancestor() {
 }
 
 #[test]
+fn install_url_rejects_symlinked_credential_ancestors_and_parent_components() {
+    let root = TempRoot::new();
+    let private_directory = root.0.join("private");
+    fs::create_dir(&private_directory).unwrap();
+    fs::set_permissions(&private_directory, fs::Permissions::from_mode(0o700)).unwrap();
+    let certificate = private_directory.join("client.crt");
+    fs::write(&certificate, b"test certificate").unwrap();
+    fs::set_permissions(&certificate, fs::Permissions::from_mode(0o644)).unwrap();
+    let private_key = private_directory.join("client.key");
+    fs::write(&private_key, b"test private key").unwrap();
+    fs::set_permissions(&private_key, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let directory_link = root.0.join("credential-link");
+    std::os::unix::fs::symlink(&private_directory, &directory_link).unwrap();
+    let through_link = HttpsPackageSource::open_with_client_identity(
+        "https://updates.example.test/vehicle.sdvf",
+        Some(&directory_link.join("client.crt")),
+        Some(&directory_link.join("client.key")),
+    );
+    assert!(matches!(
+        through_link,
+        Err(sdv_fota::linux::Error::UnsafeClientCredentials)
+    ));
+
+    let parent_component = private_directory.join("../private/client.crt");
+    let parent_component_key = private_directory.join("../private/client.key");
+    let through_parent_component = HttpsPackageSource::open_with_client_identity(
+        "https://updates.example.test/vehicle.sdvf",
+        Some(&parent_component),
+        Some(&parent_component_key),
+    );
+    assert!(matches!(
+        through_parent_component,
+        Err(sdv_fota::linux::Error::UnsafeClientCredentials)
+    ));
+}
+
+#[test]
 fn failed_https_transfer_aborts_candidate_and_does_not_schedule_trial() {
     let root = TempRoot::new();
     let boot = FileBootControl::new(&root.0);
