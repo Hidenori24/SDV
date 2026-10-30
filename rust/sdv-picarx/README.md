@@ -69,6 +69,24 @@ to these workers yet and remains the intended owner of GPIO, I2C, sensor input, 
 actuator output. CRC32 detects accidental packet corruption but does not authenticate a peer, so a
 future coordinator must restrict access to the worker socket through its filesystem permissions.
 
+The Linux `sdv-picarx-ecu-worker` executable binds one worker socket, connects to an already
+running coordinator socket, then handles requests until SIGINT or SIGTERM. It accepts only absolute
+socket paths in owner-controlled directories, requires the coordinator socket to be owner-only and
+owned by the same account, and creates the worker socket with mode `0600`. If the worker path
+already exists (including a socket or symlink), startup refuses to replace it. On shutdown it
+removes only the socket inode created by that process. The coordinator must send strictly
+increasing cycle ids and the input frames for each 10 ms step:
+
+```sh
+cargo build --release --manifest-path rust/sdv-picarx/Cargo.toml --bin sdv-picarx-ecu-worker
+./rust/sdv-picarx/target/release/sdv-picarx-ecu-worker --ecu engine \
+  --worker-socket /run/sdv-picarx/workers/engine.sock \
+  --coordinator-socket /run/sdv-picarx/coordinator.sock
+```
+
+Use `brake` or `steering` for the other worker processes. This executable runs the ECU software
+only; it does not open GPIO/I2C devices, coordinate vehicle tasks, or create a systemd unit.
+
 ## Linux vehicle host
 
 The `sdv-picarx` executable composes the I2C, GPIO, input, PiCar-X, and virtual ECU runtime ports.
