@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::platform::{CycleError, VehicleExecutor, VehiclePlatform};
+use crate::platform::HostCycleExecutor;
 
 pub const ECU_PERIOD: Duration = Duration::from_millis(10);
 
@@ -33,7 +33,10 @@ impl Clock for SystemClock {
 
 #[derive(Debug)]
 pub enum RunError<E> {
-    Cycle(CycleError<E>),
+    Cycle {
+        source: E,
+        stop_error: Option<E>,
+    },
     DeadlineMissed { stop_error: Option<E> },
     ClockOverflow { stop_error: Option<E> },
     Stop(E),
@@ -41,39 +44,45 @@ pub enum RunError<E> {
 
 /// Run until shutdown is requested. A missed cycle stops the platform rather than replaying
 /// stale 10 ms cycles. `stop_requested` must return promptly and is polled once per cycle.
-pub fn run<P, C, F>(
-    executor: &mut VehicleExecutor<P>,
+pub fn run<E, C, F>(
+    executor: &mut E,
     clock: &mut C,
     mut stop_requested: F,
-) -> Result<(), RunError<P::Error>>
+) -> Result<(), RunError<E::Error>>
 where
-    P: VehiclePlatform,
+    E: HostCycleExecutor,
     C: Clock,
     F: FnMut() -> bool,
 {
     let mut deadline = clock.now();
     loop {
         if stop_requested() {
-            return executor.stop().map_err(RunError::Stop);
+            return executor.host_stop().map_err(RunError::Stop);
         }
         clock.wait_until(deadline);
         let next = match deadline.checked_add(ECU_PERIOD) {
             Some(next) => next,
             None => {
                 return Err(RunError::ClockOverflow {
-                    stop_error: executor.stop().err(),
+                    stop_error: executor.host_stop().err(),
                 })
             }
         };
         if clock.now() >= next {
             return Err(RunError::DeadlineMissed {
-                stop_error: executor.stop().err(),
+                stop_error: executor.host_stop().err(),
             });
         }
-        executor.cycle().map_err(RunError::Cycle)?;
+        let remaining_budget = next.saturating_sub(clock.now());
+        if let Err(source) = executor.host_cycle(remaining_budget) {
+            return Err(RunError::Cycle {
+                source,
+                stop_error: executor.host_stop().err(),
+            });
+        }
         if clock.now() >= next {
             return Err(RunError::DeadlineMissed {
-                stop_error: executor.stop().err(),
+                stop_error: executor.host_stop().err(),
             });
         }
         deadline = next;
@@ -83,7 +92,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::PlatformInputs;
+    use crate::platform::{PlatformInputs, VehicleExecutor, VehiclePlatform};
     use crate::runtime::{VehicleActuation, VehicleRuntime};
     use std::cell::Cell;
     use std::rc::Rc;
@@ -95,6 +104,35 @@ mod tests {
         }
         fn wait_until(&mut self, deadline: Duration) {
             self.0.set(self.0.get().max(deadline));
+        }
+    }
+
+    struct DelayedClock(Duration);
+    impl Clock for DelayedClock {
+        fn now(&self) -> Duration {
+            self.0
+        }
+        fn wait_until(&mut self, deadline: Duration) {
+            self.0 = self.0.max(deadline) + Duration::from_millis(2);
+        }
+    }
+
+    #[derive(Default)]
+    struct FailingExecutor {
+        budget: Option<Duration>,
+        stops: usize,
+    }
+    impl HostCycleExecutor for FailingExecutor {
+        type Error = &'static str;
+
+        fn host_cycle(&mut self, remaining_budget: Duration) -> Result<(), Self::Error> {
+            self.budget = Some(remaining_budget);
+            Err("worker response failed")
+        }
+
+        fn host_stop(&mut self) -> Result<(), Self::Error> {
+            self.stops += 1;
+            Ok(())
         }
     }
     struct FakePlatform {
@@ -158,5 +196,20 @@ mod tests {
         ));
         assert_eq!(executor.platform().cycles, 1);
         assert_eq!(executor.platform().stops, 1);
+    }
+
+    #[test]
+    fn dispatcher_error_stops_and_receives_only_the_remaining_cycle_budget() {
+        let mut clock = DelayedClock(Duration::ZERO);
+        let mut executor = FailingExecutor::default();
+        assert!(matches!(
+            run(&mut executor, &mut clock, || false),
+            Err(RunError::Cycle {
+                source: "worker response failed",
+                stop_error: None
+            })
+        ));
+        assert_eq!(executor.budget, Some(Duration::from_millis(8)));
+        assert_eq!(executor.stops, 1);
     }
 }

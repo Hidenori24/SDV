@@ -16,11 +16,12 @@ On the Pi 5, build the Linux FOTA tools and PiCar-X vehicle image from the repos
 
 ```sh
 cargo build --release --manifest-path rust/sdv-fota/Cargo.toml --bin sdv-fota --bin sdv-fota-launcher
-cargo build --release --manifest-path rust/sdv-picarx/Cargo.toml --bin sdv-picarx --bin sdv-picarx-health --bin sdv-picarx-discover
+cargo build --release --manifest-path rust/sdv-picarx/Cargo.toml --bin sdv-picarx --bin sdv-picarx-health --bin sdv-picarx-discover --bin sdv-picarx-ecu-worker
 sudo install -m 0755 rust/sdv-fota/target/release/sdv-fota /usr/bin/sdv-fota
 sudo install -m 0755 rust/sdv-fota/target/release/sdv-fota-launcher /usr/bin/sdv-fota-launcher
 sudo install -m 0755 rust/sdv-picarx/target/release/sdv-picarx-health /usr/bin/sdv-picarx-health
 sudo install -m 0755 rust/sdv-picarx/target/release/sdv-picarx-discover /usr/bin/sdv-picarx-discover
+sudo install -m 0755 rust/sdv-picarx/target/release/sdv-picarx-ecu-worker /usr/bin/sdv-picarx-ecu-worker
 ```
 
 Before editing the PiCar-X config, run `sdv-picarx-discover` to list the actual I2C device paths,
@@ -59,6 +60,31 @@ be owned by the account running the FOTA tools (root in this setup). Directories
 be writable by group or other users. The tools never follow symlinked state roots, slot directories,
 images, boot records, or lock files. Update images and boot records are created through unique, exclusive
 temporary files before being atomically renamed into place.
+
+The existing Pi host keeps Engine, Brake, and Steering in-process by default. To opt into worker
+processes, add this object to `/etc/sdv-picarx/vehicle.json`:
+
+```json
+"virtual_ecu_workers": {
+  "binary": "/usr/bin/sdv-picarx-ecu-worker",
+  "socket_directory": "/run/sdv-picarx/workers"
+}
+```
+
+The coordinator starts all three workers and remains the sole owner of sensor input and GPIO/I2C
+actuation. It sends requests to every worker before waiting on the shared coordinator socket. Every
+response must match its worker path, ECU, and boot-monotonic cycle ID before the 10 ms cycle's
+remaining budget expires. Missing workers, malformed, duplicate, or stale responses, or a deadline
+miss stop the platform without applying partial or previous-cycle commands. The socket directory
+is owner-only; worker and coordinator socket cleanup checks the recorded inode. The worker executable
+must be a regular executable owned by root or the host account and cannot be group/other writable.
+Install a root-owned executable for deployment; host-owned executables are accepted for local
+testing. Workers inherit the vehicle service's UID, supplementary groups, and capabilities, so this
+mode is process separation only, not a privilege boundary. The worker code does not open GPIO/I2C;
+future privilege separation needs root-managed per-ECU services with their own credentials and
+device access policy. The worker processes exit if the coordinator is killed. Omitting this object leaves the existing
+in-process runtime unchanged. Details and a disabled-output sample config are in
+[`rust/sdv-picarx/README.md`](../../rust/sdv-picarx/README.md).
 
 When upgrading a Pi provisioned by an earlier version without image digests, first replace the
 `sdv-fota` binary while the existing launcher is still running. Verify the active slot image against
@@ -259,7 +285,9 @@ tasks with their own RTE state and the same virtual bus contract as the Rust sim
 require separate physical CPUs. The `vehicle` target remains a single A/B application image, while
 the Linux CLI can also stage individually signed `engine`, `brake`, or `steering` packages into
 separate fixed state roots and record independent trial metadata. Only the `vehicle` root is
-currently consumed by the Pi launcher: per-ECU worker trial startup, health reporting, and automatic
+currently consumed by the Pi FOTA launcher. Virtual ECU worker processes can be enabled as an
+alternative Linux runtime mode, but ECU-targeted packages only stage into those individual roots and
+record trial metadata: per-ECU trial image selection, worker startup, health reporting, and automatic
 commit/rollback are not connected. The Pi path can sign a package on a separate host, verify and
 stage it incrementally, and exercise whole-vehicle A/B trial boot and rollback on Linux. HTTPS
 artifact transfer uses the device's system CA store and can use mutual TLS. Private repository

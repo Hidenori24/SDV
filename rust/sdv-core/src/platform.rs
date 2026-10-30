@@ -12,6 +12,27 @@ pub struct PlatformInputs {
     pub estop: bool,
 }
 
+impl PlatformInputs {
+    pub fn is_finite(&self) -> bool {
+        let d = self.driver;
+        let v = self.vehicle;
+        [
+            d.throttle,
+            d.brake,
+            d.steer,
+            v.t,
+            v.x,
+            v.y,
+            v.yaw,
+            v.v,
+            v.yaw_rate,
+            v.wheel_omega,
+        ]
+        .iter()
+        .all(|value| value.is_finite())
+    }
+}
+
 /// Platform adapters implement device access and a best-effort actuator stop.
 /// `sample` must return an error when its inputs are stale or its I/O path is unavailable.
 pub trait VehiclePlatform {
@@ -26,6 +47,7 @@ pub enum CycleError<E> {
     Sample { source: E, stop_error: Option<E> },
     Apply { source: E, stop_error: Option<E> },
     InvalidInput { stop_error: Option<E> },
+    Stop(E),
 }
 
 /// Connects the same ECU runtime to a simulated or physical platform.
@@ -50,7 +72,7 @@ impl<P: VehiclePlatform> VehicleExecutor<P> {
                 })
             }
         };
-        if !finite(&input) {
+        if !input.is_finite() {
             return Err(CycleError::InvalidInput {
                 stop_error: self.platform.stop().err(),
             });
@@ -79,23 +101,26 @@ impl<P: VehiclePlatform> VehicleExecutor<P> {
     }
 }
 
-fn finite(input: &PlatformInputs) -> bool {
-    let d = input.driver;
-    let v = input.vehicle;
-    [
-        d.throttle,
-        d.brake,
-        d.steer,
-        v.t,
-        v.x,
-        v.y,
-        v.yaw,
-        v.v,
-        v.yaw_rate,
-        v.wheel_omega,
-    ]
-    .iter()
-    .all(|value| value.is_finite())
+/// Interface consumed by the monotonic host loop. Platform-specific executors can replace the
+/// ECU dispatch mechanism while retaining the same 10 ms scheduling and shutdown behavior.
+pub trait HostCycleExecutor {
+    type Error;
+
+    /// Execute the next scheduled cycle within the time remaining before its 10 ms deadline.
+    fn host_cycle(&mut self, remaining_budget: std::time::Duration) -> Result<(), Self::Error>;
+    fn host_stop(&mut self) -> Result<(), Self::Error>;
+}
+
+impl<P: VehiclePlatform> HostCycleExecutor for VehicleExecutor<P> {
+    type Error = CycleError<P::Error>;
+
+    fn host_cycle(&mut self, _remaining_budget: std::time::Duration) -> Result<(), Self::Error> {
+        self.cycle().map(|_| ())
+    }
+
+    fn host_stop(&mut self) -> Result<(), Self::Error> {
+        self.stop().map_err(CycleError::Stop)
+    }
 }
 
 #[cfg(test)]

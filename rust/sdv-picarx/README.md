@@ -64,10 +64,11 @@ handles one request per 10 ms cycle over a connected `UnixDatagram`. Version 1 r
 ECU id, a strictly increasing cycle id, and zero to two encoded bus frames; responses echo the
 cycle id and contain that ECU's command and alive frame. The adapter rejects oversized or malformed
 packets, wrong ECU/frame routing, and repeated or reversed cycle ids before advancing the task.
-`serve_once` does not create socket paths or schedule cycles. The vehicle coordinator is not wired
-to these workers yet and remains the intended owner of GPIO, I2C, sensor input, and physical
-actuator output. CRC32 detects accidental packet corruption but does not authenticate a peer, so a
-future coordinator must restrict access to the worker socket through its filesystem permissions.
+`serve_once` does not create socket paths or schedule cycles. On Pi/Linux, an optional
+`virtual_ecu_workers` host setting starts one worker process for each ECU. The vehicle coordinator
+remains the sole owner of GPIO, I2C, sensor input, and actuator output. CRC32 detects accidental
+packet corruption but does not authenticate a peer, so the coordinator validates socket ownership,
+mode, peer path, ECU id, and cycle id.
 
 The Linux `sdv-picarx-ecu-worker` executable binds one worker socket, connects to an already
 running coordinator socket, then handles requests until SIGINT or SIGTERM. It accepts only absolute
@@ -85,7 +86,7 @@ cargo build --release --manifest-path rust/sdv-picarx/Cargo.toml --bin sdv-picar
 ```
 
 Use `brake` or `steering` for the other worker processes. This executable runs the ECU software
-only; it does not open GPIO/I2C devices, coordinate vehicle tasks, or create a systemd unit.
+only; it does not open GPIO/I2C devices or own vehicle-level coordination.
 
 ## Linux vehicle host
 
@@ -98,6 +99,7 @@ It accepts one named option, `--config <file.json>`. The JSON config contains:
 | `gpio_chip`, `left_direction_line`, `right_direction_line` | GPIO chip device path and line offsets |
 | `input_socket`, `input_max_age_ms` | Local input socket path and maximum input age |
 | `trial_stationary_speed_tolerance_mps`, `trial_stationary_throttle_tolerance` | Maximum estimated speed and requested throttle accepted by the FOTA trial health check |
+| `virtual_ecu_workers` | Optional worker process mode. Set `binary` to the trusted worker executable and `socket_directory` to a private runtime directory. Omit the field to keep the in-process ECU tasks. |
 | `motor` | Forward direction polarity and measured minimum/maximum PWM duty |
 | `vehicle` | Measured drive and steering calibration used by the ECU adapter |
 
@@ -116,10 +118,39 @@ estimator; it cannot independently prove physical standstill. The
 arguments, the vehicle executable reads its config path from `SDV_PICARX_CONFIG`, as used by the
 FOTA systemd service.
 
+To opt into worker processes, add this object to the host JSON:
+
+```json
+"virtual_ecu_workers": {
+  "binary": "/usr/bin/sdv-picarx-ecu-worker",
+  "socket_directory": "/run/sdv-picarx/workers"
+}
+```
+
+The coordinator starts Engine, Brake, and Steering workers and sends all three cycle requests
+before waiting for responses. It accepts only one matching response from each worker before the
+remaining 10 ms host-cycle budget expires. Missing workers, invalid packets, stale/duplicate
+responses, or a missed deadline stop the platform; partial or previous-cycle commands are not
+applied. The `socket_directory` is owner-only and owned by the host account; the coordinator and
+worker sockets are owner-only and cleaned only when their recorded inode still matches. The worker
+binary must be a regular executable owned by root or the host account, with no group/other write
+permission. Install a root-owned binary in production; host-owned binaries are accepted for local
+testing. Workers inherit the host process UID, supplementary groups, and capabilities, so this
+process mode is not a privilege boundary even though workers do not open GPIO/I2C. A future
+root-managed per-ECU service boundary is needed for privilege separation. Worker processes receive
+a parent-death signal so they exit if the host is killed.
+Worker mode requires all three ECU tasks to be enabled; a disabled task is rejected before the
+external cycle starts. Omitting `virtual_ecu_workers` preserves the existing in-process runtime path.
+
+Per-ECU FOTA package staging and trial metadata use separate state roots, but the FOTA launcher does
+not yet select worker images or connect per-ECU trial health, commit, or rollback.
+
 `config/pi5.disabled.example.json` is a commissioning template. Its zero motor duty and zero
 forward-power limit keep drive output disabled. `config/pi5.fota.disabled.example.json` uses the
-systemd runtime directory for input and health sockets. Replace the GPIO chip placeholder and
-calibrate motor and steering values against the target PiCar-X before enabling forward power.
+systemd runtime directory for input and health sockets and keeps the existing in-process ECU tasks.
+`config/pi5.worker-processes.disabled.example.json` demonstrates opt-in worker processes while
+keeping drive output disabled. Replace the GPIO chip placeholder and calibrate motor and steering
+values against the target PiCar-X before enabling forward power.
 
 Build and run it with:
 
