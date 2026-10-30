@@ -392,7 +392,11 @@ mod frame_wire_tests {
 
     #[test]
     fn safety_state_and_boolean_fields_are_validated() {
-        for state in [SystemState::Normal, SystemState::Degraded, SystemState::EStop] {
+        for state in [
+            SystemState::Normal,
+            SystemState::Degraded,
+            SystemState::EStop,
+        ] {
             let frame = Frame::Safety(Safety {
                 estop: false,
                 system_state: state,
@@ -547,7 +551,13 @@ impl Default for Bus {
 
 impl Bus {
     pub fn new(delay_ticks: u64) -> Self {
-        Self { delay_ticks, loss_permille: 0, down: false, rng: 0x1234_5678, inflight: Vec::new() }
+        Self {
+            delay_ticks,
+            loss_permille: 0,
+            down: false,
+            rng: 0x1234_5678,
+            inflight: Vec::new(),
+        }
     }
 
     /// Delay of the vehicle bus in ticks (10 ms) for frames sent from now on.
@@ -595,7 +605,11 @@ impl Bus {
                 }
             }
             let delay = if direct { 0 } else { self.delay_ticks };
-            self.inflight.push(InFlight { due_tick: now_tick + delay, to, frame });
+            self.inflight.push(InFlight {
+                due_tick: now_tick + delay,
+                to,
+                frame,
+            });
         }
     }
 
