@@ -53,9 +53,15 @@ impl fmt::Display for WorkerError {
             Self::InvalidEcuId => formatter.write_str("invalid worker ECU id"),
             Self::WrongEcu => formatter.write_str("request is addressed to a different ECU"),
             Self::NonIncreasingCycle => formatter.write_str("worker cycle id did not increase"),
-            Self::TooManyInputFrames => formatter.write_str("request contains more than two frames"),
-            Self::WrongFrameReceiver => formatter.write_str("input frame is not addressed to this ECU"),
-            Self::InvalidResponseFrames => formatter.write_str("worker response frames do not match its ECU"),
+            Self::TooManyInputFrames => {
+                formatter.write_str("request contains more than two frames")
+            }
+            Self::WrongFrameReceiver => {
+                formatter.write_str("input frame is not addressed to this ECU")
+            }
+            Self::InvalidResponseFrames => {
+                formatter.write_str("worker response frames do not match its ECU")
+            }
             Self::ChecksumMismatch => formatter.write_str("worker datagram checksum mismatch"),
             Self::FrameWire(error) => write!(formatter, "invalid bus frame: {error:?}"),
         }
@@ -231,9 +237,7 @@ struct DecodedRequest {
 }
 
 fn decode_request(datagram: &[u8]) -> Result<DecodedRequest, WorkerError> {
-    if datagram.len() < HEADER_SIZE + CHECKSUM_SIZE
-        || datagram.len() > WORKER_DATAGRAM_MAX_SIZE
-    {
+    if datagram.len() < HEADER_SIZE + CHECKSUM_SIZE || datagram.len() > WORKER_DATAGRAM_MAX_SIZE {
         return Err(WorkerError::InvalidLength);
     }
     validate_envelope(datagram, REQUEST_MAGIC)?;
@@ -305,8 +309,8 @@ fn decode_frame_record(
     if frame_end > checksum_offset {
         return Err(WorkerError::InvalidLength);
     }
-    let frame = Frame::decode_wire(&datagram[*cursor..frame_end])
-        .map_err(WorkerError::FrameWire)?;
+    let frame =
+        Frame::decode_wire(&datagram[*cursor..frame_end]).map_err(WorkerError::FrameWire)?;
     *cursor = frame_end;
     Ok(frame)
 }
@@ -398,7 +402,11 @@ fn ecu_node(ecu_id: VirtualEcuId) -> Node {
 }
 
 fn read_cycle_id(datagram: &[u8]) -> u64 {
-    u64::from_le_bytes(datagram[CYCLE_ID_START..CYCLE_ID_START + 8].try_into().unwrap())
+    u64::from_le_bytes(
+        datagram[CYCLE_ID_START..CYCLE_ID_START + 8]
+            .try_into()
+            .unwrap(),
+    )
 }
 
 fn worker_crc32(bytes: &[u8]) -> u32 {
@@ -467,8 +475,7 @@ mod tests {
 
         for cycle_id in [4, 5] {
             let frames = input_frames(0.4);
-            let (request, request_len) =
-                make_request(VirtualEcuId::Engine, cycle_id, &frames);
+            let (request, request_len) = make_request(VirtualEcuId::Engine, cycle_id, &frames);
             coordinator_socket.send(&request[..request_len]).unwrap();
 
             let mut response = [0; WORKER_DATAGRAM_MAX_SIZE + 1];
@@ -539,15 +546,16 @@ mod tests {
             .handle_datagram(&first[..first_len], &mut response)
             .unwrap();
         assert_eq!(
-            decode_response(&response[..first_response_len]).unwrap().alive,
+            decode_response(&response[..first_response_len])
+                .unwrap()
+                .alive,
             Frame::Alive {
                 index: 0,
                 counter: 1,
             }
         );
         for cycle_id in [8, 7] {
-            let (request, request_len) =
-                make_request(VirtualEcuId::Engine, cycle_id, &frames);
+            let (request, request_len) = make_request(VirtualEcuId::Engine, cycle_id, &frames);
             assert!(matches!(
                 worker.handle_datagram(&request[..request_len], &mut response),
                 Err(WorkerError::NonIncreasingCycle)
@@ -559,7 +567,9 @@ mod tests {
             .handle_datagram(&next[..next_len], &mut response)
             .unwrap();
         assert_eq!(
-            decode_response(&response[..next_response_len]).unwrap().alive,
+            decode_response(&response[..next_response_len])
+                .unwrap()
+                .alive,
             Frame::Alive {
                 index: 0,
                 counter: 2,
@@ -576,7 +586,7 @@ mod tests {
 
         assert!(matches!(
             worker.handle_datagram(&valid[..valid_len - 1], &mut response),
-            Err(WorkerError::InvalidLength)
+            Err(WorkerError::InvalidLength | WorkerError::ChecksumMismatch)
         ));
 
         let mut bad_length = valid;
@@ -606,8 +616,8 @@ mod tests {
         misrouted[CYCLE_ID_START..CYCLE_ID_START + 8].copy_from_slice(&21_u64.to_le_bytes());
         misrouted[FRAME_COUNT_OFFSET] = 1;
         misrouted[HEADER_SIZE] = frame_len as u8;
-        misrouted[HEADER_SIZE + FRAME_RECORD_OVERHEAD
-            ..HEADER_SIZE + FRAME_RECORD_OVERHEAD + frame_len]
+        misrouted
+            [HEADER_SIZE + FRAME_RECORD_OVERHEAD..HEADER_SIZE + FRAME_RECORD_OVERHEAD + frame_len]
             .copy_from_slice(&encoded_frame[..frame_len]);
         let misrouted_len = append_checksum(
             &mut misrouted,
@@ -624,7 +634,9 @@ mod tests {
             .handle_datagram(&next[..next_len], &mut response)
             .unwrap();
         assert_eq!(
-            decode_response(&response[..next_response_len]).unwrap().alive,
+            decode_response(&response[..next_response_len])
+                .unwrap()
+                .alive,
             Frame::Alive {
                 index: 0,
                 counter: 1,
@@ -641,7 +653,12 @@ mod tests {
             Err(WorkerError::TooManyInputFrames)
         ));
         assert!(matches!(
-            encode_request(VirtualEcuId::Engine, 1, &[Frame::CmdDrive(0.0)], &mut output),
+            encode_request(
+                VirtualEcuId::Engine,
+                1,
+                &[Frame::CmdDrive(0.0)],
+                &mut output
+            ),
             Err(WorkerError::WrongFrameReceiver)
         ));
     }

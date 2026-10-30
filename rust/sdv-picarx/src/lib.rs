@@ -6,10 +6,10 @@ pub mod linux_gpio;
 pub mod linux_i2c;
 #[cfg(target_os = "linux")]
 pub mod linux_input;
-#[cfg(target_os = "linux")]
-pub mod virtual_ecu_worker;
 pub mod pwm;
 pub mod robothat;
+#[cfg(target_os = "linux")]
+pub mod virtual_ecu_worker;
 
 use sdv_core::platform::{PlatformInputs, VehiclePlatform};
 use sdv_core::rte::SystemState;

@@ -57,6 +57,18 @@ with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as peer:
 A real input peer must publish continuously, increment `sequence`, and timestamp each actual sensor
 sample. The receiver treats the timestamp as the age of the measurement, not the packet arrival.
 
+## Linux virtual ECU worker IPC
+
+`virtual_ecu_worker::VirtualEcuWorker` owns one Engine, Brake, or Steering `VirtualEcuTask` and
+handles one request per 10 ms cycle over a connected `UnixDatagram`. Version 1 requests carry the
+ECU id, a strictly increasing cycle id, and zero to two encoded bus frames; responses echo the
+cycle id and contain that ECU's command and alive frame. The adapter rejects oversized or malformed
+packets, wrong ECU/frame routing, and repeated or reversed cycle ids before advancing the task.
+`serve_once` does not create socket paths or schedule cycles. The vehicle coordinator is not wired
+to these workers yet and remains the intended owner of GPIO, I2C, sensor input, and physical
+actuator output. CRC32 detects accidental packet corruption but does not authenticate a peer, so a
+future coordinator must restrict access to the worker socket through its filesystem permissions.
+
 ## Linux vehicle host
 
 The `sdv-picarx` executable composes the I2C, GPIO, input, PiCar-X, and virtual ECU runtime ports.
