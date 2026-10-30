@@ -26,3 +26,7 @@ path = "src/bin/sdv-picarx-health.rs"
 [[bin]]
 name = "sdv-picarx-discover"
 path = "src/bin/sdv-picarx-discover.rs"
+
+[[bin]]
+name = "sdv-picarx-ecu-worker"
+path = "src/bin/sdv-picarx-ecu-worker.rs"
