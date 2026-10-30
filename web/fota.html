@@ -16,7 +16,7 @@ header,main{max-width:900px;margin:auto;padding:18px}header{display:flex;justify
 <main>
   <section class="card">
     <span class="pill">開発プレビュー</span>
-    <p>署名済みアプリイメージをHTTPSまたはファイルから受け取り、署名と互換性を検証して非稼働スロットへ書き込みます。HTTPS配信はシステムCAでサーバー証明書を検証し、必要に応じて端末証明書による相互TLS認証も使えます。相互TLS時は証明書の転送を避けるためリダイレクトを許可せず、配信先はパッケージを直接返す必要があります。どちらの場合もパッケージ署名の検証は必須です。起動時には記録済みSHA-256と照合してから試験起動し、ヘルスチェックに合格すれば確定、失敗すれば元のスロットへ戻ります。</p>
+    <p>vehicle targetの署名済みアプリイメージをHTTPSまたはファイルから受け取り、署名と互換性を検証して非稼働スロットへ書き込みます。HTTPS配信はシステムCAでサーバー証明書を検証し、必要に応じて端末証明書による相互TLS認証も使えます。相互TLS時は証明書の転送を避けるためリダイレクトを許可せず、配信先はパッケージを直接返す必要があります。どちらの場合もパッケージ署名の検証は必須です。vehicleイメージは起動時に記録済みSHA-256と照合してから試験起動し、ヘルスチェックに合格すれば確定、失敗すれば元のスロットへ戻ります。個別ECU packageの現在の適用範囲は下記を参照してください。</p>
     <p class="sub">このページは実装済みのPi 5/Linuxホスト経路を説明します。ブラウザ上のシミュレータ自体はFOTA更新しません。</p>
   </section>
   <section class="card">
@@ -88,6 +88,23 @@ sudo systemctl restart sdv-fota-launcher.service</code></pre>
     <p class="note">停車ゲートは外部の状態推定値に依存するソフトウェア判定で、物理的な停止を独立検証しません。信頼できるセンサー推定を使い、trial中は車両を機械的に固定してください。</p>
     <p>launcherの自動復旧が動かない状態でtrialが残った場合は、管理者が <code>sudo sdv-fota rollback-trial --state-root /var/lib/sdv-fota</code> を実行できます。現在のactive slotは維持され、次回launcher起動時に使われます。このコマンドは稼働中プロセスを停止しないため、実車を止めてから実行し、その後launcherを再起動してください。</p>
     <p>試験起動中は外部の入力・車両状態推定プロセスが <code>/run/sdv-picarx/input.sock</code> へ継続送信する必要があります。各センサ取得時に <code>time.monotonic_ns()</code> の時刻と増加するsequenceを付けます。古い状態、過剰な入力、停車許容値を超える推定速度やスロットル要求は安全停止またはtrial失敗になります。</p>
+    <h3>仮想ECUごとのパッケージstage</h3>
+    <p>Engine、Brake、Steeringは <code>--target</code> で選び、それぞれ独立したA/B slot、active version、security counter、trial metadataを持てます。車両全体の既存状態はbase path直下、個別ECUは固定された <code>ecus/engine</code>、<code>ecus/brake</code>、<code>ecus/steering</code> の下に保存します。各ECUの既存active imageを先に用意して、個別に <code>init</code> してください。</p>
+<pre><code>sudo install -d -o root -g root -m 0755 /var/lib/sdv-fota/ecus/engine/slots/a \
+  /var/lib/sdv-fota/ecus/engine/slots/b
+sudo install -o root -g root -m 0755 engine-current.bin \
+  /var/lib/sdv-fota/ecus/engine/slots/a/sdv-image.bin
+sudo sdv-fota init --state-root /var/lib/sdv-fota --target engine \
+  --active-slot a --active-version 1.0.0 --security-version 1
+
+sdv-fota-sign --seed /secure/release.seed --key-id release-2026 --target engine \
+  --version 1.1.0 --security-version 2 --trial-ms 5000 --config-schema 1 \
+  --signal-if-version 1 --image engine-update.bin --output engine-update.sdvf
+sudo sdv-fota install --state-root /var/lib/sdv-fota --package engine-update.sdvf \
+  --target engine --config-schema 1 --signal-if-version 1
+sudo sdv-fota status --state-root /var/lib/sdv-fota --target engine
+sudo sdv-fota verify-images --state-root /var/lib/sdv-fota --target engine</code></pre>
+    <p>署名manifestのtargetとCLIのtargetが一致しなければinstallは拒否されます。省略したtargetは既存互換の <code>vehicle</code> を選びます。この操作でできるのは署名検証、個別inactive slotへのstage、trial metadataの記録までです。現在のPi launcherはvehicleイメージ全体だけを起動し、ECU workerのtrial起動・health収集・自動commit/rollbackにはまだ接続されていません。ECU packageをstageしてもlauncherの再起動でそのworkerが更新されるわけではありません。</p>
 <pre><code>sudo install -m 0644 deploy/systemd/sdv-fota-launcher.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now sdv-fota-launcher.service</code></pre>
@@ -95,7 +112,7 @@ sudo systemctl enable --now sdv-fota-launcher.service</code></pre>
   <section class="card">
     <h2>適用範囲</h2>
     <ul>
-      <li>A/B対象は <code>/var/lib/sdv-fota</code> 内の車両アプリイメージです。Pi Linux installerは <code>vehicle</code> targetを受け付け、VCU、Engine、Brake、Steeringの仮想ECUタスクを一つのイメージとして更新します。仮想ECUごとの独立イメージ更新は未対応です。</li>
+      <li>車両全体は既存互換の <code>vehicle</code> A/B imageを使います。Linux CLIは <code>engine</code>、<code>brake</code>、<code>steering</code> の個別signed packageを独立stageし、target別trial metadataを記録できます。個別ECU trialのworker起動・health・自動commit/rollbackはまだlauncherに接続されていません。</li>
       <li>Pi OS、EEPROM、boot partition、raw deviceは書き換えません。</li>
       <li>Linux上の自動テストはありますが、Pi 5実機でのGPIO/I²C、入力・状態推定プロセス、校正、電源断・再起動・復旧試験はまだ必要です。</li>
       <li>AUTOSAR Classic実機には、採用BSW/MCAL、DCM、NvM、Flash、Bootloaderへの個別接続が必要です。</li>

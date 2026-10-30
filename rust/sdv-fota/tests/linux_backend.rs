@@ -154,6 +154,81 @@ fn write_trust_store_with_seed(root: &TempRoot, key_id: &str, seed: &[u8; 32]) -
     path
 }
 
+fn test_ecu_state_root(base: &Path, target: &str) -> PathBuf {
+    match target {
+        "vehicle" => base.to_path_buf(),
+        "engine" => base.join("ecus").join("engine"),
+        "brake" => base.join("ecus").join("brake"),
+        "steering" => base.join("ecus").join("steering"),
+        _ => panic!("unexpected test ECU target"),
+    }
+}
+
+fn signed_test_package(
+    target: &str,
+    version: &str,
+    security_version: u64,
+    payload: &[u8],
+) -> Vec<u8> {
+    let (target_ecu, swc) = match target {
+        "engine" => ("engine", "EngineSWC"),
+        "brake" => ("brake", "BrakeSWC"),
+        "steering" => ("steering", "SteeringSWC"),
+        "vehicle" => ("vehicle", "VehicleControlApp"),
+        _ => panic!("unexpected test ECU target"),
+    };
+    let manifest = serde_json::json!({
+        "manifest_schema": 1,
+        "image": {
+            "target_ecu": target_ecu,
+            "swc": swc,
+            "version": version,
+            "security_version": security_version,
+            "size_bytes": payload.len(),
+            "sha256": hex(&sha256(payload))
+        },
+        "requires": {"signal_if_version": 1, "config_schema": [1]},
+        "policy": {"allow_downgrade": false, "trial_ms": 5000}
+    });
+    let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+    let signature = ed25519_sign(&SIGNING_SEED, &manifest_bytes);
+    encode_package(KEY_ID, &signature, &manifest_bytes, payload).unwrap()
+}
+
+fn initialize_ecu_from_cli(
+    base_root: &Path,
+    target: &str,
+    active_version: &str,
+    security_version: u64,
+) {
+    let target_root = test_ecu_state_root(base_root, target);
+    let active_image = FileSlotStorage::new(&target_root).image_path(Slot::A);
+    fs::create_dir_all(active_image.parent().unwrap()).unwrap();
+    write_executable(&active_image, "#!/bin/sh\nexit 0\n");
+
+    let initialized = Command::new(env!("CARGO_BIN_EXE_sdv-fota"))
+        .args([
+            "init",
+            "--state-root",
+            base_root.to_str().unwrap(),
+            "--target",
+            target,
+            "--active-slot",
+            "a",
+            "--active-version",
+            active_version,
+            "--security-version",
+        ])
+        .arg(security_version.to_string())
+        .output()
+        .unwrap();
+    assert!(
+        initialized.status.success(),
+        "{}",
+        String::from_utf8_lossy(&initialized.stderr)
+    );
+}
+
 fn fixed_version(version: &str) -> VersionString {
     VersionString::try_from_str(version).unwrap()
 }
@@ -898,32 +973,181 @@ fn launcher_does_not_execute_active_image_after_digest_mismatch() {
 }
 
 #[test]
-fn linux_vehicle_installer_rejects_per_ecu_target() {
+fn linux_cli_keeps_per_ecu_slots_versions_and_trials_independent() {
     let root = TempRoot::new();
-    let boot = FileBootControl::new(&root.0);
-    boot.initialize(Slot::A, "1.0.0", 1).unwrap();
+    initialize_ecu_from_cli(&root.0, "engine", "1.0.0", 10);
+    initialize_ecu_from_cli(&root.0, "brake", "2.0.0", 20);
+    initialize_ecu_from_cli(&root.0, "steering", "3.0.0", 30);
+    initialize_ecu_from_cli(&root.0, "vehicle", "4.0.0", 40);
+    let trust_store = write_trust_store(&root);
 
-    let result = Command::new(env!("CARGO_BIN_EXE_sdv-fota"))
+    let engine_payload = b"#!/bin/sh\n# engine image\n";
+    let engine_package_path = root.0.join("engine.sdvf");
+    fs::write(
+        &engine_package_path,
+        signed_test_package("engine", "1.1.0", 11, engine_payload),
+    )
+    .unwrap();
+    let brake_payload = b"#!/bin/sh\n# brake image\n";
+    let brake_package_path = root.0.join("brake.sdvf");
+    fs::write(
+        &brake_package_path,
+        signed_test_package("brake", "2.1.0", 21, brake_payload),
+    )
+    .unwrap();
+    let wrong_target_package_path = root.0.join("wrong-target.sdvf");
+    fs::write(
+        &wrong_target_package_path,
+        signed_test_package("engine", "3.1.0", 31, b"#!/bin/sh\n# wrong target\n"),
+    )
+    .unwrap();
+
+    for (target, package_path) in [
+        ("engine", &engine_package_path),
+        ("brake", &brake_package_path),
+    ] {
+        let installed = Command::new(env!("CARGO_BIN_EXE_sdv-fota"))
+            .args([
+                "install",
+                "--state-root",
+                root.0.to_str().unwrap(),
+                "--package",
+                package_path.to_str().unwrap(),
+                "--target",
+                target,
+                "--config-schema",
+                "1",
+                "--signal-if-version",
+                "1",
+            ])
+            .env("SDV_FOTA_TEST_TRUST_STORE", &trust_store)
+            .output()
+            .unwrap();
+        assert!(
+            installed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&installed.stderr)
+        );
+    }
+
+    let engine_root = test_ecu_state_root(&root.0, "engine");
+    let brake_root = test_ecu_state_root(&root.0, "brake");
+    let steering_root = test_ecu_state_root(&root.0, "steering");
+    let engine_state = FileBootControl::new(&engine_root).state().unwrap();
+    let brake_state = FileBootControl::new(&brake_root).state().unwrap();
+    let vehicle_state = FileBootControl::new(&root.0).state().unwrap();
+    assert_eq!(engine_state.active_version, "1.0.0");
+    assert_eq!(engine_state.highest_security_version, 10);
+    assert_eq!(engine_state.trial.unwrap().version, "1.1.0");
+    assert_eq!(engine_state.trial.unwrap().security_version, 11);
+    assert_eq!(brake_state.active_version, "2.0.0");
+    assert_eq!(brake_state.highest_security_version, 20);
+    assert_eq!(brake_state.trial.unwrap().version, "2.1.0");
+    assert_eq!(brake_state.trial.unwrap().security_version, 21);
+    assert_eq!(vehicle_state.active_version, "4.0.0");
+    assert_eq!(vehicle_state.highest_security_version, 40);
+    assert!(vehicle_state.trial.is_none());
+    assert_eq!(
+        fs::read(FileSlotStorage::new(&engine_root).image_path(Slot::B)).unwrap(),
+        engine_payload
+    );
+    assert_eq!(
+        fs::read(FileSlotStorage::new(&brake_root).image_path(Slot::B)).unwrap(),
+        brake_payload
+    );
+
+    let mismatch = Command::new(env!("CARGO_BIN_EXE_sdv-fota"))
         .args([
             "install",
             "--state-root",
             root.0.to_str().unwrap(),
             "--package",
-            "missing.sdvf",
+            wrong_target_package_path.to_str().unwrap(),
             "--target",
-            "engine",
+            "steering",
             "--config-schema",
             "1",
             "--signal-if-version",
             "1",
         ])
+        .env("SDV_FOTA_TEST_TRUST_STORE", &trust_store)
         .output()
         .unwrap();
+    assert!(!mismatch.status.success());
+    assert!(String::from_utf8_lossy(&mismatch.stderr).contains("WrongTarget"));
+    assert!(FileBootControl::new(&steering_root)
+        .state()
+        .unwrap()
+        .trial
+        .is_none());
+    assert!(!FileSlotStorage::new(&steering_root)
+        .image_path(Slot::B)
+        .exists());
 
-    assert!(!result.status.success());
-    assert!(String::from_utf8_lossy(&result.stderr).contains("per-ECU slots are not configured"));
-    assert!(boot.state().unwrap().trial.is_none());
-    assert!(!FileSlotStorage::new(&root.0).image_path(Slot::B).exists());
+    let integrity = Command::new(env!("CARGO_BIN_EXE_sdv-fota"))
+        .args([
+            "record-active-integrity",
+            "--state-root",
+            root.0.to_str().unwrap(),
+            "--target",
+            "steering",
+            "--slot",
+            "a",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        integrity.status.success(),
+        "{}",
+        String::from_utf8_lossy(&integrity.stderr)
+    );
+
+    let rollback = Command::new(env!("CARGO_BIN_EXE_sdv-fota"))
+        .args([
+            "rollback-trial",
+            "--state-root",
+            root.0.to_str().unwrap(),
+            "--target",
+            "engine",
+        ])
+        .output()
+        .unwrap();
+    assert!(rollback.status.success());
+    assert!(FileBootControl::new(&engine_root)
+        .state()
+        .unwrap()
+        .trial
+        .is_none());
+    assert!(FileBootControl::new(&brake_root)
+        .state()
+        .unwrap()
+        .trial
+        .is_some());
+
+    for target in ["engine", "brake"] {
+        let verified = Command::new(env!("CARGO_BIN_EXE_sdv-fota"))
+            .args([
+                "verify-images",
+                "--state-root",
+                root.0.to_str().unwrap(),
+                "--target",
+                target,
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            verified.status.success(),
+            "{}",
+            String::from_utf8_lossy(&verified.stderr)
+        );
+    }
+
+    let vehicle_status = Command::new(env!("CARGO_BIN_EXE_sdv-fota"))
+        .args(["status", "--state-root", root.0.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(vehicle_status.status.success());
+    assert!(String::from_utf8_lossy(&vehicle_status.stdout).contains("active_version: 4.0.0"));
 }
 
 #[test]

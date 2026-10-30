@@ -32,8 +32,8 @@ fn run(args: Vec<OsString>) -> Result<(), String> {
 }
 
 fn status(args: &[OsString]) -> Result<(), String> {
-    let mut options = parse_named_options(args, &["--state-root"])?;
-    let state_root = PathBuf::from(required_option(&mut options, "--state-root")?);
+    let mut options = parse_named_options(args, &["--state-root", "--target"])?;
+    let state_root = selected_state_root(&mut options)?;
     let state = FileBootControl::new(&state_root)
         .state()
         .map_err(|error| format!("cannot read boot metadata: {error:?}"))?;
@@ -73,8 +73,8 @@ fn status(args: &[OsString]) -> Result<(), String> {
 }
 
 fn verify_images(args: &[OsString]) -> Result<(), String> {
-    let mut options = parse_named_options(args, &["--state-root"])?;
-    let state_root = PathBuf::from(required_option(&mut options, "--state-root")?);
+    let mut options = parse_named_options(args, &["--state-root", "--target"])?;
+    let state_root = selected_state_root(&mut options)?;
     let state = FileBootControl::new(&state_root)
         .state()
         .map_err(|error| format!("cannot read boot metadata: {error:?}"))?;
@@ -109,8 +109,8 @@ fn image_integrity_status(storage: &FileSlotStorage, slot: Slot) -> &'static str
 }
 
 fn record_active_integrity(args: &[OsString]) -> Result<(), String> {
-    let mut options = parse_named_options(args, &["--state-root", "--slot"])?;
-    let root = PathBuf::from(required_option(&mut options, "--state-root")?);
+    let mut options = parse_named_options(args, &["--state-root", "--target", "--slot"])?;
+    let root = selected_state_root(&mut options)?;
     let slot = parse_slot(&required_option(&mut options, "--slot")?)?;
     let storage = FileSlotStorage::new(&root);
     FileBootControl::new(root)
@@ -132,8 +132,8 @@ fn record_active_integrity(args: &[OsString]) -> Result<(), String> {
 }
 
 fn rollback_trial(args: &[OsString]) -> Result<(), String> {
-    let mut options = parse_named_options(args, &["--state-root"])?;
-    let root = PathBuf::from(required_option(&mut options, "--state-root")?);
+    let mut options = parse_named_options(args, &["--state-root", "--target"])?;
+    let root = selected_state_root(&mut options)?;
     FileBootControl::new(root)
         .rollback_trial()
         .map_err(|error| match error {
@@ -151,12 +151,13 @@ fn initialize(args: &[OsString]) -> Result<(), String> {
         args,
         &[
             "--state-root",
+            "--target",
             "--active-slot",
             "--active-version",
             "--security-version",
         ],
     )?;
-    let root = PathBuf::from(required_option(&mut options, "--state-root")?);
+    let root = selected_state_root(&mut options)?;
     let active_slot = required_option(&mut options, "--active-slot")?;
     let slot = parse_slot(&active_slot)?;
     let active_version = required_option(&mut options, "--active-version")?;
@@ -165,7 +166,7 @@ fn initialize(args: &[OsString]) -> Result<(), String> {
     let storage = FileSlotStorage::new(&root);
     storage
         .validate_executable_image(slot)
-        .map_err(|error| format!("initial vehicle image is not bootable: {error:?}"))?;
+        .map_err(|error| format!("initial target image is not bootable: {error:?}"))?;
     FileBootControl::new(root)
         .initialize_with_image(&storage, slot, active_version, security_version)
         .map_err(|error| format!("boot metadata initialization failed: {error:?}"))
@@ -214,10 +215,11 @@ fn install_from_options(
         ][..],
     };
     let mut options = parse_named_options(args, accepted_options)?;
-    let state_root = PathBuf::from(required_option(&mut options, "--state-root")?);
+    let base_root = PathBuf::from(required_option(&mut options, "--state-root")?);
     let source_value = required_option(&mut options, source_option)?;
     let target_ecu = required_option(&mut options, "--target")?;
-    let target_ecu = parse_vehicle_target(&target_ecu)?;
+    let target_ecu = parse_target(&target_ecu)?;
+    let state_root = target_state_root(base_root, target_ecu);
     let config_schema = required_u32(&mut options, "--config-schema", "config schema")?;
     let signal_if_version = required_u32(
         &mut options,
@@ -372,13 +374,31 @@ fn optional_u32(
         .transpose()
 }
 
-fn parse_vehicle_target(value: &OsStr) -> Result<Ecu, String> {
+fn parse_target(value: &OsStr) -> Result<Ecu, String> {
     match required_str(value, "target ECU")? {
         "vehicle" => Ok(Ecu::Vehicle),
-        "engine" | "brake" | "steering" => Err(
-            "Pi Linux A/B installer accepts only the complete `vehicle` image; per-ECU slots are not configured".into(),
-        ),
-        _ => Err("target must be vehicle".into()),
+        "engine" => Ok(Ecu::Engine),
+        "brake" => Ok(Ecu::Brake),
+        "steering" => Ok(Ecu::Steering),
+        _ => Err("target must be vehicle, engine, brake, or steering".into()),
+    }
+}
+
+fn selected_state_root(options: &mut BTreeMap<String, OsString>) -> Result<PathBuf, String> {
+    let base_root = PathBuf::from(required_option(options, "--state-root")?);
+    let target = optional_option(options, "--target")
+        .map(|value| parse_target(&value))
+        .transpose()?
+        .unwrap_or(Ecu::Vehicle);
+    Ok(target_state_root(base_root, target))
+}
+
+fn target_state_root(base_root: PathBuf, target: Ecu) -> PathBuf {
+    match target {
+        Ecu::Vehicle => base_root,
+        Ecu::Engine => base_root.join("ecus").join("engine"),
+        Ecu::Brake => base_root.join("ecus").join("brake"),
+        Ecu::Steering => base_root.join("ecus").join("steering"),
     }
 }
 
@@ -427,14 +447,42 @@ fn trial_outcome_name(outcome: sdv_fota::TrialOutcome) -> &'static str {
 }
 
 fn usage() -> String {
-    "usage:\n  sdv-fota init --state-root <dir> --active-slot <a|b> --active-version <version> --security-version <n>\n  sdv-fota record-active-integrity --state-root <dir> --slot <a|b>\n  sdv-fota rollback-trial --state-root <dir>\n  sdv-fota install --state-root <dir> --package <file> --target vehicle --config-schema <n> --signal-if-version <n> [--trial-boots <n>]\n  sdv-fota install-url --state-root <dir> --url <https-url> --target vehicle --config-schema <n> --signal-if-version <n> [--trial-boots <n>] [--client-cert <file> --client-key <file>]\n  sdv-fota status --state-root <dir>\n  sdv-fota verify-images --state-root <dir>".into()
+    "usage:\n  sdv-fota init --state-root <dir> [--target <vehicle|engine|brake|steering>] --active-slot <a|b> --active-version <version> --security-version <n>\n  sdv-fota record-active-integrity --state-root <dir> [--target <vehicle|engine|brake|steering>] --slot <a|b>\n  sdv-fota rollback-trial --state-root <dir> [--target <vehicle|engine|brake|steering>]\n  sdv-fota install --state-root <dir> --package <file> --target <vehicle|engine|brake|steering> --config-schema <n> --signal-if-version <n> [--trial-boots <n>]\n  sdv-fota install-url --state-root <dir> --url <https-url> --target <vehicle|engine|brake|steering> --config-schema <n> --signal-if-version <n> [--trial-boots <n>] [--client-cert <file> --client-key <file>]\n  sdv-fota status --state-root <dir> [--target <vehicle|engine|brake|steering>]\n  sdv-fota verify-images --state-root <dir> [--target <vehicle|engine|brake|steering>]".into()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_named_options;
+    use super::{parse_named_options, parse_target, target_state_root};
+    use sdv_fota::Ecu;
     use std::collections::BTreeMap;
     use std::ffi::OsString;
+    use std::path::PathBuf;
+
+    #[test]
+    fn target_state_roots_use_fixed_ecu_subdirectories() {
+        let base = PathBuf::from("/var/lib/sdv-fota");
+
+        assert_eq!(
+            target_state_root(base.clone(), Ecu::Vehicle),
+            PathBuf::from("/var/lib/sdv-fota")
+        );
+        assert_eq!(
+            target_state_root(base.clone(), Ecu::Engine),
+            PathBuf::from("/var/lib/sdv-fota/ecus/engine")
+        );
+        assert_eq!(
+            target_state_root(base.clone(), Ecu::Brake),
+            PathBuf::from("/var/lib/sdv-fota/ecus/brake")
+        );
+        assert_eq!(
+            target_state_root(base, Ecu::Steering),
+            PathBuf::from("/var/lib/sdv-fota/ecus/steering")
+        );
+        assert_eq!(
+            parse_target(&OsString::from("engine")).unwrap(),
+            Ecu::Engine
+        );
+    }
 
     #[test]
     fn named_options_are_order_independent_and_preserve_path_values() {
