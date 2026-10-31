@@ -835,9 +835,13 @@ fn changed_candidate_socket_inode_is_rejected_before_route_switch() {
     let replacement = CandidateResponder::start(&candidate_path, false);
     let hold = confirmed_output_hold();
 
-    assert_eq!(
-        coordinator.begin_candidate_quiesce(VirtualEcuId::Engine, &hold),
-        Err(PromotionError::CandidateSocketChanged)
+    let promotion = coordinator.begin_candidate_quiesce(VirtualEcuId::Engine, &hold);
+    assert!(
+        matches!(
+            promotion,
+            Err(PromotionError::CandidateSocketChanged | PromotionError::CandidateNotReady)
+        ),
+        "replaced candidate socket must never satisfy the Ready gate: {promotion:?}"
     );
     assert_eq!(
         coordinator.route_for_ecu(VirtualEcuId::Engine),
@@ -1145,7 +1149,7 @@ fn duplicate_candidate_response_does_not_consume_active_replies() {
         steering_input.as_slice(),
     ];
 
-    for _ in 0..2 {
+    for cycle_index in 0..2 {
         let cycle_id = coordinator.next_cycle_id().unwrap();
         let outputs = coordinator
             .exchange_cycle(
@@ -1157,6 +1161,12 @@ fn duplicate_candidate_response_does_not_consume_active_replies() {
         assert!(outputs
             .iter()
             .all(|output| matches!(output.alive, sdv_core::bus::Frame::Alive { .. })));
+        if cycle_index == 0 {
+            // Give the background shadow coordinator time to consume the first bounded snapshot;
+            // otherwise queue saturation can correctly reset stability before it observes the
+            // duplicate pair under test.
+            thread::sleep(Duration::from_millis(10));
+        }
     }
     duplicate_candidate.join().unwrap();
     assert_eq!(

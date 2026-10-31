@@ -580,7 +580,7 @@ struct CandidateShadowWorker {
     stability: [CandidateStability; 3],
     shared_statuses: Arc<Mutex<[CandidateStatus; 3]>>,
     shared_last_response_cycle: Arc<Mutex<[Option<u64>; 3]>>,
-    shared_worker_identities: Arc<Mutex<[Option<SocketIdentity>; 3]>>,
+    shared_ready_socket_identities: Arc<Mutex<[Option<SocketIdentity>; 3]>>,
     queue_drop_generation: Arc<AtomicUsize>,
     applied_queue_drop_generation: Arc<AtomicUsize>,
     pending_cycle: [Option<u64>; 3],
@@ -607,7 +607,7 @@ pub struct EcuProcessCoordinator {
     routes: [EcuRoute; 3],
     candidate_socket_directory: Option<PathBuf>,
     candidate_socket_directory_identity: Option<SocketIdentity>,
-    candidate_worker_identities: Arc<Mutex<[Option<SocketIdentity>; 3]>>,
+    candidate_ready_socket_identities: Arc<Mutex<[Option<SocketIdentity>; 3]>>,
     quiescing_candidate: Option<(usize, SocketIdentity)>,
     candidate_sender: Option<SyncSender<CandidateCycleSnapshot>>,
     candidate_dropped_cycles: Option<Arc<AtomicUsize>>,
@@ -737,7 +737,7 @@ impl EcuProcessCoordinator {
                         owner,
                         Arc::clone(&coordinator.candidate_statuses),
                         Arc::clone(&coordinator.candidate_last_response_cycles),
-                        Arc::clone(&coordinator.candidate_worker_identities),
+                        Arc::clone(&coordinator.candidate_ready_socket_identities),
                         Arc::clone(&coordinator.candidate_queue_drop_generation),
                         Arc::clone(&coordinator.candidate_applied_queue_drop_generation),
                     )
@@ -805,7 +805,7 @@ impl EcuProcessCoordinator {
             routes: [EcuRoute::Active; 3],
             candidate_socket_directory: None,
             candidate_socket_directory_identity: None,
-            candidate_worker_identities: Arc::new(Mutex::new([None; 3])),
+            candidate_ready_socket_identities: Arc::new(Mutex::new([None; 3])),
             quiescing_candidate: None,
             candidate_sender: None,
             candidate_dropped_cycles: None,
@@ -895,7 +895,7 @@ impl EcuProcessCoordinator {
             .ok_or(PromotionError::CandidateEndpointUnavailable)?
             .to_owned();
         let identity = self
-            .candidate_worker_identities
+            .candidate_ready_socket_identities
             .lock()
             .map_err(|_| PromotionError::CandidateEndpointUnavailable)?[index]
             .ok_or(PromotionError::CandidateEndpointUnavailable)?;
@@ -1322,7 +1322,7 @@ fn start_candidate_shadow_worker(
     owner: u32,
     shared_statuses: Arc<Mutex<[CandidateStatus; 3]>>,
     shared_last_response_cycle: Arc<Mutex<[Option<u64>; 3]>>,
-    shared_worker_identities: Arc<Mutex<[Option<SocketIdentity>; 3]>>,
+    shared_ready_socket_identities: Arc<Mutex<[Option<SocketIdentity>; 3]>>,
     queue_drop_generation: Arc<AtomicUsize>,
     applied_queue_drop_generation: Arc<AtomicUsize>,
 ) -> Result<
@@ -1373,7 +1373,7 @@ fn start_candidate_shadow_worker(
         stability: std::array::from_fn(|_| CandidateStability::default()),
         shared_statuses: Arc::clone(&shared_statuses),
         shared_last_response_cycle: Arc::clone(&shared_last_response_cycle),
-        shared_worker_identities: Arc::clone(&shared_worker_identities),
+        shared_ready_socket_identities: Arc::clone(&shared_ready_socket_identities),
         processed_queue_drop_generation: queue_drop_generation.load(Ordering::Acquire),
         queue_drop_generation,
         applied_queue_drop_generation,
@@ -1454,6 +1454,15 @@ impl CandidateShadowWorker {
             self.processed_queue_drop_generation = final_queue_drop_generation;
         }
         self.log_candidate_status_changes(previous_statuses);
+        // Promotion must bind to the exact socket that produced Ready evidence. Publishing the
+        // observed inode while still WarmingUp could pair a stale Ready snapshot with a newly
+        // replaced socket during the background thread's next status update.
+        for index in 0..self.statuses.len() {
+            let ready_identity = (self.statuses[index] == CandidateStatus::Ready)
+                .then_some(self.workers[index].socket_identity)
+                .flatten();
+            self.publish_ready_socket_identity(index, ready_identity);
+        }
         if let Ok(mut statuses) = self.shared_statuses.lock() {
             *statuses = self.statuses;
             // Publish the status snapshot and its applied queue-drop generation together. Readers
@@ -1498,7 +1507,6 @@ impl CandidateShadowWorker {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
                     self.reset_candidate_window(index);
                     self.workers[index].socket_identity = None;
-                    self.publish_worker_identity(index, None);
                     self.statuses[index] = CandidateStatus::Unavailable;
                     continue;
                 }
@@ -1512,7 +1520,6 @@ impl CandidateShadowWorker {
                 || metadata.permissions().mode() & 0o777 != SOCKET_MODE
             {
                 self.workers[index].socket_identity = None;
-                self.publish_worker_identity(index, None);
                 self.fail_candidate(index, CandidateFailure::UnsafeSocket);
                 continue;
             }
@@ -1539,7 +1546,6 @@ impl CandidateShadowWorker {
                 self.reset_candidate_window(index);
             }
             self.workers[index].socket_identity = Some(current_identity);
-            self.publish_worker_identity(index, Some(current_identity));
             match self.socket.send_to(
                 &snapshot.request_buffers[index][..snapshot.request_lengths[index]],
                 &self.workers[index].socket_path,
@@ -1782,8 +1788,8 @@ impl CandidateShadowWorker {
             .is_ok()
     }
 
-    fn publish_worker_identity(&self, index: usize, identity: Option<SocketIdentity>) {
-        if let Ok(mut identities) = self.shared_worker_identities.lock() {
+    fn publish_ready_socket_identity(&self, index: usize, identity: Option<SocketIdentity>) {
+        if let Ok(mut identities) = self.shared_ready_socket_identities.lock() {
             identities[index] = identity;
         }
     }
@@ -2190,7 +2196,7 @@ mod candidate_stability_tests {
             ],
             shared_statuses: Arc::clone(&shared_statuses),
             shared_last_response_cycle: Arc::clone(&shared_last_response_cycle),
-            shared_worker_identities: Arc::new(Mutex::new([None; 3])),
+            shared_ready_socket_identities: Arc::new(Mutex::new([None; 3])),
             queue_drop_generation,
             applied_queue_drop_generation,
             pending_cycle: [Some(800), None, None],
