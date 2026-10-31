@@ -12,6 +12,7 @@ EnvironmentFile=/etc/default/sdv-fota-launcher
 RuntimeDirectory=sdv-picarx
 RuntimeDirectoryMode=0750
 ExecStartPre=/usr/bin/chown sdv-app:sdv-app /run/sdv-picarx
+ExecStartPre=/usr/bin/install -d -o sdv-app -g sdv-app -m 0700 /run/sdv-picarx/workers
 ExecStart=/usr/bin/sdv-fota-launcher /var/lib/sdv-fota /usr/bin/sdv-picarx-health --socket /run/sdv-picarx/health.sock
 Restart=always
 RestartSec=2

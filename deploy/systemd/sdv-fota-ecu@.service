@@ -1,0 +1,24 @@
+[Unit]
+Description=SDV active virtual ECU worker (%i)
+Requires=sdv-fota-launcher.service
+After=sdv-fota-launcher.service
+PartOf=sdv-fota-launcher.service sdv-fota-workers.target
+RequiresMountsFor=/var/lib/sdv-fota
+
+[Service]
+Type=simple
+User=root
+Group=root
+SupplementaryGroups=
+EnvironmentFile=/etc/default/sdv-fota-launcher
+ExecStart=/usr/bin/sdv-fota-launcher --state-root /var/lib/sdv-fota --target %i --app-arg --ecu --app-arg %i --app-arg --worker-socket --app-arg /run/sdv-picarx/workers/%i.sock --app-arg --coordinator-socket --app-arg /run/sdv-picarx/workers/coordinator.sock
+Restart=always
+RestartSec=1
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/sdv-fota /run/sdv-picarx
+
+[Install]
+WantedBy=sdv-fota-workers.target

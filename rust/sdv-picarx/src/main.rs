@@ -46,8 +46,19 @@ struct HostConfig {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct VirtualEcuWorkerConfig {
-    binary: PathBuf,
+    #[serde(default)]
+    mode: VirtualEcuWorkerMode,
+    #[serde(default)]
+    binary: Option<PathBuf>,
     socket_directory: PathBuf,
+}
+
+#[derive(Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum VirtualEcuWorkerMode {
+    #[default]
+    Spawn,
+    External,
 }
 
 impl VirtualEcuWorkerConfig {
@@ -58,9 +69,16 @@ impl VirtualEcuWorkerConfig {
                     .components()
                     .any(|component| matches!(component, std::path::Component::ParentDir))
         };
-        safe_path(&self.binary)
+        let mode_matches_binary = match self.mode {
+            VirtualEcuWorkerMode::Spawn => self.binary.as_ref().is_some_and(safe_path),
+            VirtualEcuWorkerMode::External => self.binary.is_none(),
+        };
+        mode_matches_binary
             && safe_path(&self.socket_directory)
-            && !self.binary.starts_with(&self.socket_directory)
+            && self
+                .binary
+                .as_ref()
+                .map_or(true, |binary| !binary.starts_with(&self.socket_directory))
     }
 }
 
@@ -375,15 +393,23 @@ fn run() -> Result<(), String> {
     };
     let result = match config.virtual_ecu_workers {
         Some(worker_config) => {
-            let coordinator = match EcuProcessCoordinator::spawn(
-                worker_config.binary,
-                worker_config.socket_directory,
-            ) {
+            let coordinator_result = match worker_config.mode {
+                VirtualEcuWorkerMode::External => {
+                    EcuProcessCoordinator::connect_external(worker_config.socket_directory)
+                }
+                VirtualEcuWorkerMode::Spawn => EcuProcessCoordinator::spawn(
+                    worker_config
+                        .binary
+                        .expect("spawn binary validated before runtime"),
+                    worker_config.socket_directory,
+                ),
+            };
+            let coordinator = match coordinator_result {
                 Ok(coordinator) => coordinator,
                 Err(error) => {
                     let stop_error = reporting_platform.stop().err();
                     return Err(format!(
-                        "cannot start virtual ECU workers: {error}; motor stop result: {stop_error:?}"
+                        "cannot connect virtual ECU workers: {error}; motor stop result: {stop_error:?}"
                     ));
                 }
             };
@@ -460,12 +486,51 @@ mod tests {
         ))
         .unwrap();
         assert!(worker_config.calibrations().is_ok());
-        assert!(worker_config.virtual_ecu_workers.is_some());
+        assert!(worker_config
+            .virtual_ecu_workers
+            .as_ref()
+            .is_some_and(|workers| {
+                workers.mode == VirtualEcuWorkerMode::Spawn && workers.binary.is_some()
+            }));
         let unsafe_worker_path =
             include_str!("../config/pi5.worker-processes.disabled.example.json")
                 .replace("/usr/bin/sdv-picarx-ecu-worker", "../sdv-picarx-ecu-worker");
         let unsafe_worker_config: HostConfig = serde_json::from_str(&unsafe_worker_path).unwrap();
         assert!(unsafe_worker_config.calibrations().is_err());
+
+        let external_config: HostConfig = serde_json::from_str(include_str!(
+            "../config/pi5.external-workers.disabled.example.json"
+        ))
+        .unwrap();
+        assert!(external_config.calibrations().is_ok());
+        assert!(external_config
+            .virtual_ecu_workers
+            .as_ref()
+            .is_some_and(|workers| {
+                workers.mode == VirtualEcuWorkerMode::External && workers.binary.is_none()
+            }));
+
+        let implicit_spawn_without_binary =
+            include_str!("../config/pi5.external-workers.disabled.example.json")
+                .replace("\"mode\": \"external\",", "");
+        let implicit_spawn_config: HostConfig =
+            serde_json::from_str(&implicit_spawn_without_binary).unwrap();
+        assert!(implicit_spawn_config.calibrations().is_err());
+
+        let legacy_spawn_config: HostConfig = serde_json::from_str(include_str!(
+            "../config/pi5.worker-processes.disabled.example.json"
+        ))
+        .unwrap();
+        assert!(legacy_spawn_config.calibrations().is_ok());
+
+        let invalid_external_with_binary =
+            include_str!("../config/pi5.worker-processes.disabled.example.json").replace(
+                "\"virtual_ecu_workers\": {",
+                r#""virtual_ecu_workers": { "mode": "external","#,
+            );
+        let invalid_external_config: HostConfig =
+            serde_json::from_str(&invalid_external_with_binary).unwrap();
+        assert!(invalid_external_config.calibrations().is_err());
     }
 
     #[test]

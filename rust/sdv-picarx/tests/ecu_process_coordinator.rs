@@ -2,7 +2,9 @@ use std::fs;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::os::unix::net::UnixDatagram;
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use sdv_core::model::VehicleState;
@@ -73,6 +75,73 @@ fn worker_binary() -> &'static Path {
 
 fn spawn_workers(root: &TempDirectory) -> EcuProcessCoordinator {
     EcuProcessCoordinator::spawn(worker_binary(), root.path().join("workers")).unwrap()
+}
+
+fn private_worker_directory(root: &TempDirectory) -> PathBuf {
+    let path = root.path().join("workers");
+    fs::create_dir(&path).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+    path
+}
+
+struct ExternalWorkerProcesses(Vec<Child>);
+
+impl ExternalWorkerProcesses {
+    fn start(socket_directory: &Path, coordinator_socket: &Path) -> Self {
+        let children = ["engine", "brake", "steering"]
+            .into_iter()
+            .map(|ecu| {
+                Command::new(worker_binary())
+                    .arg("--ecu")
+                    .arg(ecu)
+                    .arg("--worker-socket")
+                    .arg(socket_directory.join(format!("{ecu}.sock")))
+                    .arg("--coordinator-socket")
+                    .arg(coordinator_socket)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .unwrap()
+            })
+            .collect();
+        Self(children)
+    }
+
+    fn stop(&mut self) {
+        for child in &mut self.0 {
+            // SAFETY: child.id() is the process ID returned by Command::spawn.
+            unsafe {
+                libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
+            }
+        }
+        for child in &mut self.0 {
+            let _ = child.wait();
+        }
+    }
+}
+
+impl Drop for ExternalWorkerProcesses {
+    fn drop(&mut self) {
+        for child in &mut self.0 {
+            if child.try_wait().ok().flatten().is_none() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+}
+
+fn wait_for_path(path: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while !path.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        path.exists(),
+        "socket path did not appear: {}",
+        path.display()
+    );
 }
 
 #[test]
@@ -147,6 +216,150 @@ fn three_worker_processes_match_in_process_vehicle_runtime_for_multiple_cycles()
             .unwrap();
         assert_eq!(actual, expected, "vehicle output diverged at tick {tick}");
     }
+}
+
+#[test]
+fn external_worker_services_are_ready_and_match_in_process_runtime() {
+    let root = TempDirectory::new();
+    let socket_directory = private_worker_directory(&root);
+    let coordinator_path = socket_directory.join("coordinator.sock");
+    let coordinator_thread = {
+        let socket_directory = socket_directory.clone();
+        thread::spawn(move || EcuProcessCoordinator::connect_external(socket_directory))
+    };
+    wait_for_path(&coordinator_path);
+    let mut processes = ExternalWorkerProcesses::start(&socket_directory, &coordinator_path);
+    let mut coordinator = coordinator_thread.join().unwrap().unwrap();
+
+    let mut in_process = VehicleRuntime::default();
+    let mut worker_runtime = VehicleRuntime::default();
+    let mut previous_wire_id = None;
+    for tick in 0..80_u64 {
+        let input = DriverInput {
+            throttle: if tick % 40 < 20 { 0.3 } else { 0.0 },
+            brake: if tick % 40 < 20 { 0.0 } else { 0.12 },
+            steer: if tick % 32 < 16 { 0.08 } else { -0.08 },
+        };
+        let state = VehicleState {
+            t: tick as f32 * 0.01,
+            v: input.throttle - input.brake,
+            ..VehicleState::default()
+        };
+        in_process.set_estop_request(tick == 60);
+        worker_runtime.set_estop_request(tick == 60);
+        let expected = in_process.step_10ms(input, state, true);
+        let cycle_deadline = Instant::now() + Duration::from_millis(100);
+        let actual = worker_runtime
+            .step_10ms_with_external_ecus(input, state, true, |runtime_tick, inputs| {
+                assert_eq!(runtime_tick, tick);
+                let wire_cycle = coordinator.next_cycle_id()?;
+                if let Some(previous) = previous_wire_id {
+                    assert!(wire_cycle > previous);
+                }
+                previous_wire_id = Some(wire_cycle);
+                coordinator.exchange_cycle(wire_cycle, inputs, cycle_deadline)
+            })
+            .unwrap();
+        assert_eq!(actual, expected, "external output diverged at tick {tick}");
+    }
+
+    drop(coordinator);
+    assert!(!coordinator_path.exists());
+    for ecu in ["engine", "brake", "steering"] {
+        assert!(socket_directory.join(format!("{ecu}.sock")).exists());
+    }
+    assert!(processes
+        .0
+        .iter_mut()
+        .all(|child| child.try_wait().unwrap().is_none()));
+    processes.stop();
+    for ecu in ["engine", "brake", "steering"] {
+        assert!(!socket_directory.join(format!("{ecu}.sock")).exists());
+    }
+}
+
+#[test]
+fn external_coordinator_waits_for_workers_and_cleans_up_only_its_socket() {
+    let root = TempDirectory::new();
+    let socket_directory = private_worker_directory(&root);
+    let coordinator_path = socket_directory.join("coordinator.sock");
+    let coordinator_thread = {
+        let socket_directory = socket_directory.clone();
+        thread::spawn(move || EcuProcessCoordinator::connect_external(socket_directory))
+    };
+    wait_for_path(&coordinator_path);
+    let processes = ExternalWorkerProcesses::start(&socket_directory, &coordinator_path);
+    let coordinator = coordinator_thread.join().unwrap().unwrap();
+    drop(coordinator);
+
+    assert!(!coordinator_path.exists());
+    for ecu in ["engine", "brake", "steering"] {
+        assert!(socket_directory.join(format!("{ecu}.sock")).exists());
+    }
+    drop(processes);
+}
+
+#[test]
+fn external_worker_failure_stops_vehicle_and_preserves_other_worker_sockets() {
+    let root = TempDirectory::new();
+    let socket_directory = private_worker_directory(&root);
+    let coordinator_path = socket_directory.join("coordinator.sock");
+    let coordinator_thread = {
+        let socket_directory = socket_directory.clone();
+        thread::spawn(move || EcuProcessCoordinator::connect_external(socket_directory))
+    };
+    wait_for_path(&coordinator_path);
+    let processes = ExternalWorkerProcesses::start(&socket_directory, &coordinator_path);
+    let coordinator = coordinator_thread.join().unwrap().unwrap();
+    fs::remove_file(socket_directory.join("engine.sock")).unwrap();
+    let platform = RecordingPlatform::default();
+    let mut executor =
+        EcuProcessVehicleExecutor::new(VehicleRuntime::default(), platform, coordinator);
+
+    let result = runtime_host::run(&mut executor, &mut SystemClock::default(), || false);
+    assert!(matches!(
+        result,
+        Err(RunError::Cycle {
+            source: VehicleCycleError::Workers {
+                source: ExternalEcuCycleError::Dispatch(CoordinatorError::InvalidWorkerSocket(_)),
+                ..
+            },
+            ..
+        })
+    ));
+    assert!(executor.platform().applied.is_empty());
+    assert!(executor.platform().stops >= 1);
+    drop(executor);
+    assert!(!coordinator_path.exists());
+    assert!(socket_directory.join("brake.sock").exists());
+    assert!(socket_directory.join("steering.sock").exists());
+    drop(processes);
+}
+
+#[test]
+fn external_connect_timeout_cleans_only_the_coordinator_socket() {
+    let root = TempDirectory::new();
+    let socket_directory = private_worker_directory(&root);
+    let result = EcuProcessCoordinator::connect_external(&socket_directory);
+    assert!(matches!(
+        result,
+        Err(CoordinatorError::WorkerStartupTimeout(
+            sdv_core::runtime::VirtualEcuId::Engine
+        ))
+    ));
+    assert!(!socket_directory.join("coordinator.sock").exists());
+    assert!(!socket_directory.join("engine.sock").exists());
+}
+
+#[test]
+fn external_connect_requires_an_existing_private_socket_directory() {
+    let root = TempDirectory::new();
+    let socket_directory = root.path().join("workers");
+    assert!(matches!(
+        EcuProcessCoordinator::connect_external(&socket_directory),
+        Err(CoordinatorError::Io(_)) | Err(CoordinatorError::UnsafeSocketPath)
+    ));
+    assert!(!socket_directory.exists());
 }
 
 #[test]

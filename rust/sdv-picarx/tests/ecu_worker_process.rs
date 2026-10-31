@@ -160,6 +160,85 @@ fn process_serves_frames_restricts_socket_mode_and_cleans_up_on_sigint_and_sigte
     }
 }
 
+#[test]
+fn process_waits_for_a_coordinator_socket_that_appears_after_worker_start() {
+    let directory = TestDirectory::new();
+    let coordinator_path = directory.socket("coordinator.sock");
+    let worker_path = directory.socket("engine.sock");
+    let mut child = spawn_worker(&worker_path, &coordinator_path);
+
+    thread::sleep(Duration::from_millis(150));
+    assert!(child.try_wait().unwrap().is_none());
+    assert!(!worker_path.exists());
+
+    let coordinator = bind_coordinator(&coordinator_path);
+    wait_for_worker_socket(&mut child, &worker_path);
+    request_engine_cycle(&coordinator, &worker_path, 1);
+    stop_with_signal(&mut child, libc::SIGTERM, &worker_path);
+}
+
+#[test]
+fn process_reclaims_its_own_stale_socket_after_sigkill_and_restarts() {
+    let directory = TestDirectory::new();
+    let coordinator_path = directory.socket("coordinator.sock");
+    let worker_path = directory.socket("engine.sock");
+    let coordinator = bind_coordinator(&coordinator_path);
+    let mut first = spawn_worker(&worker_path, &coordinator_path);
+    wait_for_worker_socket(&mut first, &worker_path);
+
+    let stale_identity = fs::symlink_metadata(&worker_path).unwrap();
+    first.kill().unwrap();
+    first.wait().unwrap();
+    // Simulate the bind-to-chmod crash window, where the socket retains the process umask mode.
+    fs::set_permissions(&worker_path, fs::Permissions::from_mode(0o755)).unwrap();
+    let stale_path = fs::symlink_metadata(&worker_path).unwrap();
+    assert!(stale_path.file_type().is_socket());
+    assert_eq!(
+        (stale_path.dev(), stale_path.ino()),
+        (stale_identity.dev(), stale_identity.ino())
+    );
+
+    let mut restarted = spawn_worker(&worker_path, &coordinator_path);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if let Some(status) = restarted.try_wait().unwrap() {
+            panic!("restarted worker exited during stale cleanup: {status}");
+        }
+        let metadata = fs::symlink_metadata(&worker_path).unwrap();
+        if (metadata.dev(), metadata.ino()) != (stale_path.dev(), stale_path.ino()) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "worker did not replace stale socket"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    thread::sleep(Duration::from_millis(10));
+    request_engine_cycle(&coordinator, &worker_path, 1);
+    stop_with_signal(&mut restarted, libc::SIGTERM, &worker_path);
+}
+
+#[test]
+fn process_refuses_a_second_live_worker_without_replacing_its_socket() {
+    let directory = TestDirectory::new();
+    let coordinator_path = directory.socket("coordinator.sock");
+    let worker_path = directory.socket("engine.sock");
+    let coordinator = bind_coordinator(&coordinator_path);
+    let mut active = spawn_worker(&worker_path, &coordinator_path);
+    wait_for_worker_socket(&mut active, &worker_path);
+    let before = fs::symlink_metadata(&worker_path).unwrap();
+
+    let duplicate = run_worker_output(&worker_path, &coordinator_path);
+    assert!(!duplicate.status.success());
+    let after = fs::symlink_metadata(&worker_path).unwrap();
+    assert_eq!((after.dev(), after.ino()), (before.dev(), before.ino()));
+    assert!(active.try_wait().unwrap().is_none());
+
+    request_engine_cycle(&coordinator, &worker_path, 1);
+    stop_with_signal(&mut active, libc::SIGTERM, &worker_path);
+}
+
 fn run_worker_output(worker_path: &PathBuf, coordinator_path: &PathBuf) -> Output {
     Command::new(WORKER_BINARY)
         .args([
