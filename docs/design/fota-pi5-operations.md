@@ -133,10 +133,12 @@ Only the 100th consecutive response becomes `Ready`. A host-cycle gap, full or e
 timeout, protocol/ECU/cycle mismatch, or socket inode failure clears the stability window. A full
 queue masks an old `Ready` immediately, before the shadow thread consumes another snapshot. A
 timeout, malformed packet, duplicate response, or socket change marks only that candidate failed
-and leaves active worker outputs in use. Candidate commands and alive frames are always discarded.
+and leaves active worker outputs in use. Candidate commands and alive frames are discarded while
+the candidate is shadowed.
 `Ready` reports protocol-level shadow stability only; it does not verify application semantics or
-vehicle health, approve a route, or authorize promotion. Candidate coordinator setup errors also
-disable shadow checking without preventing active worker startup. The root `sdv-fota-launcher`
+vehicle health. Promotion is a separate, explicit root operation and is accepted only while the
+candidate remains `Ready`. Candidate coordinator setup errors also disable shadow checking without
+preventing active worker startup. The root `sdv-fota-launcher`
 service binds `/run/sdv-fota/control.sock` inside its root-owned runtime directory and passes the
 already-open listener descriptor to the vehicle process. The application UID cannot replace the
 pathname with a fake server; the vehicle accepts hold requests only from a root peer.
@@ -164,6 +166,9 @@ pending slot under the configured ECU identity with `--ecu engine`, its own
 record lock protects the snapshot and spawn. The image update lock is released immediately after
 spawn; installers fail closed while startup is in progress. The hold keeps zero output applied on
 every vehicle cycle and remains latched after candidate timeout, protocol failure, or process exit.
+The candidate worker is configured to accept only the shadow coordinator and active coordinator
+socket paths, after checking each endpoint's owner, mode, and inode. It replies to the coordinator
+that sent each request, so a promoted worker can use the active response socket without a restart.
 No release command exists in this slice. Stop the candidate service before installing a replacement
 or running administrative rollback:
 
@@ -176,10 +181,26 @@ sudo systemctl restart sdv-fota-launcher.service
 Restart the host only after rollback has cleared the pending ECU trial. The root launcher scans the
 per-ECU boot records at vehicle startup; any pending trial sets `SDV_FOTA_PENDING_ECU_TRIAL=1`, so
 the host starts held before its first runtime cycle. After an administrative rollback clears the
-pending trial, restarting the host clears this process-local hold. This is still a shadow-only slice:
-active output routing remains unchanged, candidate outputs are discarded, and neither cutover nor
-trial commit/automatic rollback is implemented. Do not treat a running candidate service or a
-`Ready` log as approval to use its outputs.
+pending trial, restarting the host clears this process-local hold. A shadow candidate remains
+isolated until an administrator explicitly promotes it. After the candidate has reached `Ready`,
+promote only the selected ECU route through the root-owned host control socket:
+
+```sh
+sudo sdv-fota promote-candidate --control-socket /run/sdv-fota/control.sock --target engine
+```
+
+The control endpoint accepts root peers only. Promotion first confirms the sticky zero-output hold,
+then stops accepting shadow snapshots without waiting in the 10 ms host loop. At a later host-cycle
+boundary it revalidates the candidate socket inode and switches that ECU's route. The request
+succeeds only after the candidate answers for the promotion cycle and the host successfully applies
+zero output for that cycle. `Ready` and a successful promotion confirm protocol-level responses and
+route selection; neither establishes application behavior or vehicle health. The hold remains
+latched after success. A failure also leaves zero output held; if the route had already switched,
+it is not automatically switched back. Keep the vehicle secured and inspect host and candidate logs.
+This step does not commit the trial, perform rollback, or release the hold. Those operations are not
+part of the current promotion flow. The host process supports one route promotion because it stops
+the shadow coordinator for cutover. The selected route is process-local and returns to the active
+worker after a host restart.
 
 To switch from external workers to coordinator-spawn or in-process mode, stop both the host and
 worker target, disable the target, install the root-owned vehicle config for the selected mode, and
@@ -430,9 +451,10 @@ not provide privilege isolation. The launcher requires `CAP_SETGID` to clear inh
 The fixed `ecus` parent must be a real launcher-owned directory; a symlink is rejected. The example
 `sdv-picarx-health` command is vehicle-only and cannot validate an ECU worker. Shadow mode connects
 the pending image to a separate candidate socket and validates matching protocol responses only.
-Candidate launch now latches zero actuator output through a root-owned inherited control socket, but
-it does not provide stable worker health, route cutover, or post-cutover commit/rollback. Do not
-treat either launcher form as an approved ECU promotion procedure.
+Candidate launch latches zero actuator output through a root-owned inherited control socket. The
+separate `sdv-fota promote-candidate` command can switch a `Ready` candidate route at a host-cycle
+boundary while keeping that hold latched. Neither the launcher nor the promotion command provides
+application-semantic or vehicle-health evidence, trial commit, rollback, or hold release.
 
 Install the example unit from `deploy/systemd/sdv-fota-launcher.service`. Its health command checks
 the vehicle runtime's Unix socket, which reports ready only after a successful control cycle. The
@@ -463,17 +485,21 @@ separate fixed state roots and record independent trial metadata. The installed 
 uses the `vehicle` root; an explicit ECU-targeted active-only launcher invocation starts only the
 verified active image and leaves trial metadata unchanged. An explicit shadow-candidate service can
 start one pending Engine/Brake/Steering image and validate matching frames over a separate
-candidate socket; it discards all candidate output. The legacy positional launcher is vehicle-root
-only; passing an `ecus/<target>` directory to it preserves trial semantics and can consume or boot
+candidate socket; it discards candidate output until an explicit route promotion. The legacy
+positional launcher is vehicle-root only; passing an `ecus/<target>` directory to it preserves trial semantics and can consume or boot
 a pending candidate, so use the target-aware ECU form instead. An ECU target requires a matching
 `--app-arg --ecu --app-arg <target>` pair and a dedicated non-root identity from
 `SDV_FOTA_ECU_APP_UID/GID`; supplementary ECU groups default to empty. The installed
 `sdv-picarx-health` command checks vehicle runtime health and is not an ECU worker health check, so
-the example systemd unit remains vehicle-only. Shadow response validation is not a stable candidate
-health verdict. A root-owned inherited control socket can latch zero actuator output before
-candidate launch; it has no release operation yet. Route cutover, proof of production-route
-operation, and commit/rollback after cutover remain the next integration stage. Candidate protocol
-failure is isolated from active worker-cycle processing while the sticky output hold remains set. Virtual ECU worker processes can
+the example systemd unit remains vehicle-only. Shadow response validation is protocol-level
+stability, not an application or vehicle health verdict. A root-owned inherited control socket
+accepts root-peer requests to latch zero actuator output before candidate launch and to promote a
+`Ready` candidate at a host-cycle boundary after revalidating its socket inode. The response is
+successful only after the candidate answers for that cycle and zero output is applied. The hold
+remains latched; promotion does not commit or roll back the trial, release the hold, or establish
+ongoing production-route health. A failure keeps zero output held and does not promise to restore
+the previous route after a switch. Candidate protocol failure before promotion is isolated from
+active worker-cycle processing while the sticky output hold remains set. Virtual ECU worker processes can
 be enabled as an alternative Linux runtime mode. The Pi path can sign a package on a separate host, verify and
 stage it incrementally, and exercise whole-vehicle A/B trial boot and rollback on Linux. HTTPS
 artifact transfer uses the device's system CA store and can use mutual TLS. Private repository

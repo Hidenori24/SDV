@@ -30,7 +30,15 @@ struct BoundWorkerSocket {
     device: u64,
     inode: u64,
     owner: u32,
+    coordinators: Vec<CoordinatorSocketIdentity>,
     _path_lock: WorkerPathLock,
+}
+
+struct CoordinatorSocketIdentity {
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+    owner: u32,
 }
 
 struct WorkerPathLock {
@@ -134,8 +142,9 @@ impl Drop for WorkerSocketPathGuard {
 }
 
 impl BoundWorkerSocket {
-    fn bind(worker_path: PathBuf, coordinator_path: &Path) -> io::Result<Self> {
-        if worker_path == coordinator_path {
+    fn bind(worker_path: PathBuf, coordinator_paths: &[PathBuf]) -> io::Result<Self> {
+        if coordinator_paths.is_empty() || coordinator_paths.iter().any(|path| worker_path == *path)
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "worker and coordinator socket paths must differ",
@@ -143,7 +152,10 @@ impl BoundWorkerSocket {
         }
         let owner = unsafe { libc::geteuid() };
         validate_socket_parent(&worker_path, owner)?;
-        validate_coordinator_socket(coordinator_path, owner)?;
+        let coordinators = coordinator_paths
+            .iter()
+            .map(|path| validate_coordinator_socket(path, owner))
+            .collect::<io::Result<Vec<_>>>()?;
         let path_lock = WorkerPathLock::acquire(&worker_path, owner)?;
         remove_stale_worker_socket(&worker_path, owner)?;
 
@@ -163,15 +175,45 @@ impl BoundWorkerSocket {
             device: metadata.dev(),
             inode: metadata.ino(),
             owner,
+            coordinators,
             _path_lock: path_lock,
         };
         path_guard.disarm();
 
         fs::set_permissions(&bound.path, fs::Permissions::from_mode(SOCKET_MODE))?;
         validate_bound_socket(&bound)?;
-        bound.socket.connect(coordinator_path)?;
         bound.socket.set_read_timeout(Some(SOCKET_READ_TIMEOUT))?;
         Ok(bound)
+    }
+
+    fn serve_once(&self, worker: &mut VirtualEcuWorker) -> Result<(), WorkerError> {
+        let mut request = [0_u8; sdv_picarx::virtual_ecu_worker::WORKER_DATAGRAM_MAX_SIZE + 1];
+        let (received, peer) = self.socket.recv_from(&mut request)?;
+        if received > sdv_picarx::virtual_ecu_worker::WORKER_DATAGRAM_MAX_SIZE {
+            return Err(WorkerError::InvalidLength);
+        }
+        let peer_path = peer.as_pathname().ok_or_else(|| {
+            WorkerError::Io(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "worker request has no filesystem coordinator address",
+            ))
+        })?;
+        let coordinator = self
+            .coordinators
+            .iter()
+            .find(|coordinator| coordinator.path == peer_path)
+            .ok_or_else(|| {
+                WorkerError::Io(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "worker request came from an unapproved coordinator",
+                ))
+            })?;
+        validate_coordinator_identity(coordinator).map_err(WorkerError::Io)?;
+
+        let mut response = [0_u8; sdv_picarx::virtual_ecu_worker::WORKER_DATAGRAM_MAX_SIZE];
+        let response_len = worker.handle_datagram(&request[..received], &mut response)?;
+        self.socket.send_to(&response[..response_len], peer_path)?;
+        Ok(())
     }
 }
 
@@ -250,6 +292,9 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), String> {
     let ecu_id = parse_ecu_id(&required_option(&mut options, "--ecu")?)?;
     let worker_path = PathBuf::from(required_option(&mut options, "--worker-socket")?);
     let coordinator_path = PathBuf::from(required_option(&mut options, "--coordinator-socket")?);
+    let allowed_coordinator = options
+        .remove("--allowed-coordinator-socket")
+        .map(PathBuf::from);
 
     let shutdown = Arc::new(AtomicBool::new(false));
     flag::register(SIGINT, Arc::clone(&shutdown))
@@ -257,14 +302,20 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), String> {
     flag::register(SIGTERM, Arc::clone(&shutdown))
         .map_err(|error| format!("cannot register SIGTERM handler: {error}"))?;
 
-    let socket = match bind_after_coordinator_ready(worker_path, &coordinator_path, &shutdown) {
+    let mut coordinator_paths = vec![coordinator_path];
+    if let Some(path) = allowed_coordinator {
+        if !coordinator_paths.contains(&path) {
+            coordinator_paths.push(path);
+        }
+    }
+    let socket = match bind_after_coordinator_ready(worker_path, &coordinator_paths, &shutdown) {
         Ok(socket) => socket,
         Err(error) if error.kind() == io::ErrorKind::Interrupted => return Ok(()),
         Err(error) => return Err(format!("cannot bind worker socket: {error}")),
     };
     let mut worker = VirtualEcuWorker::new(ecu_id, &Config::default());
     while !shutdown.load(Ordering::Relaxed) {
-        match worker.serve_once(&socket.socket) {
+        match socket.serve_once(&mut worker) {
             Ok(()) => {}
             Err(WorkerError::Io(error))
                 if matches!(
@@ -272,6 +323,14 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), String> {
                     io::ErrorKind::WouldBlock
                         | io::ErrorKind::TimedOut
                         | io::ErrorKind::Interrupted
+                ) => {}
+            Err(WorkerError::Io(error)) if error.kind() == io::ErrorKind::PermissionDenied => {
+                eprintln!("sdv-picarx-ecu-worker: rejected coordinator datagram: {error}");
+            }
+            Err(WorkerError::Io(error))
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
                 ) => {}
             Err(WorkerError::Io(error)) => {
                 return Err(format!("worker socket failed: {error}"));
@@ -286,12 +345,12 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), String> {
 
 fn bind_after_coordinator_ready(
     worker_path: PathBuf,
-    coordinator_path: &Path,
+    coordinator_paths: &[PathBuf],
     shutdown: &AtomicBool,
 ) -> io::Result<BoundWorkerSocket> {
     let deadline = std::time::Instant::now() + COORDINATOR_STARTUP_TIMEOUT;
     loop {
-        match BoundWorkerSocket::bind(worker_path.clone(), coordinator_path) {
+        match BoundWorkerSocket::bind(worker_path.clone(), coordinator_paths) {
             Ok(socket) => return Ok(socket),
             Err(error)
                 if matches!(
@@ -316,7 +375,12 @@ fn bind_after_coordinator_ready(
 fn parse_named_options(
     args: impl IntoIterator<Item = OsString>,
 ) -> Result<BTreeMap<String, OsString>, String> {
-    let accepted = ["--ecu", "--worker-socket", "--coordinator-socket"];
+    let accepted = [
+        "--ecu",
+        "--worker-socket",
+        "--coordinator-socket",
+        "--allowed-coordinator-socket",
+    ];
     let mut options = BTreeMap::new();
     let mut args = args.into_iter();
     while let Some(option) = args.next() {
@@ -361,7 +425,7 @@ fn parse_ecu_id(value: &OsStr) -> Result<VirtualEcuId, String> {
 }
 
 fn usage() -> &'static str {
-    "usage: sdv-picarx-ecu-worker --ecu <engine|brake|steering> --worker-socket <path> --coordinator-socket <path>"
+    "usage: sdv-picarx-ecu-worker --ecu <engine|brake|steering> --worker-socket <path> --coordinator-socket <path> [--allowed-coordinator-socket <path>]"
 }
 
 fn validate_socket_parent(path: &Path, owner: u32) -> io::Result<()> {
@@ -412,7 +476,7 @@ fn validate_socket_parent(path: &Path, owner: u32) -> io::Result<()> {
     Ok(())
 }
 
-fn validate_coordinator_socket(path: &Path, owner: u32) -> io::Result<()> {
+fn validate_coordinator_socket(path: &Path, owner: u32) -> io::Result<CoordinatorSocketIdentity> {
     validate_socket_parent(path, owner)?;
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.file_type().is_socket()
@@ -422,6 +486,27 @@ fn validate_coordinator_socket(path: &Path, owner: u32) -> io::Result<()> {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "coordinator path must be an owner-only Unix socket owned by this user",
+        ));
+    }
+    Ok(CoordinatorSocketIdentity {
+        path: path.to_path_buf(),
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        owner,
+    })
+}
+
+fn validate_coordinator_identity(identity: &CoordinatorSocketIdentity) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(&identity.path)?;
+    if !metadata.file_type().is_socket()
+        || metadata.uid() != identity.owner
+        || metadata.permissions().mode() & 0o077 != 0
+        || metadata.dev() != identity.device
+        || metadata.ino() != identity.inode
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "coordinator socket identity or permissions changed",
         ));
     }
     Ok(())
@@ -487,6 +572,17 @@ mod tests {
             "brake".into()
         ])
         .is_err());
+        assert!(parse_named_options([
+            "--ecu".into(),
+            "engine".into(),
+            "--worker-socket".into(),
+            "/run/worker.sock".into(),
+            "--coordinator-socket".into(),
+            "/run/candidates/coordinator.sock".into(),
+            "--allowed-coordinator-socket".into(),
+            "/run/workers/coordinator.sock".into(),
+        ])
+        .is_ok());
     }
 
     #[test]

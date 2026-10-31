@@ -6,7 +6,7 @@
 //! `commit_trial` only after the SDV service passes its health checks.
 
 use super::{
-    BootControl, BootDecision, BootState, ImageStorage, LastTrialResult, Slot, TrialImage,
+    BootControl, BootDecision, BootState, Ecu, ImageStorage, LastTrialResult, Slot, TrialImage,
     TrialOutcome, VersionString,
 };
 use crate::package::decode_sha256;
@@ -40,6 +40,7 @@ const PROCESS_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const OUTPUT_HOLD_REQUEST: &[u8] = b"SDVHOLD1\n";
 const OUTPUT_HOLD_ACK: &[u8] = b"SDVHELD1\n";
 const OUTPUT_HOLD_NOT_READY: &[u8] = b"SDVNOTREADY\n";
+const OUTPUT_PROMOTION_REQUEST_PREFIX: &[u8] = b"SDVPROMOTE1 ";
 const OUTPUT_HOLD_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const OUTPUT_HOLD_RESPONSE_TIMEOUT: Duration = Duration::from_secs(7);
 const HOLD_SOCKET_ENV: &str = "SDV_FOTA_HOLD_SOCKET";
@@ -84,6 +85,7 @@ pub enum Error {
     SlotIsNotActive,
     OutputHoldFailed,
     OutputHoldNotReady,
+    CandidatePromotionFailed,
 }
 
 impl From<io::Error> for Error {
@@ -987,6 +989,74 @@ fn request_output_hold(path: &Path, expected_server_uid: u32) -> Result<(), Erro
         Ok(0) if response.as_slice() == OUTPUT_HOLD_NOT_READY => Err(Error::OutputHoldNotReady),
         Ok(_) => Err(Error::OutputHoldFailed),
         Err(error) => Err(Error::Io(error)),
+    }
+}
+
+/// Request a one-way route cutover for an ECU candidate through the root-owned host control
+/// socket. The vehicle process keeps its sticky zero-output hold latched after this call.
+pub fn request_ecu_candidate_promotion(path: &Path, target: Ecu) -> Result<(), Error> {
+    if target == Ecu::Vehicle {
+        return Err(Error::InvalidTargetLaunchMode);
+    }
+    let metadata = fs::symlink_metadata(path).map_err(Error::Io)?;
+    if !metadata.file_type().is_socket()
+        || metadata.uid() != 0
+        || metadata.permissions().mode() & 0o777 != 0o600
+    {
+        return Err(Error::OutputHoldFailed);
+    }
+    let mut stream = UnixStream::connect(path).map_err(Error::Io)?;
+    let current = fs::symlink_metadata(path).map_err(Error::Io)?;
+    if !current.file_type().is_socket()
+        || current.uid() != 0
+        || current.permissions().mode() & 0o777 != 0o600
+        || (current.dev(), current.ino()) != (metadata.dev(), metadata.ino())
+        || peer_uid(stream.as_raw_fd()).map_err(Error::Io)? != 0
+    {
+        return Err(Error::OutputHoldFailed);
+    }
+    stream
+        .set_read_timeout(Some(OUTPUT_HOLD_RESPONSE_TIMEOUT))
+        .map_err(Error::Io)?;
+    stream
+        .set_write_timeout(Some(OUTPUT_HOLD_RESPONSE_TIMEOUT))
+        .map_err(Error::Io)?;
+    let target_name = match target {
+        Ecu::Engine => "engine",
+        Ecu::Brake => "brake",
+        Ecu::Steering => "steering",
+        Ecu::Vehicle => return Err(Error::InvalidTargetLaunchMode),
+    };
+    let mut request = OUTPUT_PROMOTION_REQUEST_PREFIX.to_vec();
+    request.extend_from_slice(target_name.as_bytes());
+    request.push(b'\n');
+    stream.write_all(&request).map_err(Error::Io)?;
+    stream.shutdown(Shutdown::Write).map_err(Error::Io)?;
+
+    let mut response = Vec::with_capacity(64);
+    loop {
+        let mut byte = [0u8; 1];
+        stream.read_exact(&mut byte).map_err(Error::Io)?;
+        response.push(byte[0]);
+        if byte[0] == b'\n' {
+            break;
+        }
+        if response.len() >= 255 {
+            return Err(Error::OutputHoldFailed);
+        }
+    }
+    let mut trailing = [0u8; 1];
+    if stream.read(&mut trailing).map_err(Error::Io)? != 0 {
+        return Err(Error::OutputHoldFailed);
+    }
+    if response == format!("SDVPROMOTED {target_name}\n").as_bytes() {
+        Ok(())
+    } else if response.as_slice() == OUTPUT_HOLD_NOT_READY {
+        Err(Error::OutputHoldNotReady)
+    } else if response.starts_with(b"SDVPROMOTION_FAILED ") {
+        Err(Error::CandidatePromotionFailed)
+    } else {
+        Err(Error::OutputHoldFailed)
     }
 }
 

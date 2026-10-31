@@ -6,7 +6,7 @@
 use sdv_core::platform::VehiclePlatform;
 use sdv_core::rte::ActuatorCmd;
 use sdv_core::runtime::VehicleActuation;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 pub struct StickyOutputHold {
     requested: Arc<AtomicBool>,
     zero_apply_acknowledged: Arc<AtomicBool>,
+    zero_apply_generation: Arc<AtomicU64>,
 }
 
 impl StickyOutputHold {
@@ -21,11 +22,24 @@ impl StickyOutputHold {
         Self {
             requested: Arc::new(AtomicBool::new(initially_held)),
             zero_apply_acknowledged: Arc::new(AtomicBool::new(false)),
+            zero_apply_generation: Arc::new(AtomicU64::new(0)),
         }
     }
 
     pub fn is_held(&self) -> bool {
         self.requested.load(Ordering::Acquire)
+    }
+
+    /// Return the number of successfully applied zero-output cycles while the hold was latched.
+    /// A consumer can snapshot this value before a critical operation and require it to advance
+    /// before acknowledging that operation.
+    pub fn zero_apply_generation(&self) -> u64 {
+        self.zero_apply_generation.load(Ordering::Acquire)
+    }
+
+    /// Whether at least one successful zero-output apply has acknowledged the latched hold.
+    pub fn has_zero_apply_acknowledgement(&self) -> bool {
+        self.zero_apply_acknowledged.load(Ordering::Acquire)
     }
 
     /// Latch a hold and wait until a physical apply has acknowledged zero output.
@@ -67,6 +81,11 @@ impl StickyOutputHold {
         };
         if applied.is_ok() && held {
             self.zero_apply_acknowledged.store(true, Ordering::Release);
+            let _ = self.zero_apply_generation.try_update(
+                Ordering::AcqRel,
+                Ordering::Acquire,
+                |generation| generation.checked_add(1),
+            );
         }
         applied
     }
@@ -183,6 +202,7 @@ mod tests {
         assert_eq!(applied.safety, moving_actuation().safety);
         assert!(hold.is_held());
         assert!(hold.request_and_wait(Duration::ZERO));
+        assert_eq!(hold.zero_apply_generation(), 1);
     }
 
     #[test]
@@ -206,9 +226,11 @@ mod tests {
 
         assert!(completed.load(Ordering::Acquire));
         assert_eq!(platform.applied.unwrap().command, ActuatorCmd::default());
+        assert_eq!(hold.zero_apply_generation(), 1);
         hold.apply(&mut platform, moving_actuation()).unwrap();
         assert_eq!(platform.applied.unwrap().command, ActuatorCmd::default());
         assert!(hold.is_held());
+        assert_eq!(hold.zero_apply_generation(), 2);
     }
 
     #[test]
@@ -269,5 +291,6 @@ mod tests {
         ));
         assert!(!waiter.join().unwrap());
         assert!(hold.is_held());
+        assert_eq!(hold.zero_apply_generation(), 0);
     }
 }

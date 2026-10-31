@@ -1,5 +1,6 @@
 use sdv_fota::linux::{
-    state_root_for_target, FileBootControl, FilePackageSource, FileSlotStorage, HttpsPackageSource,
+    request_ecu_candidate_promotion, state_root_for_target, FileBootControl, FilePackageSource,
+    FileSlotStorage, HttpsPackageSource,
 };
 use sdv_fota::{
     BootControl, Ecu, FotaInstaller, PackageSource, Slot, ValidationContext, MAX_MANIFEST_BYTES,
@@ -27,6 +28,7 @@ fn run(args: Vec<OsString>) -> Result<(), String> {
         Some("install-url") => install_url(command_args),
         Some("record-active-integrity") => record_active_integrity(command_args),
         Some("rollback-trial") => rollback_trial(command_args),
+        Some("promote-candidate") => promote_candidate(command_args),
         Some("status") => status(command_args),
         Some("verify-images") => verify_images(command_args),
         _ => Err(usage()),
@@ -145,6 +147,22 @@ fn rollback_trial(args: &[OsString]) -> Result<(), String> {
             error => format!("cannot roll back pending trial: {error:?}"),
         })?;
     println!("pending trial cleared; the active slot will run on the next launcher start");
+    Ok(())
+}
+
+fn promote_candidate(args: &[OsString]) -> Result<(), String> {
+    let mut options = parse_named_options(args, &["--control-socket", "--target"])?;
+    let control_socket = PathBuf::from(required_option(&mut options, "--control-socket")?);
+    let target = parse_target(&required_option(&mut options, "--target")?)?;
+    if target == Ecu::Vehicle {
+        return Err("candidate route promotion requires an ECU target".into());
+    }
+    request_ecu_candidate_promotion(&control_socket, target)
+        .map_err(|error| format!("candidate route promotion failed: {error:?}"))?;
+    println!(
+        "candidate route for {} is active; the vehicle output hold remains latched",
+        target_name(target)
+    );
     Ok(())
 }
 
@@ -386,6 +404,15 @@ fn parse_target(value: &OsStr) -> Result<Ecu, String> {
     }
 }
 
+fn target_name(target: Ecu) -> &'static str {
+    match target {
+        Ecu::Vehicle => "vehicle",
+        Ecu::Engine => "engine",
+        Ecu::Brake => "brake",
+        Ecu::Steering => "steering",
+    }
+}
+
 fn selected_state_root(options: &mut BTreeMap<String, OsString>) -> Result<PathBuf, String> {
     let base_root = PathBuf::from(required_option(options, "--state-root")?);
     let target = optional_option(options, "--target")
@@ -440,7 +467,7 @@ fn trial_outcome_name(outcome: sdv_fota::TrialOutcome) -> &'static str {
 }
 
 fn usage() -> String {
-    "usage:\n  sdv-fota init --state-root <dir> [--target <vehicle|engine|brake|steering>] --active-slot <a|b> --active-version <version> --security-version <n>\n  sdv-fota record-active-integrity --state-root <dir> [--target <vehicle|engine|brake|steering>] --slot <a|b>\n  sdv-fota rollback-trial --state-root <dir> [--target <vehicle|engine|brake|steering>]\n  sdv-fota install --state-root <dir> --package <file> --target <vehicle|engine|brake|steering> --config-schema <n> --signal-if-version <n> [--trial-boots <n>]\n  sdv-fota install-url --state-root <dir> --url <https-url> --target <vehicle|engine|brake|steering> --config-schema <n> --signal-if-version <n> [--trial-boots <n>] [--client-cert <file> --client-key <file>]\n  sdv-fota status --state-root <dir> [--target <vehicle|engine|brake|steering>]\n  sdv-fota verify-images --state-root <dir> [--target <vehicle|engine|brake|steering>]".into()
+    "usage:\n  sdv-fota init --state-root <dir> [--target <vehicle|engine|brake|steering>] --active-slot <a|b> --active-version <version> --security-version <n>\n  sdv-fota record-active-integrity --state-root <dir> [--target <vehicle|engine|brake|steering>] --slot <a|b>\n  sdv-fota rollback-trial --state-root <dir> [--target <vehicle|engine|brake|steering>]\n  sdv-fota promote-candidate --control-socket <path> --target <engine|brake|steering>\n  sdv-fota install --state-root <dir> --package <file> --target <vehicle|engine|brake|steering> --config-schema <n> --signal-if-version <n> [--trial-boots <n>]\n  sdv-fota install-url --state-root <dir> --url <https-url> --target <vehicle|engine|brake|steering> --config-schema <n> --signal-if-version <n> [--trial-boots <n>] [--client-cert <file> --client-key <file>]\n  sdv-fota status --state-root <dir> [--target <vehicle|engine|brake|steering>]\n  sdv-fota verify-images --state-root <dir> [--target <vehicle|engine|brake|steering>]".into()
 }
 
 #[cfg(test)]
