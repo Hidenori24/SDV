@@ -830,9 +830,12 @@ fn changed_candidate_socket_inode_is_rejected_before_route_switch() {
     let responder = CandidateResponder::start(&candidate_path, false);
     let (mut coordinator, mut active, _) = start_external_coordinator(&root, &candidate_directory);
     run_candidate_until_ready(&mut coordinator);
-    drop(responder);
+    // Keep the old socket bound while replacing its pathname so the filesystem cannot
+    // immediately reuse its inode. This models a live candidate worker whose socket FD
+    // remains open after an attacker or operator replaces the socket path.
     fs::remove_file(&candidate_path).unwrap();
     let replacement = CandidateResponder::start(&candidate_path, false);
+    drop(responder);
     let hold = confirmed_output_hold();
 
     let promotion = coordinator.begin_candidate_quiesce(VirtualEcuId::Engine, &hold);
