@@ -91,6 +91,7 @@ instead of silently changing modes:
 sudo install -o root -g root -m 0644 rust/sdv-picarx/config/pi5.external-workers.disabled.example.json /etc/sdv-picarx/vehicle.json
 sudo install -m 0644 deploy/systemd/sdv-fota-launcher.service /etc/systemd/system/
 sudo install -m 0644 deploy/systemd/sdv-fota-ecu@.service /etc/systemd/system/
+sudo install -m 0644 deploy/systemd/sdv-fota-ecu-candidate@.service /etc/systemd/system/
 sudo install -m 0644 deploy/systemd/sdv-fota-workers.target /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl stop sdv-fota-workers.target
@@ -114,11 +115,55 @@ For this initial socket permission design, set `SDV_FOTA_ECU_APP_UID/GID` to the
 `sdv-app` UID/GID and `SDV_FOTA_ECU_APP_GROUPS=` empty. ECU services therefore receive no `gpio` or
 `i2c` supplementary groups. They share the vehicle process UID, so this is not OS privilege
 isolation; a dedicated ECU account can be introduced later. The worker code does not open GPIO/I2C.
-This PR does not implement ECU candidate/trial startup, output hold, candidate health, socket route
-cutover, or coordinator-managed commit/rollback; those belong to the next update integration stage.
 Omitting `virtual_ecu_workers` leaves the in-process runtime unchanged. Details and disabled-output
 sample configs are in
 [`rust/sdv-picarx/README.md`](../../rust/sdv-picarx/README.md).
+
+## Shadow one ECU's pending image
+
+With the external-worker sample config, the coordinator also binds
+`/run/sdv-picarx/candidates/coordinator.sock` and sends the same cycle request to any candidate
+socket that appears under `/run/sdv-picarx/candidates`. Candidate sockets and replies use this
+separate coordinator socket; candidate traffic cannot occupy the active response queue. After all
+active responses are validated, the host only `try_send`s a fixed request snapshot into a
+single-entry queue. Filesystem checks, candidate send/receive, timeout accounting, and journal
+writes run on a separate shadow thread. A full queue or an expired snapshot skips that shadow
+cycle; the host never waits for candidate work. Candidate responses must match the requested ECU,
+cycle, and socket inode. A timeout, malformed packet, duplicate response, or socket change marks
+that candidate failed and leaves active worker outputs in use. Candidate commands and alive frames
+are always discarded. A `Ready` journal entry means only that one matching shadow response was
+decoded; it is not a promotion or a stable health verdict. Candidate coordinator setup errors also
+disable shadow checking without preventing active worker startup.
+
+After an ECU package is staged and its active and trial digests verify, start one candidate service.
+This example is for Engine only; Brake and Steering remain on their active workers:
+
+```sh
+sudo sdv-fota status --state-root /var/lib/sdv-fota --target engine
+sudo sdv-fota verify-images --state-root /var/lib/sdv-fota --target engine
+sudo systemctl start sdv-fota-ecu-candidate@engine.service
+sudo journalctl -u sdv-fota-launcher.service -f
+```
+
+The candidate launcher starts the pending slot under the configured ECU identity with
+`--ecu engine`, its own `/run/sdv-picarx/candidates/engine.sock`, and the candidate coordinator
+socket. It reads the pending trial and verifies the signed-install digest but does not call
+`select_for_boot`, decrement `boots_left`, change active metadata, commit, or roll back. The boot
+record lock protects the snapshot and spawn. The image update lock is held through exec startup and
+released immediately after spawn; installers fail closed while that startup is in progress. Stop
+the candidate service before installing a replacement candidate or running administrative
+rollback, so an obsolete shadow process cannot remain after metadata changes:
+
+```sh
+sudo systemctl stop sdv-fota-ecu-candidate@engine.service
+sudo sdv-fota rollback-trial --state-root /var/lib/sdv-fota --target engine
+```
+
+This is a shadow-only slice. Active output routing remains unchanged; there is no actuator output
+hold, route cutover, trial commit, or automatic rollback based on candidate response status. A later
+stage must require an explicit safe hold, switch only at a cycle boundary, prove the production
+route, and commit only after that route acknowledgement. Do not treat a running candidate service
+or a `Ready` log as approval to use its outputs.
 
 To switch from external workers to coordinator-spawn or in-process mode, stop both the host and
 worker target, disable the target, install the root-owned vehicle config for the selected mode, and
@@ -276,10 +321,10 @@ target-specific root. Omitting `--target` from the state-management commands ret
 version, security counter, and trial record stay independent from other targets.
 
 This prepares per-ECU staging and trial metadata. The installed systemd unit still starts the whole
-vehicle application from the `vehicle` state root. An explicit target-aware ECU invocation can
-start only the verified active image; it does not start a pending candidate or update its trial
-metadata. Do not restart the vehicle unit expecting an ECU-target package to run. Coordinator
-worker trial lifecycle and its health/commit connection are a follow-on integration.
+vehicle application from the `vehicle` state root. An explicit target-aware ECU invocation starts
+only the verified active image. The separate `--trial-candidate` mode described above starts a
+pending ECU image on a shadow socket; it does not change boot metadata or route output. Do not
+restart the vehicle unit expecting an ECU-target package to run.
 
 `status` is a diagnostic report and exits successfully even when it reports an image mismatch.
 `verify-images` checks the active image and any pending trial image, prints the same integrity
@@ -356,8 +401,8 @@ An ECU launch requires exactly one matching `--ecu <target>` pair. The launcher 
 only that ECU's recorded active slot. It does not call `select_for_boot`, decrement `boots_left`, or
 change pending trial metadata; it removes `SDV_TRIAL_SLOT` and `SDV_IMAGE_PATH` from the child
 environment and performs no health check, trial commit, or rollback. A pending candidate stays
-pending for a later coordinator-managed trial flow. The legacy positional and `vehicle` target
-trial semantics are unchanged.
+pending when this active-only form is used; the explicit shadow-candidate form is separate. The
+legacy positional and `vehicle` target trial semantics are unchanged.
 
 ECU launches use
 `SDV_FOTA_ECU_APP_UID` and `SDV_FOTA_ECU_APP_GID`, plus optional
@@ -367,9 +412,10 @@ vehicle `i2c`/`gpio` groups are not passed to an ECU image. The ECU UID/GID shou
 dedicated non-root account. If it is configured to the same UID as the vehicle process, this does
 not provide privilege isolation. The launcher requires `CAP_SETGID` to clear inherited groups.
 The fixed `ecus` parent must be a real launcher-owned directory; a symlink is rejected. The example
-`sdv-picarx-health` command is vehicle-only and cannot validate an ECU worker. This active-only ECU
-launch is not connected to the Pi coordinator's output hold, candidate health on trial sockets,
-route cutover, or post-cutover commit/rollback, and must not be treated as that update procedure.
+`sdv-picarx-health` command is vehicle-only and cannot validate an ECU worker. Shadow mode connects
+the pending image to a separate candidate socket and validates matching protocol responses only;
+it does not provide stable worker health, actuator output hold, route cutover, or post-cutover
+commit/rollback. Do not treat either launcher form as an approved ECU promotion procedure.
 
 Install the example unit from `deploy/systemd/sdv-fota-launcher.service`. Its health command checks
 the vehicle runtime's Unix socket, which reports ready only after a successful control cycle. The
@@ -397,18 +443,20 @@ tasks with their own RTE state and the same virtual bus contract as the Rust sim
 require separate physical CPUs. The `vehicle` target remains a single A/B application image, while
 the Linux CLI can also stage individually signed `engine`, `brake`, or `steering` packages into
 separate fixed state roots and record independent trial metadata. The installed systemd unit still
-uses the `vehicle` root; an explicit ECU-targeted launcher invocation starts only the verified
-active image and leaves trial metadata unchanged. The legacy positional launcher is vehicle-root
+uses the `vehicle` root; an explicit ECU-targeted active-only launcher invocation starts only the
+verified active image and leaves trial metadata unchanged. An explicit shadow-candidate service can
+start one pending Engine/Brake/Steering image and validate matching frames over a separate
+candidate socket; it discards all candidate output. The legacy positional launcher is vehicle-root
 only; passing an `ecus/<target>` directory to it preserves trial semantics and can consume or boot
 a pending candidate, so use the target-aware ECU form instead. An ECU target requires a matching
 `--app-arg --ecu --app-arg <target>` pair and a dedicated non-root identity from
 `SDV_FOTA_ECU_APP_UID/GID`; supplementary ECU groups default to empty. The installed
 `sdv-picarx-health` command checks vehicle runtime health and is not an ECU worker health check, so
-the example systemd unit remains vehicle-only. Coordinator-managed trial output hold, candidate
-health, route cutover, and post-cutover commit/rollback remain the next integration stage. Virtual ECU worker processes can
-be enabled as an alternative Linux runtime mode, but coordinator-managed worker trial startup,
-output hold, trial-socket health checks, atomic route cutover, and commit/rollback after cutover are
-not connected. The Pi path can sign a package on a separate host, verify and
+the example systemd unit remains vehicle-only. Shadow response validation is not a stable candidate
+health verdict. Coordinator-managed actuator hold, route cutover, proof of production-route
+operation, and commit/rollback after cutover remain the next integration stage. Candidate protocol
+failure is isolated and does not stop the active worker cycle. Virtual ECU worker processes can
+be enabled as an alternative Linux runtime mode. The Pi path can sign a package on a separate host, verify and
 stage it incrementally, and exercise whole-vehicle A/B trial boot and rollback on Linux. HTTPS
 artifact transfer uses the device's system CA store and can use mutual TLS. Private repository
 credentials, remote campaign orchestration, a real vehicle-state estimator/input peer, actual Pi 5

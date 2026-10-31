@@ -11,7 +11,8 @@
   "trial_stationary_throttle_tolerance": 0.0,
   "virtual_ecu_workers": {
     "mode": "external",
-    "socket_directory": "/run/sdv-picarx/workers"
+    "socket_directory": "/run/sdv-picarx/workers",
+    "candidate_socket_directory": "/run/sdv-picarx/candidates"
   },
   "motor": {
     "left_forward_high": true,

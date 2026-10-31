@@ -725,6 +725,78 @@ pub fn run_active_target_image_as_with_groups_and_app_args(
     )
 }
 
+/// Launch one ECU's pending trial image as a shadow candidate, without changing boot metadata.
+///
+/// The candidate receives its own worker socket through fixed service arguments. It is not the
+/// active worker route: the Pi coordinator may send it cycle inputs for validation, but must
+/// discard its outputs until a later hold-and-cutover protocol explicitly promotes it. This API
+/// never decrements `boots_left`, commits, or rolls back the trial.
+pub fn run_trial_candidate_target_image_as_with_groups_and_app_args(
+    base_root: impl Into<PathBuf>,
+    target: crate::Ecu,
+    uid: u32,
+    gid: u32,
+    supplementary_groups: &[u32],
+    app_args: &[std::ffi::OsString],
+) -> Result<ExitStatus, Error> {
+    if uid == 0 || gid == 0 || supplementary_groups.contains(&0) {
+        return Err(Error::InvalidRunIdentity);
+    }
+    run_trial_candidate_image(
+        base_root.into(),
+        target,
+        Some((uid, gid, supplementary_groups.to_vec())),
+        true,
+        app_args,
+    )
+}
+
+/// Launch a pending ECU image as a shadow candidate using the caller's current identity.
+/// Service managers should use the identity-switching variant above.
+pub fn run_trial_candidate_target_image_with_app_args(
+    base_root: impl Into<PathBuf>,
+    target: crate::Ecu,
+    app_args: &[std::ffi::OsString],
+) -> Result<ExitStatus, Error> {
+    run_trial_candidate_image(base_root.into(), target, None, false, app_args)
+}
+
+fn run_trial_candidate_image(
+    base_root: PathBuf,
+    target: crate::Ecu,
+    identity: Option<(u32, u32, Vec<u32>)>,
+    clear_inherited_groups: bool,
+    app_args: &[std::ffi::OsString],
+) -> Result<ExitStatus, Error> {
+    if target == crate::Ecu::Vehicle {
+        return Err(Error::InvalidTargetLaunchMode);
+    }
+    let root = validate_target_root(base_root, target, app_args)?;
+    // Match installer lock order: an in-flight image write makes candidate start fail closed.
+    // The update lock protects image verification and exec startup. It is released once the new
+    // process has been spawned so a long-lived shadow worker cannot block later package installs.
+    let _update_lock = acquire_update_lock(&root)?;
+    let _boot_lock = BootRecordLock::acquire(&root)?;
+    let (_, state) = FileBootControl::new(&root).load()?;
+    let trial = state.trial.ok_or(Error::NoTrialPending)?;
+    if trial.slot == state.active || trial.boots_left == 0 {
+        return Err(Error::NoTrialPending);
+    }
+    let storage = FileSlotStorage::new(&root);
+    storage.verify_executable_image(trial.slot)?;
+    let image = storage.image_path(trial.slot);
+    let mut command = command_with_identity(&image, identity.as_ref(), clear_inherited_groups);
+    command
+        .args(app_args)
+        .env_remove("SDV_TRIAL_SLOT")
+        .env("SDV_TRIAL_CANDIDATE_SLOT", slot_name(trial.slot))
+        .env("SDV_IMAGE_PATH", &image);
+    let mut child = command.spawn().map_err(Error::Io)?;
+    drop(_boot_lock);
+    drop(_update_lock);
+    child.wait().map_err(Error::Io)
+}
+
 fn validate_target_root(
     base_root: PathBuf,
     target: crate::Ecu,
