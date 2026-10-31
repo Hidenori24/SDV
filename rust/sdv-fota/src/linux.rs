@@ -41,6 +41,7 @@ const OUTPUT_HOLD_REQUEST: &[u8] = b"SDVHOLD1\n";
 const OUTPUT_HOLD_ACK: &[u8] = b"SDVHELD1\n";
 const OUTPUT_HOLD_NOT_READY: &[u8] = b"SDVNOTREADY\n";
 const OUTPUT_PROMOTION_REQUEST_PREFIX: &[u8] = b"SDVPROMOTE1 ";
+const OUTPUT_REVERSION_REQUEST_PREFIX: &[u8] = b"SDVREVERT1 ";
 const OUTPUT_HOLD_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const OUTPUT_HOLD_RESPONSE_TIMEOUT: Duration = Duration::from_secs(7);
 const HOLD_SOCKET_ENV: &str = "SDV_FOTA_HOLD_SOCKET";
@@ -85,7 +86,7 @@ pub enum Error {
     SlotIsNotActive,
     OutputHoldFailed,
     OutputHoldNotReady,
-    CandidatePromotionFailed,
+    CandidateRouteChangeFailed,
 }
 
 impl From<io::Error> for Error {
@@ -995,6 +996,21 @@ fn request_output_hold(path: &Path, expected_server_uid: u32) -> Result<(), Erro
 /// Request a one-way route cutover for an ECU candidate through the root-owned host control
 /// socket. The vehicle process keeps its sticky zero-output hold latched after this call.
 pub fn request_ecu_candidate_promotion(path: &Path, target: Ecu) -> Result<(), Error> {
+    request_ecu_candidate_route_change(path, target, OUTPUT_PROMOTION_REQUEST_PREFIX, "SDVPROMOTED")
+}
+
+/// Return a promoted ECU route to its active worker through the root-owned host control socket.
+/// The vehicle confirms a held zero-output cycle on the active route before acknowledging.
+pub fn request_ecu_candidate_reversion(path: &Path, target: Ecu) -> Result<(), Error> {
+    request_ecu_candidate_route_change(path, target, OUTPUT_REVERSION_REQUEST_PREFIX, "SDVREVERTED")
+}
+
+fn request_ecu_candidate_route_change(
+    path: &Path,
+    target: Ecu,
+    request_prefix: &[u8],
+    expected_response_prefix: &str,
+) -> Result<(), Error> {
     if target == Ecu::Vehicle {
         return Err(Error::InvalidTargetLaunchMode);
     }
@@ -1027,7 +1043,7 @@ pub fn request_ecu_candidate_promotion(path: &Path, target: Ecu) -> Result<(), E
         Ecu::Steering => "steering",
         Ecu::Vehicle => return Err(Error::InvalidTargetLaunchMode),
     };
-    let mut request = OUTPUT_PROMOTION_REQUEST_PREFIX.to_vec();
+    let mut request = request_prefix.to_vec();
     request.extend_from_slice(target_name.as_bytes());
     request.push(b'\n');
     stream.write_all(&request).map_err(Error::Io)?;
@@ -1049,12 +1065,12 @@ pub fn request_ecu_candidate_promotion(path: &Path, target: Ecu) -> Result<(), E
     if stream.read(&mut trailing).map_err(Error::Io)? != 0 {
         return Err(Error::OutputHoldFailed);
     }
-    if response == format!("SDVPROMOTED {target_name}\n").as_bytes() {
+    if response == format!("{expected_response_prefix} {target_name}\n").as_bytes() {
         Ok(())
     } else if response.as_slice() == OUTPUT_HOLD_NOT_READY {
         Err(Error::OutputHoldNotReady)
-    } else if response.starts_with(b"SDVPROMOTION_FAILED ") {
-        Err(Error::CandidatePromotionFailed)
+    } else if response.starts_with(b"SDVROUTE_FAILED ") {
+        Err(Error::CandidateRouteChangeFailed)
     } else {
         Err(Error::OutputHoldFailed)
     }

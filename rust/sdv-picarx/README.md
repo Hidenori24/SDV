@@ -232,16 +232,26 @@ route at a cycle boundary after revalidating the candidate socket inode. The req
 after the candidate replies for that promotion cycle and zero output is successfully applied. The
 hold remains latched after success. The current host process supports one promotion because it
 stops the shadow coordinator while switching a route. Route selection is process-local and returns
-to the active worker after a host restart. Promotion does not change trial metadata, commit the
-trial, or provide rollback or hold-release operations. `Ready` and a successful promotion are
-protocol and route-selection evidence only; they do not establish application behavior or vehicle
-health.
+to the active worker after a host restart. To remove a promoted candidate from the route, use the
+root-only reversion command:
 
-If promotion fails, zero output remains held. A failure after route switch does not restore the
-previous route automatically, so keep the vehicle secured and inspect host and candidate logs; do
-not assume the active worker is still selected. Before any promotion, if candidate startup or
-shadow validation fails, the active worker stays selected and the hold remains latched. Stop the
-candidate before replacing its package or running administrative rollback:
+```sh
+sudo sdv-fota revert-candidate --control-socket /run/sdv-fota/control.sock --target engine
+```
+
+Reversion validates the original active worker socket, switches at a host-cycle boundary, and
+acknowledges only after that worker replies and zero output is applied. The hold remains latched.
+Reversion does not stop the candidate service or change trial metadata; a reverted candidate cannot
+be promoted again in the same host process. `Ready`, promotion, and reversion are protocol and route
+evidence only; they do not establish application behavior or vehicle health.
+
+If promotion fails, zero output remains held. If the route switched before the failure, request
+`revert-candidate` and wait for its active-cycle acknowledgement before assuming the active worker is
+selected. If the host cannot complete reversion, keep the vehicle secured; restarting the host with
+the trial pending selects the active worker and starts held. Before any promotion, if candidate
+startup or shadow validation fails, the active worker stays selected and the hold remains latched.
+After the active route is selected, stop the candidate before replacing its package or clearing trial
+metadata:
 
 ```sh
 sudo systemctl stop sdv-fota-ecu-candidate@engine.service
@@ -272,8 +282,10 @@ launches only the pending image into its candidate-only socket, without consumin
 metadata, or selecting candidate outputs. While it is still shadowing, stop
 `sdv-fota-ecu-candidate@<ecu>.service` before installing a replacement or running administrative
 rollback; otherwise a shadow process may continue after metadata changes. Output hold is sticky in the host process. Route promotion is
-available only through `sdv-fota promote-candidate`; application/vehicle health evidence,
-post-promotion rollback, trial commit, and hold release remain unimplemented.
+available through `sdv-fota promote-candidate`; root-only `sdv-fota revert-candidate` can return to
+the active worker while keeping the hold latched. Trial-metadata rollback is still a separate
+administrative operation. Application/vehicle health evidence, trial commit, and hold release remain
+unimplemented.
 
 `config/pi5.disabled.example.json` is a commissioning template. Its zero motor duty and zero
 forward-power limit keep drive output disabled. `config/pi5.fota.disabled.example.json` uses the

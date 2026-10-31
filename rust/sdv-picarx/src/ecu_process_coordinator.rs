@@ -59,8 +59,8 @@ pub struct EcuProcessVehicleExecutor<P> {
     platform: P,
     coordinator: EcuProcessCoordinator,
     output_hold: Option<StickyOutputHold>,
-    promotion_requests: Option<Receiver<CandidatePromotionRequest>>,
-    pending_promotion: Option<(CandidatePromotionRequest, u64)>,
+    route_requests: Option<Receiver<CandidateRouteRequest>>,
+    pending_route_change: Option<(CandidateRouteRequest, u64)>,
 }
 
 impl<P> EcuProcessVehicleExecutor<P> {
@@ -70,19 +70,19 @@ impl<P> EcuProcessVehicleExecutor<P> {
             platform,
             coordinator,
             output_hold: None,
-            promotion_requests: None,
-            pending_promotion: None,
+            route_requests: None,
+            pending_route_change: None,
         }
     }
 
-    /// Attach the root control channel used for one-way ECU candidate route promotion.
-    pub fn with_promotion_control(
+    /// Attach the root control channel used for guarded candidate route changes.
+    pub fn with_route_control(
         mut self,
         output_hold: StickyOutputHold,
-        requests: Receiver<CandidatePromotionRequest>,
+        requests: Receiver<CandidateRouteRequest>,
     ) -> Self {
         self.output_hold = Some(output_hold);
-        self.promotion_requests = Some(requests);
+        self.route_requests = Some(requests);
         self
     }
 
@@ -112,8 +112,8 @@ impl<P: VehiclePlatform> HostCycleExecutor for EcuProcessVehicleExecutor<P> {
 }
 
 impl<P: VehiclePlatform> EcuProcessVehicleExecutor<P> {
-    fn begin_cycle_promotion(&mut self) -> Option<(CandidatePromotionRequest, u64)> {
-        if let Some((request, hold_generation)) = self.pending_promotion.take() {
+    fn begin_cycle_route_change(&mut self) -> Option<(CandidateRouteRequest, u64)> {
+        if let Some((request, hold_generation)) = self.pending_route_change.take() {
             if Instant::now() >= request.deadline {
                 self.coordinator.cancel_candidate_quiesce(request.ecu);
                 let _ = request.completion.send(Err(
@@ -134,7 +134,7 @@ impl<P: VehiclePlatform> EcuProcessVehicleExecutor<P> {
             {
                 Ok(true) => Some((request, hold_generation)),
                 Ok(false) => {
-                    self.pending_promotion = Some((request, hold_generation));
+                    self.pending_route_change = Some((request, hold_generation));
                     None
                 }
                 Err(error) => {
@@ -144,7 +144,7 @@ impl<P: VehiclePlatform> EcuProcessVehicleExecutor<P> {
                 }
             };
         }
-        let request = match self.promotion_requests.as_ref()?.try_recv() {
+        let request = match self.route_requests.as_ref()?.try_recv() {
             Ok(request) => request,
             Err(TryRecvError::Empty | TryRecvError::Disconnected) => return None,
         };
@@ -167,24 +167,40 @@ impl<P: VehiclePlatform> EcuProcessVehicleExecutor<P> {
             return None;
         }
         let hold_generation = hold.zero_apply_generation();
-        match self.coordinator.begin_candidate_quiesce(request.ecu, hold) {
-            Ok(()) => {
-                self.pending_promotion = Some((request, hold_generation));
-                None
+        match request.operation {
+            CandidateRouteOperation::Promote => {
+                match self.coordinator.begin_candidate_quiesce(request.ecu, hold) {
+                    Ok(()) => {
+                        self.pending_route_change = Some((request, hold_generation));
+                        None
+                    }
+                    Err(error) => {
+                        let _ = request.completion.send(Err(error.to_string()));
+                        None
+                    }
+                }
             }
-            Err(error) => {
-                let _ = request.completion.send(Err(error.to_string()));
-                None
+            CandidateRouteOperation::ReturnToActive => {
+                match self
+                    .coordinator
+                    .return_candidate_route_to_active(request.ecu, hold)
+                {
+                    Ok(()) => Some((request, hold_generation)),
+                    Err(error) => {
+                        let _ = request.completion.send(Err(error.to_string()));
+                        None
+                    }
+                }
             }
         }
     }
 
-    fn finish_cycle_promotion(
+    fn finish_cycle_route_change(
         &self,
-        promotion: Option<(CandidatePromotionRequest, u64)>,
+        route_change: Option<(CandidateRouteRequest, u64)>,
         cycle_result: &Result<(), VehicleCycleError<P::Error>>,
     ) {
-        let Some((request, previous_generation)) = promotion else {
+        let Some((request, previous_generation)) = route_change else {
             return;
         };
         let result = match (cycle_result, self.output_hold.as_ref()) {
@@ -193,8 +209,8 @@ impl<P: VehiclePlatform> EcuProcessVehicleExecutor<P> {
             {
                 Ok(())
             }
-            (Ok(()), _) => Err("promotion cycle did not confirm a new zero-output apply".into()),
-            (Err(_), _) => Err("active ECU cycle failed during candidate promotion".into()),
+            (Ok(()), _) => Err("route change cycle did not confirm a new zero-output apply".into()),
+            (Err(_), _) => Err("ECU cycle failed during candidate route change".into()),
         };
         let _ = request.completion.send(result);
     }
@@ -225,7 +241,7 @@ impl<P: VehiclePlatform> EcuProcessVehicleExecutor<P> {
 
         // Delay the route change until sampling succeeds. The root control thread has already
         // requested the sticky hold and waited for a successful zero-output apply.
-        let promotion = self.begin_cycle_promotion();
+        let promotion = self.begin_cycle_route_change();
         let result = (|| {
             self.runtime.set_estop_request(inputs.estop);
             let coordinator = &mut self.coordinator;
@@ -259,14 +275,22 @@ impl<P: VehiclePlatform> EcuProcessVehicleExecutor<P> {
             }
             Ok(())
         })();
-        self.finish_cycle_promotion(promotion, &result);
+        self.finish_cycle_route_change(promotion, &result);
         result
     }
 }
 
-/// A root-authorized request waiting for the next host-cycle boundary.
-pub struct CandidatePromotionRequest {
+/// Candidate route operation requested by a root-owned control client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CandidateRouteOperation {
+    Promote,
+    ReturnToActive,
+}
+
+/// A root-authorized route operation waiting for the next host-cycle boundary.
+pub struct CandidateRouteRequest {
     pub ecu: VirtualEcuId,
+    pub operation: CandidateRouteOperation,
     pub deadline: Instant,
     pub completion: SyncSender<Result<(), String>>,
 }
@@ -278,7 +302,7 @@ pub enum EcuRoute {
     Candidate,
 }
 
-/// Why a candidate route could not be promoted.
+/// Why a guarded candidate route change could not be completed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromotionError {
     HoldNotConfirmed,
@@ -286,6 +310,8 @@ pub enum PromotionError {
     CandidateEndpointUnavailable,
     CandidateSocketChanged,
     AlreadyPromoted,
+    CandidateNotPromoted,
+    ActiveWorkerUnavailable,
     ShadowCoordinatorUnavailable,
     ShadowCoordinatorPanicked,
 }
@@ -302,6 +328,12 @@ impl fmt::Display for PromotionError {
                 formatter.write_str("candidate worker socket identity changed")
             }
             Self::AlreadyPromoted => formatter.write_str("candidate route is already promoted"),
+            Self::CandidateNotPromoted => {
+                formatter.write_str("candidate route is not currently promoted")
+            }
+            Self::ActiveWorkerUnavailable => {
+                formatter.write_str("active ECU worker endpoint is unavailable")
+            }
             Self::ShadowCoordinatorUnavailable => {
                 formatter.write_str("shadow coordinator is unavailable")
             }
@@ -993,8 +1025,6 @@ impl EcuProcessCoordinator {
             return Err(error);
         }
 
-        self.workers[index].socket_path = candidate_path;
-        self.workers[index].socket_identity = Some(identity);
         self.routes[index] = EcuRoute::Candidate;
         self.quiescing_candidate = None;
         if let Ok(mut statuses) = self.candidate_statuses.lock() {
@@ -1002,6 +1032,43 @@ impl EcuProcessCoordinator {
             statuses[index] = CandidateStatus::Promoted;
         }
         Ok(true)
+    }
+
+    /// Return a promoted ECU route to its original active worker at the current host-cycle
+    /// boundary. The sticky output hold must already be acknowledged, and the active endpoint is
+    /// revalidated before the route changes. The caller confirms a later zero-output cycle before
+    /// acknowledging the control request.
+    pub fn return_candidate_route_to_active(
+        &mut self,
+        ecu: VirtualEcuId,
+        hold: &StickyOutputHold,
+    ) -> Result<(), PromotionError> {
+        let index = ecu_index(ecu);
+        if !hold.is_held() || !hold.has_zero_apply_acknowledgement() {
+            return Err(PromotionError::HoldNotConfirmed);
+        }
+        if self.routes[index] != EcuRoute::Candidate {
+            return Err(PromotionError::CandidateNotPromoted);
+        }
+        let worker = &self.workers[index];
+        let identity = worker
+            .socket_identity
+            .as_ref()
+            .ok_or(PromotionError::ActiveWorkerUnavailable)?;
+        validate_private_directory(
+            &self.socket_directory,
+            self.owner,
+            &self.socket_directory_identity,
+        )
+        .map_err(|_| PromotionError::ActiveWorkerUnavailable)?;
+        validate_owned_socket(&worker.socket_path, self.owner, identity)
+            .map_err(|_| PromotionError::ActiveWorkerUnavailable)?;
+
+        self.routes[index] = EcuRoute::Active;
+        if let Ok(mut statuses) = self.candidate_statuses.lock() {
+            statuses[index] = CandidateStatus::Unavailable;
+        }
+        Ok(())
     }
 
     /// Return the last candidate response cycle validated per ECU.
@@ -1047,9 +1114,10 @@ impl EcuProcessCoordinator {
             }
             self.validate_coordinator_socket()?;
             self.check_worker_alive(index)?;
+            let worker_path = self.routed_worker_path(index)?;
             let sent = self.socket.send_to(
                 &request_buffers[index][..request_lengths[index]],
-                &self.workers[index].socket_path,
+                &worker_path,
             )?;
             if sent != request_lengths[index] {
                 return Err(Error::Io(io::Error::new(
@@ -1088,7 +1156,13 @@ impl EcuProcessCoordinator {
             let worker_index = self
                 .workers
                 .iter()
-                .position(|worker| worker.socket_path == peer_path)
+                .enumerate()
+                .find_map(|(index, _)| {
+                    self.routed_worker_path(index)
+                        .ok()
+                        .filter(|path| path == peer_path)
+                        .map(|_| index)
+                })
                 .ok_or(Error::UnknownPeer)?;
             self.check_worker_alive(worker_index)?;
             let response = decode_response(&response_buffer[..received])?;
@@ -1273,12 +1347,34 @@ impl EcuProcessCoordinator {
                 });
             }
         }
-        let identity = self.workers[index]
-            .socket_identity
-            .as_ref()
-            .ok_or(Error::InvalidWorkerSocket(self.workers[index].ecu))?;
-        validate_owned_socket(&self.workers[index].socket_path, self.owner, identity)
+        let path = self.routed_worker_path(index)?;
+        let identity = self.routed_worker_identity(index)?;
+        validate_owned_socket(&path, self.owner, &identity)
             .map_err(|_| Error::InvalidWorkerSocket(self.workers[index].ecu))
+    }
+
+    fn routed_worker_path(&self, index: usize) -> Result<PathBuf, Error> {
+        match self.routes[index] {
+            EcuRoute::Active => Ok(self.workers[index].socket_path.clone()),
+            EcuRoute::Candidate => self
+                .candidate_socket_directory
+                .as_ref()
+                .map(|directory| directory.join(CANDIDATE_SOCKET_NAMES[index]))
+                .ok_or(Error::InvalidWorkerSocket(self.workers[index].ecu)),
+        }
+    }
+
+    fn routed_worker_identity(&self, index: usize) -> Result<SocketIdentity, Error> {
+        match self.routes[index] {
+            EcuRoute::Active => self.workers[index]
+                .socket_identity
+                .ok_or(Error::InvalidWorkerSocket(self.workers[index].ecu)),
+            EcuRoute::Candidate => self
+                .candidate_ready_socket_identities
+                .lock()
+                .map_err(|_| Error::InvalidWorkerSocket(self.workers[index].ecu))?[index]
+                .ok_or(Error::InvalidWorkerSocket(self.workers[index].ecu)),
+        }
     }
 }
 

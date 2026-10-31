@@ -16,9 +16,9 @@ use sdv_core::rte::DriverInput;
 use sdv_core::runtime::{ExternalEcuCycleError, VehicleActuation, VehicleRuntime, VirtualEcuId};
 use sdv_core::runtime_host::{self, RunError, SystemClock};
 use sdv_picarx::ecu_process_coordinator::{
-    CandidateFailure, CandidatePromotionRequest, CandidateStatus, EcuProcessCoordinator,
-    EcuProcessVehicleExecutor, EcuRoute, Error as CoordinatorError, PromotionError,
-    VehicleCycleError,
+    CandidateFailure, CandidateRouteOperation, CandidateRouteRequest, CandidateStatus,
+    EcuProcessCoordinator, EcuProcessVehicleExecutor, EcuRoute, Error as CoordinatorError,
+    PromotionError, VehicleCycleError,
 };
 use sdv_picarx::output_hold::StickyOutputHold;
 use sdv_picarx::virtual_ecu_worker::{VirtualEcuWorker, WORKER_DATAGRAM_MAX_SIZE};
@@ -768,6 +768,65 @@ fn promotion_requires_a_ready_candidate_and_confirmed_zero_output_hold() {
 }
 
 #[test]
+fn route_reversion_rejects_a_replaced_active_worker_socket() {
+    let root = TempDirectory::new();
+    let candidate_directory = root.path().join("candidates");
+    fs::create_dir(&candidate_directory).unwrap();
+    fs::set_permissions(&candidate_directory, fs::Permissions::from_mode(0o700)).unwrap();
+    let candidate_path = candidate_directory.join("engine.sock");
+    let responder = CandidateResponder::start(&candidate_path, false);
+    let (mut coordinator, mut active, active_directory) =
+        start_external_coordinator(&root, &candidate_directory);
+    run_candidate_until_ready(&mut coordinator);
+
+    let hold = confirmed_output_hold();
+    coordinator
+        .begin_candidate_quiesce(VirtualEcuId::Engine, &hold)
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match coordinator
+            .finish_candidate_promotion(VirtualEcuId::Engine, &hold)
+            .unwrap()
+        {
+            true => break,
+            false => {
+                assert!(
+                    Instant::now() < deadline,
+                    "candidate quiesce did not finish"
+                );
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+    }
+    assert_eq!(
+        coordinator.route_for_ecu(VirtualEcuId::Engine),
+        EcuRoute::Candidate
+    );
+
+    // Keep the active worker alive while replacing its path, preventing inode reuse and matching
+    // the live-service case. Reversion must reject the new endpoint and keep the candidate route.
+    let active_path = active_directory.join("engine.sock");
+    fs::remove_file(&active_path).unwrap();
+    let replacement = UnixDatagram::bind(&active_path).unwrap();
+    fs::set_permissions(&active_path, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(
+        coordinator.return_candidate_route_to_active(VirtualEcuId::Engine, &hold),
+        Err(PromotionError::ActiveWorkerUnavailable)
+    );
+    assert_eq!(
+        coordinator.route_for_ecu(VirtualEcuId::Engine),
+        EcuRoute::Candidate
+    );
+    assert!(hold.is_held());
+
+    drop(replacement);
+    drop(coordinator);
+    drop(responder);
+    active.stop();
+}
+
+#[test]
 fn expired_promotion_request_is_canceled_and_never_switches_route_later() {
     let root = TempDirectory::new();
     let candidate_directory = root.path().join("candidates");
@@ -784,8 +843,9 @@ fn expired_promotion_request_is_canceled_and_never_switches_route_later() {
     let (request_tx, request_rx) = std::sync::mpsc::sync_channel(1);
     let (completion, response) = std::sync::mpsc::sync_channel(1);
     request_tx
-        .send(CandidatePromotionRequest {
+        .send(CandidateRouteRequest {
             ecu: VirtualEcuId::Engine,
+            operation: CandidateRouteOperation::Promote,
             deadline: Instant::now() - Duration::from_millis(1),
             completion,
         })
@@ -796,7 +856,7 @@ fn expired_promotion_request_is_canceled_and_never_switches_route_later() {
     };
     let mut executor =
         EcuProcessVehicleExecutor::new(VehicleRuntime::default(), platform, coordinator)
-            .with_promotion_control(hold.clone(), request_rx);
+            .with_route_control(hold.clone(), request_rx);
 
     executor.host_cycle(Duration::from_millis(100)).unwrap();
     assert!(response
@@ -887,15 +947,16 @@ fn promotion_switches_only_the_requested_ecu_and_acks_a_held_candidate_cycle() {
     let (request_tx, request_rx) = std::sync::mpsc::sync_channel(1);
     let (completion, response) = std::sync::mpsc::sync_channel(1);
     request_tx
-        .send(CandidatePromotionRequest {
+        .send(CandidateRouteRequest {
             ecu: VirtualEcuId::Engine,
+            operation: CandidateRouteOperation::Promote,
             deadline: Instant::now() + Duration::from_secs(5),
             completion,
         })
         .unwrap();
     let mut executor =
         EcuProcessVehicleExecutor::new(VehicleRuntime::default(), platform, coordinator)
-            .with_promotion_control(hold.clone(), request_rx);
+            .with_route_control(hold.clone(), request_rx);
 
     assert_eq!(
         executor.route_for_ecu(VirtualEcuId::Engine),
@@ -941,8 +1002,47 @@ fn promotion_switches_only_the_requested_ecu_and_acks_a_held_candidate_cycle() {
         executor.host_cycle(Duration::from_millis(100)).unwrap();
     }
 
-    drop(executor);
+    let generation_before_reversion = hold.zero_apply_generation();
+    let (completion, response) = std::sync::mpsc::sync_channel(1);
+    request_tx
+        .send(CandidateRouteRequest {
+            ecu: VirtualEcuId::Engine,
+            operation: CandidateRouteOperation::ReturnToActive,
+            deadline: Instant::now() + Duration::from_secs(5),
+            completion,
+        })
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        executor.host_cycle(Duration::from_millis(100)).unwrap();
+        if let Ok(result) = response.try_recv() {
+            result.unwrap_or_else(|error| panic!("route reversion was rejected: {error}"));
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "route reversion was not acknowledged"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        executor.route_for_ecu(VirtualEcuId::Engine),
+        EcuRoute::Active
+    );
+    assert!(hold.is_held());
+    assert!(hold.zero_apply_generation() > generation_before_reversion);
+    assert_eq!(
+        executor.platform().inner.applied.last().unwrap().command,
+        Default::default()
+    );
+
+    // The active ECU remains usable after the trial candidate exits.
     candidate.stop();
+    for _ in 0..3 {
+        executor.host_cycle(Duration::from_millis(100)).unwrap();
+    }
+
+    drop(executor);
     active.stop();
 }
 
@@ -966,15 +1066,16 @@ fn candidate_active_cycle_failure_stops_vehicle_and_keeps_output_hold_latched() 
     let (request_tx, request_rx) = std::sync::mpsc::sync_channel(1);
     let (completion, response) = std::sync::mpsc::sync_channel(1);
     request_tx
-        .send(CandidatePromotionRequest {
+        .send(CandidateRouteRequest {
             ecu: VirtualEcuId::Engine,
+            operation: CandidateRouteOperation::Promote,
             deadline: Instant::now() + Duration::from_secs(5),
             completion,
         })
         .unwrap();
     let mut executor =
         EcuProcessVehicleExecutor::new(VehicleRuntime::default(), platform, coordinator)
-            .with_promotion_control(hold.clone(), request_rx);
+            .with_route_control(hold.clone(), request_rx);
 
     let deadline = Instant::now() + Duration::from_secs(3);
     let mut failed = false;
