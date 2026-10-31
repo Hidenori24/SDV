@@ -232,7 +232,17 @@ route at a cycle boundary after revalidating the candidate socket inode. The req
 after the candidate replies for that promotion cycle and zero output is successfully applied. The
 hold remains latched after success. The current host process supports one promotion because it
 stops the shadow coordinator while switching a route. Route selection is process-local and returns
-to the active worker after a host restart. To remove a promoted candidate from the route, use the
+to the active worker after a host restart. To confirm that the promoted route keeps completing
+held cycles over a stability interval, run:
+
+```sh
+sudo sdv-fota verify-candidate --control-socket /run/sdv-fota/control.sock --target engine --stability-ms 2000
+```
+
+Each check requires the candidate to answer at a host-cycle boundary and the host to apply zero
+output. The command keeps the hold latched and fails if the candidate route or vehicle runtime is
+not healthy. This is protocol and host-health evidence only; it does not commit or roll back trial
+metadata or verify application behavior. To remove a promoted candidate from the route, use the
 root-only reversion command:
 
 ```sh

@@ -42,6 +42,7 @@ const OUTPUT_HOLD_ACK: &[u8] = b"SDVHELD1\n";
 const OUTPUT_HOLD_NOT_READY: &[u8] = b"SDVNOTREADY\n";
 const OUTPUT_PROMOTION_REQUEST_PREFIX: &[u8] = b"SDVPROMOTE1 ";
 const OUTPUT_REVERSION_REQUEST_PREFIX: &[u8] = b"SDVREVERT1 ";
+const OUTPUT_VERIFICATION_REQUEST_PREFIX: &[u8] = b"SDVVERIFY1 ";
 const OUTPUT_HOLD_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const OUTPUT_HOLD_RESPONSE_TIMEOUT: Duration = Duration::from_secs(7);
 const HOLD_SOCKET_ENV: &str = "SDV_FOTA_HOLD_SOCKET";
@@ -1003,6 +1004,16 @@ pub fn request_ecu_candidate_promotion(path: &Path, target: Ecu) -> Result<(), E
 /// The vehicle confirms a held zero-output cycle on the active route before acknowledging.
 pub fn request_ecu_candidate_reversion(path: &Path, target: Ecu) -> Result<(), Error> {
     request_ecu_candidate_route_change(path, target, OUTPUT_REVERSION_REQUEST_PREFIX, "SDVREVERTED")
+}
+
+/// Confirm one successful cycle on a promoted ECU candidate while keeping zero output held.
+pub fn request_ecu_candidate_verification(path: &Path, target: Ecu) -> Result<(), Error> {
+    request_ecu_candidate_route_change(
+        path,
+        target,
+        OUTPUT_VERIFICATION_REQUEST_PREFIX,
+        "SDVVERIFIED",
+    )
 }
 
 fn request_ecu_candidate_route_change(

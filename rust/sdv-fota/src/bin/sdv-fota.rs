@@ -1,6 +1,7 @@
 use sdv_fota::linux::{
-    request_ecu_candidate_promotion, request_ecu_candidate_reversion, state_root_for_target,
-    FileBootControl, FilePackageSource, FileSlotStorage, HttpsPackageSource,
+    request_ecu_candidate_promotion, request_ecu_candidate_reversion,
+    request_ecu_candidate_verification, state_root_for_target, FileBootControl, FilePackageSource,
+    FileSlotStorage, HttpsPackageSource,
 };
 use sdv_fota::{
     BootControl, Ecu, FotaInstaller, PackageSource, Slot, ValidationContext, MAX_MANIFEST_BYTES,
@@ -8,8 +9,11 @@ use sdv_fota::{
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
+use std::thread;
+use std::time::{Duration, Instant};
 
 const DEFAULT_TRIAL_BOOTS: u32 = 3;
+const CANDIDATE_VERIFY_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() {
     if let Err(error) = run(std::env::args_os().skip(1).collect()) {
@@ -30,6 +34,7 @@ fn run(args: Vec<OsString>) -> Result<(), String> {
         Some("rollback-trial") => rollback_trial(command_args),
         Some("promote-candidate") => promote_candidate(command_args),
         Some("revert-candidate") => revert_candidate(command_args),
+        Some("verify-candidate") => verify_candidate(command_args),
         Some("status") => status(command_args),
         Some("verify-images") => verify_images(command_args),
         _ => Err(usage()),
@@ -178,6 +183,45 @@ fn revert_candidate(args: &[OsString]) -> Result<(), String> {
         .map_err(|error| format!("candidate route reversion failed: {error:?}"))?;
     println!(
         "candidate route for {} returned to its active worker; the vehicle output hold remains latched",
+        target_name(target)
+    );
+    Ok(())
+}
+
+fn verify_candidate(args: &[OsString]) -> Result<(), String> {
+    let mut options =
+        parse_named_options(args, &["--control-socket", "--target", "--stability-ms"])?;
+    let control_socket = PathBuf::from(required_option(&mut options, "--control-socket")?);
+    let target = parse_target(&required_option(&mut options, "--target")?)?;
+    if target == Ecu::Vehicle {
+        return Err("candidate verification requires an ECU target".into());
+    }
+    let stability = required_option(&mut options, "--stability-ms")?;
+    let stability_ms = stability
+        .to_str()
+        .ok_or_else(|| "candidate stability window must be a positive integer".to_owned())?
+        .parse::<u64>()
+        .map_err(|_| "candidate stability window must be a positive integer".to_owned())?;
+    if stability_ms == 0 {
+        return Err("candidate stability window must be greater than zero".into());
+    }
+    request_ecu_candidate_verification(&control_socket, target)
+        .map_err(|error| format!("candidate verification failed: {error:?}"))?;
+    let window = Duration::from_millis(stability_ms);
+    let deadline = Instant::now()
+        .checked_add(window)
+        .ok_or_else(|| "candidate stability window is too large".to_owned())?;
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        thread::sleep(CANDIDATE_VERIFY_POLL_INTERVAL.min(deadline - now));
+        request_ecu_candidate_verification(&control_socket, target)
+            .map_err(|error| format!("candidate verification failed: {error:?}"))?;
+    }
+    println!(
+        "candidate route for {} passed its held-cycle verification window; output remains held",
         target_name(target)
     );
     Ok(())
@@ -484,7 +528,7 @@ fn trial_outcome_name(outcome: sdv_fota::TrialOutcome) -> &'static str {
 }
 
 fn usage() -> String {
-    "usage:\n  sdv-fota init --state-root <dir> [--target <vehicle|engine|brake|steering>] --active-slot <a|b> --active-version <version> --security-version <n>\n  sdv-fota record-active-integrity --state-root <dir> [--target <vehicle|engine|brake|steering>] --slot <a|b>\n  sdv-fota rollback-trial --state-root <dir> [--target <vehicle|engine|brake|steering>]\n  sdv-fota promote-candidate --control-socket <path> --target <engine|brake|steering>\n  sdv-fota revert-candidate --control-socket <path> --target <engine|brake|steering>\n  sdv-fota install --state-root <dir> --package <file> --target <vehicle|engine|brake|steering> --config-schema <n> --signal-if-version <n> [--trial-boots <n>]\n  sdv-fota install-url --state-root <dir> --url <https-url> --target <vehicle|engine|brake|steering> --config-schema <n> --signal-if-version <n> [--trial-boots <n>] [--client-cert <file> --client-key <file>]\n  sdv-fota status --state-root <dir> [--target <vehicle|engine|brake|steering>]\n  sdv-fota verify-images --state-root <dir> [--target <vehicle|engine|brake|steering>]".into()
+    "usage:\n  sdv-fota init --state-root <dir> [--target <vehicle|engine|brake|steering>] --active-slot <a|b> --active-version <version> --security-version <n>\n  sdv-fota record-active-integrity --state-root <dir> [--target <vehicle|engine|brake|steering>] --slot <a|b>\n  sdv-fota rollback-trial --state-root <dir> [--target <vehicle|engine|brake|steering>]\n  sdv-fota promote-candidate --control-socket <path> --target <engine|brake|steering>\n  sdv-fota revert-candidate --control-socket <path> --target <engine|brake|steering>\n  sdv-fota verify-candidate --control-socket <path> --target <engine|brake|steering> --stability-ms <n>\n  sdv-fota install --state-root <dir> --package <file> --target <vehicle|engine|brake|steering> --config-schema <n> --signal-if-version <n> [--trial-boots <n>]\n  sdv-fota install-url --state-root <dir> --url <https-url> --target <vehicle|engine|brake|steering> --config-schema <n> --signal-if-version <n> [--trial-boots <n>] [--client-cert <file> --client-key <file>]\n  sdv-fota status --state-root <dir> [--target <vehicle|engine|brake|steering>]\n  sdv-fota verify-images --state-root <dir> [--target <vehicle|engine|brake|steering>]".into()
 }
 
 #[cfg(test)]
@@ -573,5 +617,39 @@ mod tests {
         .unwrap_err();
         assert_eq!(error, "candidate route reversion requires an ECU target");
         assert!(usage().contains("sdv-fota revert-candidate"));
+    }
+
+    #[test]
+    fn candidate_route_verification_requires_an_ecu_and_positive_window() {
+        let vehicle_error = run(vec![
+            "verify-candidate".into(),
+            "--control-socket".into(),
+            "/run/sdv-fota/control.sock".into(),
+            "--target".into(),
+            "vehicle".into(),
+            "--stability-ms".into(),
+            "2000".into(),
+        ])
+        .unwrap_err();
+        assert_eq!(
+            vehicle_error,
+            "candidate verification requires an ECU target"
+        );
+
+        let zero_window_error = run(vec![
+            "verify-candidate".into(),
+            "--control-socket".into(),
+            "/run/sdv-fota/control.sock".into(),
+            "--target".into(),
+            "engine".into(),
+            "--stability-ms".into(),
+            "0".into(),
+        ])
+        .unwrap_err();
+        assert_eq!(
+            zero_window_error,
+            "candidate stability window must be greater than zero"
+        );
+        assert!(usage().contains("sdv-fota verify-candidate"));
     }
 }

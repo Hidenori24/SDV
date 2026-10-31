@@ -192,6 +192,16 @@ impl<P: VehiclePlatform> EcuProcessVehicleExecutor<P> {
                     }
                 }
             }
+            CandidateRouteOperation::VerifyCandidate => {
+                if self.coordinator.route_for_ecu(request.ecu) == EcuRoute::Candidate {
+                    Some((request, hold_generation))
+                } else {
+                    let _ = request
+                        .completion
+                        .send(Err("candidate route is not currently active".into()));
+                    None
+                }
+            }
         }
     }
 
@@ -285,6 +295,7 @@ impl<P: VehiclePlatform> EcuProcessVehicleExecutor<P> {
 pub enum CandidateRouteOperation {
     Promote,
     ReturnToActive,
+    VerifyCandidate,
 }
 
 /// A root-authorized route operation waiting for the next host-cycle boundary.
