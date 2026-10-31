@@ -170,10 +170,15 @@ independently of active worker replies. After validating active replies, the hos
 request snapshot through a capacity-one `try_send` queue. Candidate filesystem checks, datagram
 I/O, timeout accounting, and journal writes run on a separate thread. A full queue or expired
 snapshot skips only that shadow cycle, and candidate coordinator setup errors do not prevent active
-worker startup. A matching response is recorded as `Ready` in the host journal, but its command and
-alive frame are discarded; the active route remains in use. Candidate timeout, malformed or
-duplicate response, and socket changes mark only that candidate failed. They do not fail or delay
-the active vehicle cycle. This is not output-route approval or a stable health verdict. Before the
+worker startup. Status begins at `WarmingUp (0/100)` and counts matching shadow responses for
+consecutive host-cycle sequence numbers with increasing wire cycle IDs; only the 100th consecutive
+response changes it to `Ready`. A host-cycle gap, full or expired snapshot, timeout,
+protocol/ECU/cycle mismatch, or socket inode failure resets the window. Queue-full invalidation is
+visible immediately, before the shadow thread processes the next snapshot. Candidate command and
+alive frames are discarded; the active route remains in use.
+Candidate faults do not fail or delay the active vehicle cycle. `Ready` is protocol-level shadow
+stability only, not application-semantic or vehicle health, output-route approval, or promotion.
+Before the
 candidate executable starts, its root launcher asks the host to latch the output hold and waits for
 an acknowledgement after a successful zero-output apply. The hold keeps applying zero drive and
 centered steering on every cycle. Candidate failures do not release the hold; no release API exists

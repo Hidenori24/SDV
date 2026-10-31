@@ -146,6 +146,7 @@ const EXTERNAL_WORKER_STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 const WORKER_STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(1);
 const MAX_CANDIDATE_DATAGRAMS_PER_CYCLE: usize = 3;
 const CANDIDATE_RESPONSE_TIMEOUT_CYCLES: u8 = 2;
+const CANDIDATE_READY_CONSECUTIVE_CYCLES: u16 = 100;
 const NANOS_PER_SECOND: u64 = 1_000_000_000;
 const COORDINATOR_SOCKET_NAME: &str = "coordinator.sock";
 const WORKER_SOCKET_NAMES: [&str; 3] = ["engine.sock", "brake.sock", "steering.sock"];
@@ -191,16 +192,96 @@ pub enum CandidateFailure {
     Timeout,
 }
 
-/// Shadow-candidate state for one ECU. `Ready` means the response for the most recently sent
-/// candidate request matched; a new outstanding request changes the state back to `Pending`.
-/// Candidate output is always discarded and is never actuator input.
+/// Shadow-candidate state for one ECU. `Ready` means 100 consecutive host-cycle requests received
+/// matching responses. Candidate output is always discarded and is never actuator input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CandidateStatus {
     Disabled,
     Unavailable,
-    Pending,
+    WarmingUp { consecutive_responses: u16 },
     Ready,
     Failed(CandidateFailure),
+}
+
+impl CandidateStatus {
+    fn after_window_reset(self) -> Self {
+        match self {
+            Self::Disabled | Self::Unavailable | Self::Failed(_) => self,
+            Self::WarmingUp { .. } | Self::Ready => Self::WarmingUp {
+                consecutive_responses: 0,
+            },
+        }
+    }
+}
+
+fn status_after_queue_drop(
+    statuses: [CandidateStatus; 3],
+    queue_drop_generation: usize,
+    applied_queue_drop_generation: usize,
+) -> [CandidateStatus; 3] {
+    if queue_drop_generation != applied_queue_drop_generation {
+        statuses.map(CandidateStatus::after_window_reset)
+    } else {
+        statuses
+    }
+}
+
+fn record_candidate_queue_drop(dropped_cycles: &AtomicUsize, drop_generation: &AtomicUsize) {
+    let _ = dropped_cycles.try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+        Some(count.saturating_add(1))
+    });
+    drop_generation.fetch_add(1, Ordering::AcqRel);
+}
+
+#[derive(Default)]
+struct CandidateStability {
+    consecutive_responses: u16,
+    last_success_host_cycle_sequence: Option<u64>,
+    last_success_cycle_id: Option<u64>,
+}
+
+impl CandidateStability {
+    fn reset_window(&mut self) {
+        self.consecutive_responses = 0;
+        self.last_success_host_cycle_sequence = None;
+    }
+
+    fn status(&self) -> CandidateStatus {
+        if self.consecutive_responses >= CANDIDATE_READY_CONSECUTIVE_CYCLES {
+            CandidateStatus::Ready
+        } else {
+            CandidateStatus::WarmingUp {
+                consecutive_responses: self.consecutive_responses,
+            }
+        }
+    }
+
+    fn observe_success(&mut self, host_cycle_sequence: u64, cycle_id: u64) -> CandidateStatus {
+        let follows_host_cycle = self
+            .last_success_host_cycle_sequence
+            .map_or(true, |previous| {
+                previous.checked_add(1) == Some(host_cycle_sequence)
+            });
+        let has_increasing_cycle_id = self
+            .last_success_cycle_id
+            .map_or(true, |previous| cycle_id > previous);
+        if !follows_host_cycle || !has_increasing_cycle_id {
+            self.reset_window();
+        }
+        self.consecutive_responses = self
+            .consecutive_responses
+            .saturating_add(1)
+            .min(CANDIDATE_READY_CONSECUTIVE_CYCLES);
+        self.last_success_host_cycle_sequence = Some(host_cycle_sequence);
+        self.last_success_cycle_id = Some(cycle_id);
+        if self.consecutive_responses == CANDIDATE_READY_CONSECUTIVE_CYCLES {
+            CandidateStatus::Ready
+        } else {
+            CandidateStatus::WarmingUp {
+                consecutive_responses: self.consecutive_responses,
+            }
+        }
+    }
 }
 
 impl fmt::Display for Error {
@@ -305,6 +386,7 @@ struct CandidateWorkerProcess {
 }
 
 struct CandidateCycleSnapshot {
+    host_cycle_sequence: u64,
     cycle_id: u64,
     deadline: Instant,
     request_buffers: [[u8; WORKER_DATAGRAM_MAX_SIZE]; 3],
@@ -321,12 +403,20 @@ struct CandidateShadowWorker {
     owner: u32,
     workers: Vec<CandidateWorkerProcess>,
     statuses: [CandidateStatus; 3],
+    stability: [CandidateStability; 3],
     shared_statuses: Arc<Mutex<[CandidateStatus; 3]>>,
     shared_last_response_cycle: Arc<Mutex<[Option<u64>; 3]>>,
+    queue_drop_generation: Arc<AtomicUsize>,
+    applied_queue_drop_generation: Arc<AtomicUsize>,
     pending_cycle: [Option<u64>; 3],
+    pending_host_cycle_sequence: [Option<u64>; 3],
     pending_age: [u8; 3],
+    last_request_host_cycle_sequence: [Option<u64>; 3],
+    discard_responses_through_cycle: [Option<u64>; 3],
+    last_processed_host_cycle_sequence: Option<u64>,
+    processed_queue_drop_generation: usize,
     last_response_cycle: [Option<u64>; 3],
-    last_logged_ready_identity: [Option<SocketIdentity>; 3],
+    last_logged_warming_progress: [u16; 3],
     dropped_cycles: Arc<AtomicUsize>,
 }
 
@@ -341,11 +431,14 @@ pub struct EcuProcessCoordinator {
     workers: Vec<WorkerProcess>,
     candidate_sender: Option<SyncSender<CandidateCycleSnapshot>>,
     candidate_dropped_cycles: Option<Arc<AtomicUsize>>,
+    candidate_queue_drop_generation: Arc<AtomicUsize>,
+    candidate_applied_queue_drop_generation: Arc<AtomicUsize>,
     candidate_statuses: Arc<Mutex<[CandidateStatus; 3]>>,
     candidate_last_response_cycles: Arc<Mutex<[Option<u64>; 3]>>,
     candidate_thread: Option<JoinHandle<()>>,
     owns_workers: bool,
     last_cycle_id: Option<u64>,
+    next_host_cycle_sequence: u64,
 }
 
 impl EcuProcessCoordinator {
@@ -460,6 +553,8 @@ impl EcuProcessCoordinator {
                 owner,
                 Arc::clone(&coordinator.candidate_statuses),
                 Arc::clone(&coordinator.candidate_last_response_cycles),
+                Arc::clone(&coordinator.candidate_queue_drop_generation),
+                Arc::clone(&coordinator.candidate_applied_queue_drop_generation),
             ) {
                 Ok((sender, dropped_cycles, worker)) => {
                     coordinator.candidate_sender = Some(sender);
@@ -519,11 +614,14 @@ impl EcuProcessCoordinator {
             workers: Vec::with_capacity(ECU_IDS.len()),
             candidate_sender: None,
             candidate_dropped_cycles: None,
+            candidate_queue_drop_generation: Arc::new(AtomicUsize::new(0)),
+            candidate_applied_queue_drop_generation: Arc::new(AtomicUsize::new(0)),
             candidate_statuses: Arc::new(Mutex::new([CandidateStatus::Disabled; 3])),
             candidate_last_response_cycles: Arc::new(Mutex::new([None; 3])),
             candidate_thread: None,
             owns_workers,
             last_cycle_id: None,
+            next_host_cycle_sequence: 0,
         })
     }
 
@@ -549,10 +647,20 @@ impl EcuProcessCoordinator {
         {
             return [CandidateStatus::Failed(CandidateFailure::Protocol); 3];
         }
-        self.candidate_statuses
-            .lock()
-            .map(|statuses| *statuses)
-            .unwrap_or([CandidateStatus::Failed(CandidateFailure::Protocol); 3])
+        let (statuses, applied_queue_drop_generation) = match self.candidate_statuses.lock() {
+            Ok(statuses) => (
+                *statuses,
+                self.candidate_applied_queue_drop_generation
+                    .load(Ordering::Acquire),
+            ),
+            Err(_) => return [CandidateStatus::Failed(CandidateFailure::Protocol); 3],
+        };
+        let queue_drop_generation = self.candidate_queue_drop_generation.load(Ordering::Acquire);
+        status_after_queue_drop(
+            statuses,
+            queue_drop_generation,
+            applied_queue_drop_generation,
+        )
     }
 
     /// Return the last candidate response cycle validated per ECU.
@@ -574,6 +682,11 @@ impl EcuProcessCoordinator {
         inputs: [&[Frame]; 3],
         deadline: Instant,
     ) -> Result<[EcuTaskOutput; 3], Error> {
+        let host_cycle_sequence = self.next_host_cycle_sequence;
+        self.next_host_cycle_sequence = self
+            .next_host_cycle_sequence
+            .checked_add(1)
+            .ok_or(Error::CycleIdExhausted)?;
         let mut request_buffers = [[0; WORKER_DATAGRAM_MAX_SIZE]; 3];
         let mut request_lengths = [0; 3];
         for index in 0..ECU_IDS.len() {
@@ -661,12 +774,19 @@ impl EcuProcessCoordinator {
             let missing_index = outputs.iter().position(Option::is_none).unwrap_or(0);
             return Err(Error::MissingResponse(ECU_IDS[missing_index]));
         };
-        self.queue_candidate_cycle(cycle_id, deadline, request_buffers, request_lengths);
+        self.queue_candidate_cycle(
+            host_cycle_sequence,
+            cycle_id,
+            deadline,
+            request_buffers,
+            request_lengths,
+        );
         Ok([engine, brake, steering])
     }
 
     fn queue_candidate_cycle(
         &self,
+        host_cycle_sequence: u64,
         cycle_id: u64,
         deadline: Instant,
         request_buffers: [[u8; WORKER_DATAGRAM_MAX_SIZE]; 3],
@@ -679,15 +799,14 @@ impl EcuProcessCoordinator {
             return;
         };
         let snapshot = CandidateCycleSnapshot {
+            host_cycle_sequence,
             cycle_id,
             deadline,
             request_buffers,
             request_lengths,
         };
         if matches!(sender.try_send(snapshot), Err(TrySendError::Full(_))) {
-            let _ = dropped_cycles.try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
-                Some(count.saturating_add(1))
-            });
+            record_candidate_queue_drop(dropped_cycles, &self.candidate_queue_drop_generation);
         }
     }
 
@@ -849,6 +968,8 @@ fn start_candidate_shadow_worker(
     owner: u32,
     shared_statuses: Arc<Mutex<[CandidateStatus; 3]>>,
     shared_last_response_cycle: Arc<Mutex<[Option<u64>; 3]>>,
+    queue_drop_generation: Arc<AtomicUsize>,
+    applied_queue_drop_generation: Arc<AtomicUsize>,
 ) -> Result<
     (
         SyncSender<CandidateCycleSnapshot>,
@@ -893,12 +1014,20 @@ fn start_candidate_shadow_worker(
             })
             .collect(),
         statuses: [CandidateStatus::Unavailable; 3],
+        stability: std::array::from_fn(|_| CandidateStability::default()),
         shared_statuses: Arc::clone(&shared_statuses),
         shared_last_response_cycle: Arc::clone(&shared_last_response_cycle),
+        processed_queue_drop_generation: queue_drop_generation.load(Ordering::Acquire),
+        queue_drop_generation,
+        applied_queue_drop_generation,
         pending_cycle: [None; 3],
+        pending_host_cycle_sequence: [None; 3],
         pending_age: [0; 3],
+        last_request_host_cycle_sequence: [None; 3],
+        discard_responses_through_cycle: [None; 3],
+        last_processed_host_cycle_sequence: None,
         last_response_cycle: [None; 3],
-        last_logged_ready_identity: [None; 3],
+        last_logged_warming_progress: [0; 3],
         dropped_cycles: Arc::clone(&dropped_cycles),
     };
     if let Ok(mut statuses) = shared_statuses.lock() {
@@ -927,22 +1056,54 @@ impl CandidateShadowWorker {
 
     fn process_snapshot(&mut self, snapshot: CandidateCycleSnapshot) {
         let previous_statuses = self.statuses;
-        let skipped_cycles = self
-            .dropped_cycles
-            .swap(0, Ordering::Relaxed)
-            .min(u8::MAX as usize) as u8;
-        // Expire pending work before considering queued responses. A delayed reply after dropped
-        // active snapshots must not reset its age and masquerade as current candidate evidence.
-        self.advance_candidate_timeouts(skipped_cycles);
-        self.drain_candidate_responses();
-        if Instant::now() < snapshot.deadline {
-            self.send_candidate_requests(&snapshot);
+        let dropped_cycles = self.dropped_cycles.swap(0, Ordering::Relaxed) != 0;
+        let queue_drop_generation = self.queue_drop_generation.load(Ordering::Acquire);
+        let consecutive_snapshot = self
+            .last_processed_host_cycle_sequence
+            .map_or(true, |previous| {
+                previous.checked_add(1) == Some(snapshot.host_cycle_sequence)
+            });
+        let pending_cycle_gap = self.pending_host_cycle_sequence.iter().any(|pending| {
+            pending.is_some_and(|pending| {
+                pending
+                    .checked_add(1)
+                    .is_some_and(|next| snapshot.host_cycle_sequence > next)
+            })
+        });
+        let expired = Instant::now() >= snapshot.deadline;
+        let reset_window = dropped_cycles
+            || queue_drop_generation != self.processed_queue_drop_generation
+            || !consecutive_snapshot
+            || pending_cycle_gap
+            || expired;
+        if reset_window {
+            self.reset_all_candidate_windows();
+            self.processed_queue_drop_generation = queue_drop_generation;
         }
-        // Count this active cycle whether the snapshot was fresh or too late to shadow.
-        self.advance_candidate_timeouts(1);
+        self.last_processed_host_cycle_sequence = Some(snapshot.host_cycle_sequence);
+        self.drain_candidate_responses();
+        if !expired && Instant::now() < snapshot.deadline {
+            self.send_candidate_requests(&snapshot);
+            self.advance_candidate_timeouts();
+        }
+        if Instant::now() >= snapshot.deadline {
+            self.reset_all_candidate_windows();
+        }
+        // A queue-full can race response processing. Reset again before publishing so a response
+        // processed from the old window can never remain visible after the drop notification.
+        let final_queue_drop_generation = self.queue_drop_generation.load(Ordering::Acquire);
+        if final_queue_drop_generation != self.processed_queue_drop_generation {
+            self.reset_all_candidate_windows();
+            self.processed_queue_drop_generation = final_queue_drop_generation;
+        }
         self.log_candidate_status_changes(previous_statuses);
         if let Ok(mut statuses) = self.shared_statuses.lock() {
             *statuses = self.statuses;
+            // Publish the status snapshot and its applied queue-drop generation together. Readers
+            // take this mutex before loading the generation, so they cannot pair an old Ready
+            // snapshot with a newly applied generation and miss the immediate invalidation.
+            self.applied_queue_drop_generation
+                .store(self.processed_queue_drop_generation, Ordering::Release);
         }
         if let Ok(mut cycles) = self.shared_last_response_cycle.lock() {
             *cycles = self.last_response_cycle;
@@ -965,22 +1126,26 @@ impl CandidateShadowWorker {
         for index in 0..self.workers.len() {
             if self.pending_cycle[index].is_some() {
                 if matches!(self.statuses[index], CandidateStatus::Failed(_)) {
-                    self.pending_cycle[index] = None;
+                    self.reset_candidate_window(index);
                 } else {
-                    self.statuses[index] = CandidateStatus::Pending;
                     continue;
                 }
             }
-            let worker = &mut self.workers[index];
-            let metadata = match fs::symlink_metadata(&worker.socket_path) {
+            if self.last_request_host_cycle_sequence[index].is_some_and(|previous| {
+                previous.checked_add(1) != Some(snapshot.host_cycle_sequence)
+            }) {
+                self.reset_candidate_window(index);
+            }
+            let metadata = match fs::symlink_metadata(&self.workers[index].socket_path) {
                 Ok(metadata) => metadata,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    worker.socket_identity = None;
+                    self.reset_candidate_window(index);
+                    self.workers[index].socket_identity = None;
                     self.statuses[index] = CandidateStatus::Unavailable;
                     continue;
                 }
                 Err(_) => {
-                    self.statuses[index] = CandidateStatus::Failed(CandidateFailure::UnsafeSocket);
+                    self.fail_candidate(index, CandidateFailure::UnsafeSocket);
                     continue;
                 }
             };
@@ -988,16 +1153,17 @@ impl CandidateShadowWorker {
                 || metadata.uid() != self.owner
                 || metadata.permissions().mode() & 0o777 != SOCKET_MODE
             {
-                worker.socket_identity = None;
-                self.statuses[index] = CandidateStatus::Failed(CandidateFailure::UnsafeSocket);
+                self.workers[index].socket_identity = None;
+                self.fail_candidate(index, CandidateFailure::UnsafeSocket);
                 continue;
             }
             let current_identity = SocketIdentity {
                 device: metadata.dev(),
                 inode: metadata.ino(),
             };
+            let previous_identity = self.workers[index].socket_identity;
             if matches!(self.statuses[index], CandidateStatus::Failed(_))
-                && worker.socket_identity.is_some_and(|previous| {
+                && previous_identity.is_some_and(|previous| {
                     previous.device == current_identity.device
                         && previous.inode == current_identity.inode
                 })
@@ -1005,19 +1171,30 @@ impl CandidateShadowWorker {
                 continue;
             }
             if matches!(self.statuses[index], CandidateStatus::Failed(_)) {
+                self.reset_candidate_window(index);
                 self.statuses[index] = CandidateStatus::Unavailable;
+            } else if previous_identity.is_some_and(|previous| {
+                previous.device != current_identity.device
+                    || previous.inode != current_identity.inode
+            }) {
+                self.reset_candidate_window(index);
             }
-            worker.socket_identity = Some(current_identity);
+            self.workers[index].socket_identity = Some(current_identity);
             match self.socket.send_to(
                 &snapshot.request_buffers[index][..snapshot.request_lengths[index]],
-                &worker.socket_path,
+                &self.workers[index].socket_path,
             ) {
                 Ok(sent) if sent == snapshot.request_lengths[index] => {
                     self.pending_cycle[index] = Some(snapshot.cycle_id);
+                    self.pending_host_cycle_sequence[index] = Some(snapshot.host_cycle_sequence);
                     self.pending_age[index] = 0;
-                    self.statuses[index] = CandidateStatus::Pending;
+                    self.last_request_host_cycle_sequence[index] =
+                        Some(snapshot.host_cycle_sequence);
+                    if !matches!(self.statuses[index], CandidateStatus::Failed(_)) {
+                        self.statuses[index] = self.stability[index].status();
+                    }
                 }
-                _ => self.statuses[index] = CandidateStatus::Failed(CandidateFailure::Send),
+                _ => self.fail_candidate(index, CandidateFailure::Send),
             }
         }
     }
@@ -1058,88 +1235,158 @@ impl CandidateShadowWorker {
                 continue;
             }
             if !self.candidate_worker_identity_is_current(index) {
-                self.statuses[index] = CandidateStatus::Failed(CandidateFailure::UnsafeSocket);
-                self.pending_cycle[index] = None;
+                self.fail_candidate(index, CandidateFailure::UnsafeSocket);
                 continue;
             }
             if received > WORKER_DATAGRAM_MAX_SIZE {
-                self.statuses[index] = CandidateStatus::Failed(CandidateFailure::Protocol);
-                self.pending_cycle[index] = None;
+                self.fail_candidate(index, CandidateFailure::Protocol);
                 continue;
             }
             let response = match decode_response(&response_buffer[..received]) {
                 Ok(response) => response,
                 Err(_) => {
-                    self.statuses[index] = CandidateStatus::Failed(CandidateFailure::Protocol);
-                    self.pending_cycle[index] = None;
+                    self.fail_candidate(index, CandidateFailure::Protocol);
                     continue;
                 }
             };
+            if self.discard_responses_through_cycle[index]
+                .is_some_and(|cycle_id| response.cycle_id <= cycle_id)
+            {
+                continue;
+            }
             let Some(expected_cycle) = self.pending_cycle[index] else {
                 let failure = if self.last_response_cycle[index] == Some(response.cycle_id) {
                     CandidateFailure::DuplicateResponse
                 } else {
                     CandidateFailure::Protocol
                 };
-                self.statuses[index] = CandidateStatus::Failed(failure);
+                self.fail_candidate(index, failure);
                 continue;
             };
             if response.ecu_id != self.workers[index].ecu {
-                self.statuses[index] = CandidateStatus::Failed(CandidateFailure::WrongEcu);
-                self.pending_cycle[index] = None;
+                self.fail_candidate(index, CandidateFailure::WrongEcu);
                 continue;
             }
             if response.cycle_id != expected_cycle {
-                self.statuses[index] = CandidateStatus::Failed(CandidateFailure::WrongCycle);
-                self.pending_cycle[index] = None;
+                self.fail_candidate(index, CandidateFailure::WrongCycle);
+                continue;
+            }
+            let Some(host_cycle_sequence) = self.pending_host_cycle_sequence[index] else {
+                self.fail_candidate(index, CandidateFailure::Protocol);
+                continue;
+            };
+            if self.stability[index]
+                .last_success_cycle_id
+                .is_some_and(|last_cycle| expected_cycle <= last_cycle)
+            {
+                self.fail_candidate(index, CandidateFailure::WrongCycle);
                 continue;
             }
             self.pending_cycle[index] = None;
+            self.pending_host_cycle_sequence[index] = None;
             self.pending_age[index] = 0;
             self.last_response_cycle[index] = Some(expected_cycle);
-            // Candidate output is deliberately discarded. This event means one matching reply
-            // was seen; it is not stable health and never permits route promotion.
-            self.statuses[index] = CandidateStatus::Ready;
-            self.log_candidate_ready(index);
+            self.discard_responses_through_cycle[index] = None;
+            // Candidate output is deliberately discarded. Only 100 consecutive matching
+            // responses can make the protocol-level shadow status Ready.
+            self.statuses[index] =
+                self.stability[index].observe_success(host_cycle_sequence, expected_cycle);
         }
     }
 
-    fn advance_candidate_timeouts(&mut self, elapsed_cycles: u8) {
+    fn advance_candidate_timeouts(&mut self) {
         for index in 0..self.pending_cycle.len() {
             if self.pending_cycle[index].is_none()
                 || matches!(self.statuses[index], CandidateStatus::Failed(_))
             {
                 continue;
             }
-            self.pending_age[index] = self.pending_age[index].saturating_add(elapsed_cycles);
+            self.pending_age[index] = self.pending_age[index].saturating_add(1);
             if self.pending_age[index] >= CANDIDATE_RESPONSE_TIMEOUT_CYCLES {
-                self.pending_cycle[index] = None;
-                self.statuses[index] = CandidateStatus::Failed(CandidateFailure::Timeout);
-            } else {
-                self.statuses[index] = CandidateStatus::Pending;
+                self.fail_candidate(index, CandidateFailure::Timeout);
             }
         }
     }
 
     fn fail_all_candidates(&mut self, failure: CandidateFailure) {
-        self.statuses = [CandidateStatus::Failed(failure); 3];
-        self.pending_cycle = [None; 3];
+        for index in 0..self.statuses.len() {
+            self.fail_candidate(index, failure);
+        }
     }
 
-    fn log_candidate_ready(&mut self, index: usize) {
-        let identity = self.workers[index].socket_identity;
-        if identity.is_some() && identity != self.last_logged_ready_identity[index] {
-            eprintln!("SDV shadow candidate {:?} status: Ready", ECU_IDS[index]);
-            self.last_logged_ready_identity[index] = identity;
+    fn reset_candidate_window(&mut self, index: usize) {
+        let stale_cycle = self.pending_cycle[index]
+            .into_iter()
+            .chain(self.last_response_cycle[index])
+            .max();
+        if let Some(stale_cycle) = stale_cycle {
+            self.discard_responses_through_cycle[index] = Some(
+                self.discard_responses_through_cycle[index]
+                    .map_or(stale_cycle, |previous| previous.max(stale_cycle)),
+            );
         }
+        self.pending_cycle[index] = None;
+        self.pending_host_cycle_sequence[index] = None;
+        self.pending_age[index] = 0;
+        self.last_request_host_cycle_sequence[index] = None;
+        self.stability[index].reset_window();
+        if matches!(
+            self.statuses[index],
+            CandidateStatus::Ready | CandidateStatus::WarmingUp { .. }
+        ) {
+            self.statuses[index] = CandidateStatus::WarmingUp {
+                consecutive_responses: 0,
+            };
+        }
+    }
+
+    fn reset_all_candidate_windows(&mut self) {
+        for index in 0..self.statuses.len() {
+            self.reset_candidate_window(index);
+        }
+    }
+
+    fn fail_candidate(&mut self, index: usize, failure: CandidateFailure) {
+        self.reset_candidate_window(index);
+        self.statuses[index] = CandidateStatus::Failed(failure);
     }
 
     fn log_candidate_status_changes(&mut self, previous: [CandidateStatus; 3]) {
         for index in 0..self.statuses.len() {
             match self.statuses[index] {
-                CandidateStatus::Unavailable => self.last_logged_ready_identity[index] = None,
+                CandidateStatus::WarmingUp {
+                    consecutive_responses,
+                } => {
+                    let should_log = if consecutive_responses == 0 {
+                        previous[index] != self.statuses[index]
+                    } else {
+                        consecutive_responses == 1
+                            || consecutive_responses % 10 == 0
+                            || consecutive_responses == CANDIDATE_READY_CONSECUTIVE_CYCLES
+                    };
+                    if should_log
+                        && (self.last_logged_warming_progress[index] != consecutive_responses
+                            || previous[index] != self.statuses[index])
+                    {
+                        eprintln!(
+                            "SDV shadow candidate {:?} status: WarmingUp ({}/{})",
+                            ECU_IDS[index],
+                            consecutive_responses,
+                            CANDIDATE_READY_CONSECUTIVE_CYCLES
+                        );
+                        self.last_logged_warming_progress[index] = consecutive_responses;
+                    }
+                }
+                CandidateStatus::Ready => {
+                    if previous[index] != CandidateStatus::Ready {
+                        eprintln!(
+                            "SDV shadow candidate {:?} status: Ready ({} consecutive responses)",
+                            ECU_IDS[index], CANDIDATE_READY_CONSECUTIVE_CYCLES
+                        );
+                    }
+                }
+                CandidateStatus::Unavailable => self.last_logged_warming_progress[index] = 0,
                 CandidateStatus::Failed(_) => {
-                    self.last_logged_ready_identity[index] = None;
                     if self.statuses[index] != previous[index] {
                         eprintln!(
                             "SDV shadow candidate {:?} status: {:?}",
@@ -1147,7 +1394,7 @@ impl CandidateShadowWorker {
                         );
                     }
                 }
-                _ => {}
+                CandidateStatus::Disabled => {}
             }
         }
     }
@@ -1404,4 +1651,225 @@ fn monotonic_time_ns() -> io::Result<u64> {
         .checked_mul(NANOS_PER_SECOND)
         .and_then(|value| value.checked_add(nanoseconds))
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "monotonic time overflow"))
+}
+
+#[cfg(test)]
+mod candidate_stability_tests {
+    use super::*;
+
+    #[test]
+    fn ready_requires_exactly_one_hundred_consecutive_responses() {
+        let mut stability = CandidateStability::default();
+        for sequence in 0..CANDIDATE_READY_CONSECUTIVE_CYCLES - 1 {
+            assert_eq!(
+                stability.observe_success(u64::from(sequence), u64::from(sequence) + 10),
+                CandidateStatus::WarmingUp {
+                    consecutive_responses: sequence + 1
+                }
+            );
+        }
+        assert_eq!(
+            stability.observe_success(99, 109),
+            CandidateStatus::Ready,
+            "the 100th consecutive response must be the first Ready state"
+        );
+        assert_eq!(
+            stability.status(),
+            CandidateStatus::Ready,
+            "a new outstanding request must not demote stable candidate status"
+        );
+    }
+
+    #[test]
+    fn host_cycle_sequence_gap_restarts_the_consecutive_window() {
+        let mut stability = CandidateStability::default();
+        assert_eq!(
+            stability.observe_success(20, 200),
+            CandidateStatus::WarmingUp {
+                consecutive_responses: 1
+            }
+        );
+        assert_eq!(
+            stability.observe_success(21, 210),
+            CandidateStatus::WarmingUp {
+                consecutive_responses: 2
+            }
+        );
+        assert_eq!(
+            stability.observe_success(23, 230),
+            CandidateStatus::WarmingUp {
+                consecutive_responses: 1
+            }
+        );
+    }
+
+    #[test]
+    fn full_candidate_queue_immediately_masks_ready_status() {
+        let (sender, _receiver) = sync_channel(1);
+        let make_snapshot = || CandidateCycleSnapshot {
+            host_cycle_sequence: 1,
+            cycle_id: 100,
+            deadline: Instant::now() + Duration::from_secs(1),
+            request_buffers: [[0; WORKER_DATAGRAM_MAX_SIZE]; 3],
+            request_lengths: [0; 3],
+        };
+        sender.try_send(make_snapshot()).unwrap();
+        let dropped_cycles = AtomicUsize::new(0);
+        let queue_drop_generation = AtomicUsize::new(0);
+        assert!(matches!(
+            sender.try_send(make_snapshot()),
+            Err(TrySendError::Full(_))
+        ));
+        record_candidate_queue_drop(&dropped_cycles, &queue_drop_generation);
+
+        assert_eq!(dropped_cycles.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            status_after_queue_drop(
+                [CandidateStatus::Ready; 3],
+                queue_drop_generation.load(Ordering::Acquire),
+                0,
+            ),
+            [CandidateStatus::WarmingUp {
+                consecutive_responses: 0
+            }; 3]
+        );
+    }
+
+    #[test]
+    fn expired_snapshot_and_candidate_failures_clear_ready_evidence() {
+        let directory = std::env::temp_dir()
+            .join(format!("sdv-candidate-expired-snapshot-{}", unsafe {
+                libc::getpid()
+            }));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir(&directory).unwrap();
+        fs::set_permissions(
+            &directory,
+            fs::Permissions::from_mode(PRIVATE_DIRECTORY_MODE),
+        )
+        .unwrap();
+        let owner = unsafe { libc::geteuid() };
+        let directory_identity = directory_identity(&directory, owner).unwrap();
+        let socket_path = directory.join(COORDINATOR_SOCKET_NAME);
+        let socket = UnixDatagram::bind(&socket_path).unwrap();
+        socket.set_nonblocking(true).unwrap();
+        fs::set_permissions(&socket_path, fs::Permissions::from_mode(SOCKET_MODE)).unwrap();
+        let socket_identity = socket_identity(&socket_path, owner).unwrap();
+        let socket_guard = SocketPathGuard {
+            path: socket_path.clone(),
+            owner,
+            identity: Some(socket_identity),
+        };
+        let shared_statuses = Arc::new(Mutex::new([
+            CandidateStatus::Ready,
+            CandidateStatus::Unavailable,
+            CandidateStatus::Unavailable,
+        ]));
+        let shared_last_response_cycle = Arc::new(Mutex::new([Some(700), None, None]));
+        let queue_drop_generation = Arc::new(AtomicUsize::new(0));
+        let applied_queue_drop_generation = Arc::new(AtomicUsize::new(0));
+        let dropped_cycles = Arc::new(AtomicUsize::new(0));
+        let mut worker = CandidateShadowWorker {
+            socket,
+            _socket_path_guard: socket_guard,
+            socket_path,
+            socket_identity,
+            socket_directory: directory.clone(),
+            socket_directory_identity: directory_identity,
+            owner,
+            workers: ECU_IDS
+                .into_iter()
+                .zip(CANDIDATE_SOCKET_NAMES)
+                .map(|(ecu, socket_name)| CandidateWorkerProcess {
+                    ecu,
+                    socket_path: directory.join(socket_name),
+                    socket_identity: None,
+                })
+                .collect(),
+            statuses: [
+                CandidateStatus::Ready,
+                CandidateStatus::Unavailable,
+                CandidateStatus::Unavailable,
+            ],
+            stability: [
+                CandidateStability {
+                    consecutive_responses: CANDIDATE_READY_CONSECUTIVE_CYCLES,
+                    last_success_host_cycle_sequence: Some(7),
+                    last_success_cycle_id: Some(700),
+                },
+                CandidateStability::default(),
+                CandidateStability::default(),
+            ],
+            shared_statuses: Arc::clone(&shared_statuses),
+            shared_last_response_cycle: Arc::clone(&shared_last_response_cycle),
+            queue_drop_generation,
+            applied_queue_drop_generation,
+            pending_cycle: [Some(800), None, None],
+            pending_host_cycle_sequence: [Some(8), None, None],
+            pending_age: [1, 0, 0],
+            last_request_host_cycle_sequence: [Some(8), None, None],
+            discard_responses_through_cycle: [None; 3],
+            last_processed_host_cycle_sequence: Some(7),
+            processed_queue_drop_generation: 0,
+            last_response_cycle: [Some(700), None, None],
+            last_logged_warming_progress: [0; 3],
+            dropped_cycles,
+        };
+
+        worker.process_snapshot(CandidateCycleSnapshot {
+            host_cycle_sequence: 8,
+            cycle_id: 800,
+            deadline: Instant::now() - Duration::from_millis(1),
+            request_buffers: [[0; WORKER_DATAGRAM_MAX_SIZE]; 3],
+            request_lengths: [0; 3],
+        });
+
+        assert_eq!(
+            worker.statuses[0],
+            CandidateStatus::WarmingUp {
+                consecutive_responses: 0
+            }
+        );
+        assert_eq!(worker.pending_cycle[0], None);
+        assert_eq!(worker.stability[0].consecutive_responses, 0);
+        assert_eq!(
+            *shared_statuses.lock().unwrap(),
+            [
+                CandidateStatus::WarmingUp {
+                    consecutive_responses: 0
+                },
+                CandidateStatus::Unavailable,
+                CandidateStatus::Unavailable,
+            ]
+        );
+
+        for failure in [
+            CandidateFailure::Timeout,
+            CandidateFailure::Protocol,
+            CandidateFailure::WrongEcu,
+            CandidateFailure::WrongCycle,
+            CandidateFailure::UnsafeSocket,
+            CandidateFailure::Send,
+            CandidateFailure::DuplicateResponse,
+        ] {
+            worker.statuses[0] = CandidateStatus::Ready;
+            worker.stability[0] = CandidateStability {
+                consecutive_responses: CANDIDATE_READY_CONSECUTIVE_CYCLES,
+                last_success_host_cycle_sequence: Some(20),
+                last_success_cycle_id: Some(900),
+            };
+            worker.pending_cycle[0] = Some(910);
+            worker.pending_host_cycle_sequence[0] = Some(21);
+            worker.pending_age[0] = 1;
+            worker.last_request_host_cycle_sequence[0] = Some(21);
+            worker.fail_candidate(0, failure);
+
+            assert_eq!(worker.statuses[0], CandidateStatus::Failed(failure));
+            assert_eq!(worker.stability[0].consecutive_responses, 0);
+            assert_eq!(worker.pending_cycle[0], None);
+            assert_eq!(worker.pending_host_cycle_sequence[0], None);
+        }
+        drop(worker);
+        fs::remove_dir_all(directory).unwrap();
+    }
 }

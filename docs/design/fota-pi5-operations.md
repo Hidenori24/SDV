@@ -127,12 +127,15 @@ socket that appears under `/run/sdv-picarx/candidates`. Candidate sockets and re
 separate coordinator socket; candidate traffic cannot occupy the active response queue. After all
 active responses are validated, the host only `try_send`s a fixed request snapshot into a
 single-entry queue. Filesystem checks, candidate send/receive, timeout accounting, and journal
-writes run on a separate shadow thread. A full queue or an expired snapshot skips that shadow
-cycle; the host never waits for candidate work. Candidate responses must match the requested ECU,
-cycle, and socket inode. A timeout, malformed packet, duplicate response, or socket change marks
-that candidate failed and leaves active worker outputs in use. Candidate commands and alive frames
-are always discarded. A `Ready` journal entry means only that one matching shadow response was
-decoded; it is not a promotion or a stable health verdict. Candidate coordinator setup errors also
+writes run on a separate shadow thread. Status starts at `WarmingUp (0/100)` and counts matching
+responses over 100 consecutive host cycle sequence numbers; the wire cycle IDs must also increase.
+Only the 100th consecutive response becomes `Ready`. A host-cycle gap, full or expired snapshot,
+timeout, protocol/ECU/cycle mismatch, or socket inode failure clears the stability window. A full
+queue masks an old `Ready` immediately, before the shadow thread consumes another snapshot. A
+timeout, malformed packet, duplicate response, or socket change marks only that candidate failed
+and leaves active worker outputs in use. Candidate commands and alive frames are always discarded.
+`Ready` reports protocol-level shadow stability only; it does not verify application semantics or
+vehicle health, approve a route, or authorize promotion. Candidate coordinator setup errors also
 disable shadow checking without preventing active worker startup. The root `sdv-fota-launcher`
 service binds `/run/sdv-fota/control.sock` inside its root-owned runtime directory and passes the
 already-open listener descriptor to the vehicle process. The application UID cannot replace the

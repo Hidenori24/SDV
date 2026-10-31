@@ -347,7 +347,7 @@ fn candidate_shadow_is_validated_but_never_changes_active_runtime_output() {
     let mut in_process = VehicleRuntime::default();
     let mut worker_runtime = VehicleRuntime::default();
 
-    for tick in 0..12_u64 {
+    for tick in 0..102_u64 {
         // Match the production 10 ms coordinator cadence so this test exercises a healthy
         // candidate worker instead of intentionally outrunning its process scheduler.
         thread::sleep(Duration::from_millis(10));
@@ -373,13 +373,18 @@ fn candidate_shadow_is_validated_but_never_changes_active_runtime_output() {
             })
             .unwrap();
         assert_eq!(actual, expected);
-        let status = wait_for_candidate_status(&coordinator, |status| {
-            status != CandidateStatus::Unavailable && status != CandidateStatus::Disabled
-        });
-        assert!(matches!(
-            status,
-            CandidateStatus::Ready | CandidateStatus::Pending
-        ));
+        let expected_status = if tick < 100 {
+            CandidateStatus::WarmingUp {
+                consecutive_responses: tick as u16,
+            }
+        } else {
+            CandidateStatus::Ready
+        };
+        assert_eq!(
+            wait_for_candidate_status(&coordinator, |status| status == expected_status),
+            expected_status,
+            "candidate status at host cycle {tick}"
+        );
     }
 
     assert!(candidate_directory.join("engine.sock").exists());
@@ -517,11 +522,17 @@ fn candidate_pending_request_clears_ready_and_times_out_after_two_cycles() {
             request_seen_rx
                 .recv_timeout(Duration::from_secs(1))
                 .unwrap();
+            let expected_count = u16::from(tick == 1);
             assert_eq!(
                 wait_for_candidate_status(&coordinator, |status| {
-                    status == CandidateStatus::Pending
+                    status
+                        == CandidateStatus::WarmingUp {
+                            consecutive_responses: expected_count,
+                        }
                 }),
-                CandidateStatus::Pending
+                CandidateStatus::WarmingUp {
+                    consecutive_responses: expected_count
+                }
             );
             if tick == 1 {
                 let first_candidate_cycle = first_candidate_cycle.unwrap();
