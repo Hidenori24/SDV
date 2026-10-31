@@ -195,12 +195,31 @@ boundary it revalidates the candidate socket inode and switches that ECU's route
 succeeds only after the candidate answers for the promotion cycle and the host successfully applies
 zero output for that cycle. `Ready` and a successful promotion confirm protocol-level responses and
 route selection; neither establishes application behavior or vehicle health. The hold remains
-latched after success. A failure also leaves zero output held; if the route had already switched,
-it is not automatically switched back. Keep the vehicle secured and inspect host and candidate logs.
-This step does not commit the trial, perform rollback, or release the hold. Those operations are not
-part of the current promotion flow. The host process supports one route promotion because it stops
-the shadow coordinator for cutover. The selected route is process-local and returns to the active
-worker after a host restart.
+latched after success. If a promoted candidate needs to be removed from the runtime route, request
+a held, cycle-boundary return to the active worker:
+
+```sh
+sudo sdv-fota revert-candidate --control-socket /run/sdv-fota/control.sock --target engine
+```
+
+The host validates the original active worker socket and acknowledges only after an active-worker
+cycle succeeds and zero output is applied. The hold stays latched. This changes only the current
+process route; it does not stop the candidate service or alter trial metadata. Keep the vehicle
+secured and inspect host and candidate logs. If the host cannot complete the request, leave the
+vehicle secured; a host restart with the trial still pending starts held and selects the active
+worker by default. After the route is active, stop the candidate service and clear the pending trial
+before restarting the launcher:
+
+```sh
+sudo systemctl stop sdv-fota-ecu-candidate@engine.service
+sudo sdv-fota rollback-trial --state-root /var/lib/sdv-fota --target engine
+sudo systemctl restart sdv-fota-launcher.service
+```
+
+This flow does not commit a promoted trial or release the hold in the running host. The host process
+supports one candidate promotion because it stops the shadow coordinator for cutover; a reverted
+candidate cannot be promoted again in that process. Route selection is process-local and returns to
+the active worker after a host restart.
 
 To switch from external workers to coordinator-spawn or in-process mode, stop both the host and
 worker target, disable the target, install the root-owned vehicle config for the selected mode, and
@@ -493,12 +512,13 @@ a pending candidate, so use the target-aware ECU form instead. An ECU target req
 `sdv-picarx-health` command checks vehicle runtime health and is not an ECU worker health check, so
 the example systemd unit remains vehicle-only. Shadow response validation is protocol-level
 stability, not an application or vehicle health verdict. A root-owned inherited control socket
-accepts root-peer requests to latch zero actuator output before candidate launch and to promote a
-`Ready` candidate at a host-cycle boundary after revalidating its socket inode. The response is
-successful only after the candidate answers for that cycle and zero output is applied. The hold
-remains latched; promotion does not commit or roll back the trial, release the hold, or establish
-ongoing production-route health. A failure keeps zero output held and does not promise to restore
-the previous route after a switch. Candidate protocol failure before promotion is isolated from
+accepts root-peer requests to latch zero actuator output before candidate launch, promote a `Ready`
+candidate, and return a promoted route to its active worker at a host-cycle boundary. Promotion
+revalidates the candidate socket inode; reversion revalidates the original active worker socket.
+Either request succeeds only after the selected worker answers for that cycle and zero output is
+applied. The hold remains latched; route changes do not commit or roll back trial metadata, release
+the hold, or establish ongoing production-route health. A reversion failure keeps the hold set.
+Candidate protocol failure before promotion is isolated from
 active worker-cycle processing while the sticky output hold remains set. Virtual ECU worker processes can
 be enabled as an alternative Linux runtime mode. The Pi path can sign a package on a separate host, verify and
 stage it incrementally, and exercise whole-vehicle A/B trial boot and rollback on Linux. HTTPS

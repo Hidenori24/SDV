@@ -17,7 +17,8 @@ use sdv_core::runtime::VehicleActuation;
 use sdv_core::runtime::{VehicleRuntime, VirtualEcuId};
 use sdv_core::runtime_host::{self, SystemClock, ECU_PERIOD};
 use sdv_picarx::ecu_process_coordinator::{
-    CandidatePromotionRequest, EcuProcessCoordinator, EcuProcessVehicleExecutor,
+    CandidateRouteOperation, CandidateRouteRequest, EcuProcessCoordinator,
+    EcuProcessVehicleExecutor,
 };
 use sdv_picarx::linux_gpio::LinuxMotorDirections;
 use sdv_picarx::linux_i2c::I2cTransport;
@@ -216,8 +217,8 @@ const HOLD_ACK: &[u8] = b"SDVHELD1\n";
 const HOLD_NOT_READY: &[u8] = b"SDVNOTREADY\n";
 const HOLD_ACK_TIMEOUT: Duration = Duration::from_secs(2);
 const PROMOTION_REQUEST_PREFIX: &[u8] = b"SDVPROMOTE1 ";
-const PROMOTION_REQUEST_DEADLINE: Duration = Duration::from_secs(4);
-const PROMOTION_ACK_TIMEOUT: Duration = Duration::from_secs(5);
+const ROUTE_CHANGE_REQUEST_DEADLINE: Duration = Duration::from_secs(4);
+const ROUTE_CHANGE_ACK_TIMEOUT: Duration = Duration::from_secs(5);
 const HOLD_LISTENER_FD_ENV: &str = "SDV_FOTA_HOLD_LISTENER_FD";
 
 struct HoldControlServer {
@@ -230,7 +231,7 @@ impl HoldControlServer {
         fd: i32,
         hold: StickyOutputHold,
         health: Arc<RuntimeHealth>,
-        promotions: Option<SyncSender<CandidatePromotionRequest>>,
+        route_requests: Option<SyncSender<CandidateRouteRequest>>,
     ) -> io::Result<Self> {
         if fd < 3 {
             return Err(io::Error::new(
@@ -301,7 +302,7 @@ impl HoldControlServer {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let thread_health = Arc::clone(&health);
-        let thread_promotions = promotions;
+        let thread_route_requests = route_requests;
         let worker = thread::Builder::new()
             .name("sdv-output-hold-control".into())
             .spawn(move || {
@@ -312,7 +313,7 @@ impl HoldControlServer {
                                 stream,
                                 &hold,
                                 &thread_health,
-                                thread_promotions.as_ref(),
+                                thread_route_requests.as_ref(),
                             ) {
                                 eprintln!("sdv-picarx: output hold request rejected: {error}");
                             }
@@ -348,12 +349,12 @@ fn handle_control_client(
     stream: UnixStream,
     hold: &StickyOutputHold,
     health: &RuntimeHealth,
-    promotions: Option<&SyncSender<CandidatePromotionRequest>>,
+    route_requests: Option<&SyncSender<CandidateRouteRequest>>,
 ) -> io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(1)))?;
     stream.set_write_timeout(Some(Duration::from_secs(1)))?;
     let uid = peer_uid(stream.as_raw_fd())?;
-    handle_control_client_with_uid(stream, uid, hold, health, promotions)
+    handle_control_client_with_uid(stream, uid, hold, health, route_requests)
 }
 
 #[cfg(test)]
@@ -371,7 +372,7 @@ fn handle_control_client_with_uid(
     uid: u32,
     hold: &StickyOutputHold,
     health: &RuntimeHealth,
-    promotions: Option<&SyncSender<CandidatePromotionRequest>>,
+    route_requests: Option<&SyncSender<CandidateRouteRequest>>,
 ) -> io::Result<()> {
     if uid != 0 {
         return Err(io::Error::new(
@@ -394,53 +395,81 @@ fn handle_control_client_with_uid(
     if request.as_slice() == HOLD_REQUEST {
         return handle_hold_request(&mut stream, hold, health);
     }
-    let Some(target) = parse_promotion_request(&request) else {
+    let Some((target, operation)) = parse_route_change_request(&request) else {
         let _ = hold.request_and_wait(Duration::ZERO);
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "unknown hold control request",
         ));
     };
-    let Some(promotions) = promotions else {
-        return write_promotion_failure(&mut stream, "external candidate routing is unavailable");
+    if operation == CandidateRouteOperation::Promote && route_requests.is_none() {
+        return write_route_change_failure(
+            &mut stream,
+            "external candidate routing is unavailable",
+        );
+    }
+    if operation == CandidateRouteOperation::Promote {
+        if !health.is_healthy() {
+            stream.write_all(HOLD_NOT_READY)?;
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "vehicle runtime is not ready for candidate promotion",
+            ));
+        }
+        if !hold.request_and_wait(HOLD_ACK_TIMEOUT) {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "zero actuator output was not applied before promotion",
+            ));
+        }
+    } else {
+        // A route reversion is a recovery operation. Latch and confirm the hold before checking
+        // runtime health so even a rejected recovery request leaves output held.
+        if !hold.request_and_wait(HOLD_ACK_TIMEOUT) {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "zero actuator output was not applied before route reversion",
+            ));
+        }
+        if !health.is_healthy() {
+            stream.write_all(HOLD_NOT_READY)?;
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "vehicle runtime is not ready for candidate route reversion",
+            ));
+        }
+    }
+    let Some(route_requests) = route_requests else {
+        return write_route_change_failure(
+            &mut stream,
+            "external candidate routing is unavailable",
+        );
     };
-    if !health.is_healthy() {
-        stream.write_all(HOLD_NOT_READY)?;
-        return Err(io::Error::new(
-            io::ErrorKind::WouldBlock,
-            "vehicle runtime is not ready for candidate promotion",
-        ));
-    }
-    if !hold.request_and_wait(HOLD_ACK_TIMEOUT) {
-        return Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "zero actuator output was not applied before promotion",
-        ));
-    }
     let (completion, response) = mpsc::sync_channel(1);
-    match promotions.try_send(CandidatePromotionRequest {
+    match route_requests.try_send(CandidateRouteRequest {
         ecu: target,
+        operation,
         // Leave the control thread a full second to return a result after the host stops
         // accepting new shadow snapshots at the request deadline.
-        deadline: Instant::now() + PROMOTION_REQUEST_DEADLINE,
+        deadline: Instant::now() + ROUTE_CHANGE_REQUEST_DEADLINE,
         completion,
     }) {
         Ok(()) => {}
         Err(TrySendError::Full(_)) => {
-            return write_promotion_failure(&mut stream, "another promotion is pending")
+            return write_route_change_failure(&mut stream, "another route change is pending")
         }
         Err(TrySendError::Disconnected(_)) => {
-            return write_promotion_failure(&mut stream, "vehicle cycle is unavailable")
+            return write_route_change_failure(&mut stream, "vehicle cycle is unavailable")
         }
     }
-    match response.recv_timeout(PROMOTION_ACK_TIMEOUT) {
-        Ok(Ok(())) => stream.write_all(promotion_ack(target).as_bytes()),
-        Ok(Err(error)) => write_promotion_failure(&mut stream, &error),
+    match response.recv_timeout(ROUTE_CHANGE_ACK_TIMEOUT) {
+        Ok(Ok(())) => stream.write_all(route_change_ack(target, operation).as_bytes()),
+        Ok(Err(error)) => write_route_change_failure(&mut stream, &error),
         Err(mpsc::RecvTimeoutError::Timeout) => {
-            write_promotion_failure(&mut stream, "promotion cycle timed out")
+            write_route_change_failure(&mut stream, "route change cycle timed out")
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
-            write_promotion_failure(&mut stream, "promotion cycle is unavailable")
+            write_route_change_failure(&mut stream, "vehicle cycle is unavailable")
         }
     }
 }
@@ -466,18 +495,30 @@ fn handle_hold_request(
     stream.write_all(HOLD_ACK)
 }
 
-fn parse_promotion_request(request: &[u8]) -> Option<VirtualEcuId> {
-    let target = request.strip_prefix(PROMOTION_REQUEST_PREFIX)?;
-    match target {
-        b"engine\n" => Some(VirtualEcuId::Engine),
-        b"brake\n" => Some(VirtualEcuId::Brake),
-        b"steering\n" => Some(VirtualEcuId::Steering),
-        _ => None,
-    }
+fn parse_route_change_request(request: &[u8]) -> Option<(VirtualEcuId, CandidateRouteOperation)> {
+    let (target, operation) = if let Some(target) = request.strip_prefix(PROMOTION_REQUEST_PREFIX) {
+        (target, CandidateRouteOperation::Promote)
+    } else if let Some(target) = request.strip_prefix(b"SDVREVERT1 ") {
+        (target, CandidateRouteOperation::ReturnToActive)
+    } else {
+        return None;
+    };
+    let ecu = match target {
+        b"engine\n" => VirtualEcuId::Engine,
+        b"brake\n" => VirtualEcuId::Brake,
+        b"steering\n" => VirtualEcuId::Steering,
+        _ => return None,
+    };
+    Some((ecu, operation))
 }
 
-fn promotion_ack(target: VirtualEcuId) -> String {
-    format!("SDVPROMOTED {}\n", ecu_name(target))
+fn route_change_ack(target: VirtualEcuId, operation: CandidateRouteOperation) -> String {
+    match operation {
+        CandidateRouteOperation::Promote => format!("SDVPROMOTED {}\n", ecu_name(target)),
+        CandidateRouteOperation::ReturnToActive => {
+            format!("SDVREVERTED {}\n", ecu_name(target))
+        }
+    }
 }
 
 fn ecu_name(target: VirtualEcuId) -> &'static str {
@@ -488,12 +529,12 @@ fn ecu_name(target: VirtualEcuId) -> &'static str {
     }
 }
 
-fn write_promotion_failure(stream: &mut UnixStream, reason: &str) -> io::Result<()> {
+fn write_route_change_failure(stream: &mut UnixStream, reason: &str) -> io::Result<()> {
     let sanitized = reason.replace(['\n', '\r'], " ");
-    stream.write_all(format!("SDVPROMOTION_FAILED {sanitized}\n").as_bytes())?;
+    stream.write_all(format!("SDVROUTE_FAILED {sanitized}\n").as_bytes())?;
     Err(io::Error::new(
         io::ErrorKind::InvalidData,
-        "candidate promotion was rejected",
+        "candidate route change was rejected",
     ))
 }
 
@@ -726,15 +767,15 @@ fn run() -> Result<(), String> {
     ));
     let mut health_server = HealthServer::bind(config.health_socket, Arc::clone(&health))
         .map_err(|error| format!("cannot bind vehicle health socket: {error}"))?;
-    let (promotion_sender, promotion_receiver) = mpsc::sync_channel(1);
-    let promotion_sender = candidate_promotion_enabled.then_some(promotion_sender);
+    let (route_request_sender, route_request_receiver) = mpsc::sync_channel(1);
+    let route_request_sender = candidate_promotion_enabled.then_some(route_request_sender);
     let mut hold_server = hold_listener_fd
         .map(|fd| {
             HoldControlServer::from_inherited_fd(
                 fd,
                 output_hold.clone(),
                 Arc::clone(&health),
-                promotion_sender.clone(),
+                route_request_sender.clone(),
             )
         })
         .transpose()
@@ -803,7 +844,7 @@ fn run() -> Result<(), String> {
                 coordinator,
             );
             if candidate_promotion_enabled {
-                executor = executor.with_promotion_control(output_hold.clone(), promotion_receiver);
+                executor = executor.with_route_control(output_hold.clone(), route_request_receiver);
             }
             runtime_host::run(&mut executor, &mut SystemClock::default(), || {
                 shutdown.load(Ordering::Relaxed)
@@ -1183,7 +1224,7 @@ mod tests {
         let server_hold = hold.clone();
         let health = Arc::new(ready_runtime_health());
         let thread_health = Arc::clone(&health);
-        let (promotion_sender, promotion_receiver) = mpsc::sync_channel(1);
+        let (route_sender, route_receiver) = mpsc::sync_channel(1);
         let (mut client, server) = UnixStream::pair().unwrap();
         let worker = thread::spawn(move || {
             handle_control_client_with_uid(
@@ -1191,7 +1232,7 @@ mod tests {
                 0,
                 &server_hold,
                 &thread_health,
-                Some(&promotion_sender),
+                Some(&route_sender),
             )
         });
         client.write_all(b"SDVPROMOTE1 engine\n").unwrap();
@@ -1202,10 +1243,9 @@ mod tests {
         let mut platform = HoldTestPlatform::default();
         hold.apply(&mut platform, VehicleActuation::default())
             .unwrap();
-        let promotion = promotion_receiver
-            .recv_timeout(Duration::from_secs(1))
-            .unwrap();
+        let promotion = route_receiver.recv_timeout(Duration::from_secs(1)).unwrap();
         assert_eq!(promotion.ecu, VirtualEcuId::Engine);
+        assert_eq!(promotion.operation, CandidateRouteOperation::Promote);
         assert!(promotion.deadline > Instant::now());
         assert!(hold.has_zero_apply_acknowledgement());
         assert_eq!(platform.applied.unwrap().command, ActuatorCmd::default());
@@ -1236,7 +1276,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             response,
-            "SDVPROMOTION_FAILED external candidate routing is unavailable\n"
+            "SDVROUTE_FAILED external candidate routing is unavailable\n"
         );
         assert_eq!(
             worker.join().unwrap().unwrap_err().kind(),
@@ -1248,15 +1288,141 @@ mod tests {
     #[test]
     fn promotion_protocol_accepts_only_named_ecu_targets() {
         assert_eq!(
-            parse_promotion_request(b"SDVPROMOTE1 engine\n"),
-            Some(VirtualEcuId::Engine)
+            parse_route_change_request(b"SDVPROMOTE1 engine\n"),
+            Some((VirtualEcuId::Engine, CandidateRouteOperation::Promote))
         );
         assert_eq!(
-            parse_promotion_request(b"SDVPROMOTE1 steering\n"),
-            Some(VirtualEcuId::Steering)
+            parse_route_change_request(b"SDVPROMOTE1 steering\n"),
+            Some((VirtualEcuId::Steering, CandidateRouteOperation::Promote))
         );
-        assert_eq!(parse_promotion_request(b"SDVPROMOTE1 vehicle\n"), None);
-        assert_eq!(parse_promotion_request(b"SDVPROMOTE1 engine extra\n"), None);
+        assert_eq!(
+            parse_route_change_request(b"SDVREVERT1 brake\n"),
+            Some((VirtualEcuId::Brake, CandidateRouteOperation::ReturnToActive))
+        );
+        assert_eq!(parse_route_change_request(b"SDVPROMOTE1 vehicle\n"), None);
+        assert_eq!(parse_route_change_request(b"SDVREVERT1 vehicle\n"), None);
+        assert_eq!(
+            parse_route_change_request(b"SDVPROMOTE1 engine extra\n"),
+            None
+        );
+        assert_eq!(
+            parse_route_change_request(b"SDVREVERT1 brake extra\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn root_route_reversion_latches_hold_before_waiting_for_active_cycle_ack() {
+        let hold = StickyOutputHold::new(false);
+        let server_hold = hold.clone();
+        let health = Arc::new(ready_runtime_health());
+        let thread_health = Arc::clone(&health);
+        let (route_sender, route_receiver) = mpsc::sync_channel(1);
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let worker = thread::spawn(move || {
+            handle_control_client_with_uid(
+                server,
+                0,
+                &server_hold,
+                &thread_health,
+                Some(&route_sender),
+            )
+        });
+        client.write_all(b"SDVREVERT1 engine\n").unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        while !hold.is_held() {
+            thread::sleep(Duration::from_millis(1));
+        }
+        let mut platform = HoldTestPlatform::default();
+        hold.apply(&mut platform, VehicleActuation::default())
+            .unwrap();
+        let reversion = route_receiver.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(reversion.ecu, VirtualEcuId::Engine);
+        assert_eq!(reversion.operation, CandidateRouteOperation::ReturnToActive);
+        assert!(reversion.deadline > Instant::now());
+        assert!(hold.has_zero_apply_acknowledgement());
+        reversion.completion.send(Ok(())).unwrap();
+
+        let mut response = String::new();
+        std::io::BufReader::new(client)
+            .read_line(&mut response)
+            .unwrap();
+        assert_eq!(response, "SDVREVERTED engine\n");
+        worker.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn rejected_route_reversion_still_leaves_a_confirmed_output_hold() {
+        let hold = StickyOutputHold::new(false);
+        let server_hold = hold.clone();
+        let health = Arc::new(RuntimeHealth::new(Duration::from_millis(10), 0.02, 0.02));
+        let thread_health = Arc::clone(&health);
+        let (route_sender, _route_receiver) = mpsc::sync_channel(1);
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let worker = thread::spawn(move || {
+            handle_control_client_with_uid(
+                server,
+                0,
+                &server_hold,
+                &thread_health,
+                Some(&route_sender),
+            )
+        });
+        client.write_all(b"SDVREVERT1 engine\n").unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        while !hold.is_held() {
+            thread::sleep(Duration::from_millis(1));
+        }
+        let mut platform = HoldTestPlatform::default();
+        hold.apply(&mut platform, VehicleActuation::default())
+            .unwrap();
+
+        let mut response = String::new();
+        std::io::BufReader::new(client)
+            .read_line(&mut response)
+            .unwrap();
+        assert_eq!(response.as_bytes(), HOLD_NOT_READY);
+        assert_eq!(
+            worker.join().unwrap().unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert!(hold.is_held());
+        assert!(hold.has_zero_apply_acknowledgement());
+        assert_eq!(platform.applied.unwrap().command, ActuatorCmd::default());
+    }
+
+    #[test]
+    fn unavailable_route_reversion_still_latches_the_output_hold() {
+        let hold = StickyOutputHold::new(false);
+        let health = ready_runtime_health();
+        let server_hold = hold.clone();
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let worker = thread::spawn(move || {
+            handle_control_client_with_uid(server, 0, &server_hold, &health, None)
+        });
+        client.write_all(b"SDVREVERT1 engine\n").unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        while !hold.is_held() {
+            thread::sleep(Duration::from_millis(1));
+        }
+        let mut platform = HoldTestPlatform::default();
+        hold.apply(&mut platform, VehicleActuation::default())
+            .unwrap();
+
+        let mut response = String::new();
+        std::io::BufReader::new(client)
+            .read_line(&mut response)
+            .unwrap();
+        assert_eq!(
+            response,
+            "SDVROUTE_FAILED external candidate routing is unavailable\n"
+        );
+        assert_eq!(
+            worker.join().unwrap().unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert!(hold.has_zero_apply_acknowledgement());
+        assert_eq!(platform.applied.unwrap().command, ActuatorCmd::default());
     }
 
     #[test]

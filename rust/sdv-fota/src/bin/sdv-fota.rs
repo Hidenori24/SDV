@@ -1,6 +1,6 @@
 use sdv_fota::linux::{
-    request_ecu_candidate_promotion, state_root_for_target, FileBootControl, FilePackageSource,
-    FileSlotStorage, HttpsPackageSource,
+    request_ecu_candidate_promotion, request_ecu_candidate_reversion, state_root_for_target,
+    FileBootControl, FilePackageSource, FileSlotStorage, HttpsPackageSource,
 };
 use sdv_fota::{
     BootControl, Ecu, FotaInstaller, PackageSource, Slot, ValidationContext, MAX_MANIFEST_BYTES,
@@ -29,6 +29,7 @@ fn run(args: Vec<OsString>) -> Result<(), String> {
         Some("record-active-integrity") => record_active_integrity(command_args),
         Some("rollback-trial") => rollback_trial(command_args),
         Some("promote-candidate") => promote_candidate(command_args),
+        Some("revert-candidate") => revert_candidate(command_args),
         Some("status") => status(command_args),
         Some("verify-images") => verify_images(command_args),
         _ => Err(usage()),
@@ -161,6 +162,22 @@ fn promote_candidate(args: &[OsString]) -> Result<(), String> {
         .map_err(|error| format!("candidate route promotion failed: {error:?}"))?;
     println!(
         "candidate route for {} is active; the vehicle output hold remains latched",
+        target_name(target)
+    );
+    Ok(())
+}
+
+fn revert_candidate(args: &[OsString]) -> Result<(), String> {
+    let mut options = parse_named_options(args, &["--control-socket", "--target"])?;
+    let control_socket = PathBuf::from(required_option(&mut options, "--control-socket")?);
+    let target = parse_target(&required_option(&mut options, "--target")?)?;
+    if target == Ecu::Vehicle {
+        return Err("candidate route reversion requires an ECU target".into());
+    }
+    request_ecu_candidate_reversion(&control_socket, target)
+        .map_err(|error| format!("candidate route reversion failed: {error:?}"))?;
+    println!(
+        "candidate route for {} returned to its active worker; the vehicle output hold remains latched",
         target_name(target)
     );
     Ok(())
@@ -467,12 +484,12 @@ fn trial_outcome_name(outcome: sdv_fota::TrialOutcome) -> &'static str {
 }
 
 fn usage() -> String {
-    "usage:\n  sdv-fota init --state-root <dir> [--target <vehicle|engine|brake|steering>] --active-slot <a|b> --active-version <version> --security-version <n>\n  sdv-fota record-active-integrity --state-root <dir> [--target <vehicle|engine|brake|steering>] --slot <a|b>\n  sdv-fota rollback-trial --state-root <dir> [--target <vehicle|engine|brake|steering>]\n  sdv-fota promote-candidate --control-socket <path> --target <engine|brake|steering>\n  sdv-fota install --state-root <dir> --package <file> --target <vehicle|engine|brake|steering> --config-schema <n> --signal-if-version <n> [--trial-boots <n>]\n  sdv-fota install-url --state-root <dir> --url <https-url> --target <vehicle|engine|brake|steering> --config-schema <n> --signal-if-version <n> [--trial-boots <n>] [--client-cert <file> --client-key <file>]\n  sdv-fota status --state-root <dir> [--target <vehicle|engine|brake|steering>]\n  sdv-fota verify-images --state-root <dir> [--target <vehicle|engine|brake|steering>]".into()
+    "usage:\n  sdv-fota init --state-root <dir> [--target <vehicle|engine|brake|steering>] --active-slot <a|b> --active-version <version> --security-version <n>\n  sdv-fota record-active-integrity --state-root <dir> [--target <vehicle|engine|brake|steering>] --slot <a|b>\n  sdv-fota rollback-trial --state-root <dir> [--target <vehicle|engine|brake|steering>]\n  sdv-fota promote-candidate --control-socket <path> --target <engine|brake|steering>\n  sdv-fota revert-candidate --control-socket <path> --target <engine|brake|steering>\n  sdv-fota install --state-root <dir> --package <file> --target <vehicle|engine|brake|steering> --config-schema <n> --signal-if-version <n> [--trial-boots <n>]\n  sdv-fota install-url --state-root <dir> --url <https-url> --target <vehicle|engine|brake|steering> --config-schema <n> --signal-if-version <n> [--trial-boots <n>] [--client-cert <file> --client-key <file>]\n  sdv-fota status --state-root <dir> [--target <vehicle|engine|brake|steering>]\n  sdv-fota verify-images --state-root <dir> [--target <vehicle|engine|brake|steering>]".into()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_named_options, parse_target, state_root_for_target};
+    use super::{parse_named_options, parse_target, run, state_root_for_target, usage};
     use sdv_fota::Ecu;
     use std::collections::BTreeMap;
     use std::ffi::OsString;
@@ -542,5 +559,19 @@ mod tests {
         assert!(parse_named_options(&["--other".into(), "a".into()], accepted).is_err());
         assert!(parse_named_options(&["positional".into()], accepted).is_err());
         assert!(parse_named_options(&["--state-root".into()], accepted).is_err());
+    }
+
+    #[test]
+    fn candidate_route_reversion_is_ecu_only_and_listed_in_usage() {
+        let error = run(vec![
+            "revert-candidate".into(),
+            "--control-socket".into(),
+            "/run/sdv-fota/control.sock".into(),
+            "--target".into(),
+            "vehicle".into(),
+        ])
+        .unwrap_err();
+        assert_eq!(error, "candidate route reversion requires an ECU target");
+        assert!(usage().contains("sdv-fota revert-candidate"));
     }
 }
