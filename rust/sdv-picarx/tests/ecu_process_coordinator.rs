@@ -7,15 +7,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use sdv_core::config::Config;
 use sdv_core::model::VehicleState;
 use sdv_core::platform::HostCycleExecutor;
 use sdv_core::platform::{PlatformInputs, VehiclePlatform};
 use sdv_core::rte::DriverInput;
-use sdv_core::runtime::{ExternalEcuCycleError, VehicleActuation, VehicleRuntime};
+use sdv_core::runtime::{ExternalEcuCycleError, VehicleActuation, VehicleRuntime, VirtualEcuId};
 use sdv_core::runtime_host::{self, RunError, SystemClock};
 use sdv_picarx::ecu_process_coordinator::{
-    EcuProcessCoordinator, EcuProcessVehicleExecutor, Error as CoordinatorError, VehicleCycleError,
+    CandidateFailure, CandidateStatus, EcuProcessCoordinator, EcuProcessVehicleExecutor,
+    Error as CoordinatorError, VehicleCycleError,
 };
+use sdv_picarx::virtual_ecu_worker::{VirtualEcuWorker, WORKER_DATAGRAM_MAX_SIZE};
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
@@ -119,6 +122,22 @@ impl ExternalWorkerProcesses {
             let _ = child.wait();
         }
     }
+
+    fn start_one(ecu: &str, socket_directory: &Path, coordinator_socket: &Path) -> Self {
+        let child = Command::new(worker_binary())
+            .arg("--ecu")
+            .arg(ecu)
+            .arg("--worker-socket")
+            .arg(socket_directory.join(format!("{ecu}.sock")))
+            .arg("--coordinator-socket")
+            .arg(coordinator_socket)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        Self(vec![child])
+    }
 }
 
 impl Drop for ExternalWorkerProcesses {
@@ -142,6 +161,24 @@ fn wait_for_path(path: &Path) {
         "socket path did not appear: {}",
         path.display()
     );
+}
+
+fn wait_for_candidate_status(
+    coordinator: &EcuProcessCoordinator,
+    mut matches: impl FnMut(CandidateStatus) -> bool,
+) -> CandidateStatus {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let status = coordinator.candidate_statuses()[0];
+        if matches(status) {
+            return status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "candidate status timed out: {status:?}"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
 }
 
 #[test]
@@ -279,6 +316,406 @@ fn external_worker_services_are_ready_and_match_in_process_runtime() {
 }
 
 #[test]
+fn candidate_shadow_is_validated_but_never_changes_active_runtime_output() {
+    let root = TempDirectory::new();
+    let socket_directory = private_worker_directory(&root);
+    let candidate_directory = root.path().join("candidates");
+    fs::create_dir(&candidate_directory).unwrap();
+    fs::set_permissions(&candidate_directory, fs::Permissions::from_mode(0o700)).unwrap();
+    let coordinator_path = socket_directory.join("coordinator.sock");
+    let coordinator_thread = {
+        let socket_directory = socket_directory.clone();
+        let candidate_directory = candidate_directory.clone();
+        thread::spawn(move || {
+            EcuProcessCoordinator::connect_external_with_candidates(
+                socket_directory,
+                candidate_directory,
+            )
+        })
+    };
+    wait_for_path(&coordinator_path);
+    let candidate_coordinator_path = candidate_directory.join("coordinator.sock");
+    wait_for_path(&candidate_coordinator_path);
+    let mut active = ExternalWorkerProcesses::start(&socket_directory, &coordinator_path);
+    let mut candidate = ExternalWorkerProcesses::start_one(
+        "engine",
+        &candidate_directory,
+        &candidate_coordinator_path,
+    );
+    wait_for_path(&candidate_directory.join("engine.sock"));
+    let mut coordinator = coordinator_thread.join().unwrap().unwrap();
+    let mut in_process = VehicleRuntime::default();
+    let mut worker_runtime = VehicleRuntime::default();
+
+    for tick in 0..12_u64 {
+        // Match the production 10 ms coordinator cadence so this test exercises a healthy
+        // candidate worker instead of intentionally outrunning its process scheduler.
+        thread::sleep(Duration::from_millis(10));
+        let driver = DriverInput {
+            throttle: 0.25,
+            brake: 0.0,
+            steer: 0.03,
+        };
+        let state = VehicleState {
+            t: tick as f32 * 0.01,
+            v: driver.throttle,
+            ..VehicleState::default()
+        };
+        let expected = in_process.step_10ms(driver, state, true);
+        let actual = worker_runtime
+            .step_10ms_with_external_ecus(driver, state, true, |_, inputs| {
+                let cycle_id = coordinator.next_cycle_id()?;
+                coordinator.exchange_cycle(
+                    cycle_id,
+                    inputs,
+                    Instant::now() + Duration::from_millis(100),
+                )
+            })
+            .unwrap();
+        assert_eq!(actual, expected);
+        let status = wait_for_candidate_status(&coordinator, |status| {
+            status != CandidateStatus::Unavailable && status != CandidateStatus::Disabled
+        });
+        assert!(matches!(
+            status,
+            CandidateStatus::Ready | CandidateStatus::Pending
+        ));
+    }
+
+    assert!(candidate_directory.join("engine.sock").exists());
+    drop(coordinator);
+    candidate.stop();
+    active.stop();
+}
+
+#[test]
+fn candidate_timeout_does_not_fail_active_worker_cycle() {
+    let root = TempDirectory::new();
+    let socket_directory = private_worker_directory(&root);
+    let candidate_directory = root.path().join("candidates");
+    fs::create_dir(&candidate_directory).unwrap();
+    fs::set_permissions(&candidate_directory, fs::Permissions::from_mode(0o700)).unwrap();
+    let candidate_path = candidate_directory.join("engine.sock");
+    let candidate_socket = UnixDatagram::bind(&candidate_path).unwrap();
+    fs::set_permissions(&candidate_path, fs::Permissions::from_mode(0o600)).unwrap();
+    let coordinator_path = socket_directory.join("coordinator.sock");
+    let coordinator_thread = {
+        let socket_directory = socket_directory.clone();
+        let candidate_directory = candidate_directory.clone();
+        thread::spawn(move || {
+            EcuProcessCoordinator::connect_external_with_candidates(
+                socket_directory,
+                candidate_directory,
+            )
+        })
+    };
+    wait_for_path(&coordinator_path);
+    wait_for_path(&candidate_directory.join("coordinator.sock"));
+    let mut active = ExternalWorkerProcesses::start(&socket_directory, &coordinator_path);
+    let mut coordinator = coordinator_thread.join().unwrap().unwrap();
+    let engine_input = [sdv_core::bus::Frame::Safety(Default::default())];
+    let brake_input = [sdv_core::bus::Frame::Safety(Default::default())];
+    let steering_input = [sdv_core::bus::Frame::Safety(Default::default())];
+    let inputs = [
+        engine_input.as_slice(),
+        brake_input.as_slice(),
+        steering_input.as_slice(),
+    ];
+    for _ in 0..6 {
+        let cycle_id = coordinator.next_cycle_id().unwrap();
+        let outputs = coordinator
+            .exchange_cycle(
+                cycle_id,
+                inputs,
+                Instant::now() + Duration::from_millis(100),
+            )
+            .unwrap();
+        assert!(outputs
+            .iter()
+            .all(|output| matches!(output.alive, sdv_core::bus::Frame::Alive { .. })));
+    }
+    assert_eq!(
+        wait_for_candidate_status(&coordinator, |status| {
+            matches!(status, CandidateStatus::Failed(_))
+        }),
+        CandidateStatus::Failed(CandidateFailure::Timeout)
+    );
+    drop(candidate_socket);
+    drop(coordinator);
+    active.stop();
+}
+
+#[test]
+fn candidate_pending_request_clears_ready_and_times_out_after_two_cycles() {
+    let root = TempDirectory::new();
+    let socket_directory = private_worker_directory(&root);
+    let candidate_directory = root.path().join("candidates");
+    fs::create_dir(&candidate_directory).unwrap();
+    fs::set_permissions(&candidate_directory, fs::Permissions::from_mode(0o700)).unwrap();
+    let candidate_path = candidate_directory.join("engine.sock");
+    let candidate_socket = UnixDatagram::bind(&candidate_path).unwrap();
+    fs::set_permissions(&candidate_path, fs::Permissions::from_mode(0o600)).unwrap();
+    candidate_socket
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let (request_seen_tx, request_seen_rx) = std::sync::mpsc::channel();
+    let candidate_responder = thread::spawn(move || {
+        let mut request = [0; WORKER_DATAGRAM_MAX_SIZE + 1];
+        let (received, coordinator_addr) = candidate_socket.recv_from(&mut request).unwrap();
+        let coordinator_path = coordinator_addr.as_pathname().unwrap();
+        let mut worker = VirtualEcuWorker::new(VirtualEcuId::Engine, &Config::default());
+        let mut response = [0; WORKER_DATAGRAM_MAX_SIZE];
+        let response_len = worker
+            .handle_datagram(&request[..received], &mut response)
+            .unwrap();
+        candidate_socket
+            .send_to(&response[..response_len], coordinator_path)
+            .unwrap();
+        request_seen_tx.send(1).unwrap();
+
+        // Receive the following request but withhold its reply to model a candidate that stops
+        // responding after one valid shadow cycle.
+        let _ = candidate_socket.recv_from(&mut request).unwrap();
+        request_seen_tx.send(2).unwrap();
+    });
+    let coordinator_path = socket_directory.join("coordinator.sock");
+    let coordinator_thread = {
+        let socket_directory = socket_directory.clone();
+        let candidate_directory = candidate_directory.clone();
+        thread::spawn(move || {
+            EcuProcessCoordinator::connect_external_with_candidates(
+                socket_directory,
+                candidate_directory,
+            )
+        })
+    };
+    wait_for_path(&coordinator_path);
+    wait_for_path(&candidate_directory.join("coordinator.sock"));
+    let mut active = ExternalWorkerProcesses::start(&socket_directory, &coordinator_path);
+    let mut coordinator = coordinator_thread.join().unwrap().unwrap();
+    let input = [sdv_core::bus::Frame::Safety(Default::default())];
+    let inputs = [input.as_slice(), input.as_slice(), input.as_slice()];
+    let mut first_candidate_cycle = None;
+
+    for tick in 0..3 {
+        thread::sleep(Duration::from_millis(10));
+        let cycle_id = coordinator.next_cycle_id().unwrap();
+        if tick == 0 {
+            first_candidate_cycle = Some(cycle_id);
+        }
+        let outputs = coordinator
+            .exchange_cycle(
+                cycle_id,
+                inputs,
+                Instant::now() + Duration::from_millis(100),
+            )
+            .unwrap();
+        assert!(outputs
+            .iter()
+            .all(|output| matches!(output.alive, sdv_core::bus::Frame::Alive { .. })));
+        if tick < 2 {
+            request_seen_rx
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap();
+            assert_eq!(
+                wait_for_candidate_status(&coordinator, |status| {
+                    status == CandidateStatus::Pending
+                }),
+                CandidateStatus::Pending
+            );
+            if tick == 1 {
+                let first_candidate_cycle = first_candidate_cycle.unwrap();
+                let deadline = Instant::now() + Duration::from_secs(1);
+                while coordinator.candidate_last_validated_cycles()[0]
+                    != Some(first_candidate_cycle)
+                {
+                    assert!(
+                        Instant::now() < deadline,
+                        "valid candidate cycle was not recorded"
+                    );
+                    thread::sleep(Duration::from_millis(1));
+                }
+            }
+        } else {
+            assert_eq!(
+                wait_for_candidate_status(&coordinator, |status| {
+                    matches!(status, CandidateStatus::Failed(_))
+                }),
+                CandidateStatus::Failed(CandidateFailure::Timeout),
+                "tick {tick}"
+            );
+            assert_eq!(
+                coordinator.candidate_last_validated_cycles()[0],
+                first_candidate_cycle
+            );
+        }
+    }
+
+    candidate_responder.join().unwrap();
+    drop(coordinator);
+    active.stop();
+}
+
+#[test]
+fn malformed_candidate_response_flood_is_isolated_from_active_workers() {
+    let root = TempDirectory::new();
+    let socket_directory = private_worker_directory(&root);
+    let candidate_directory = root.path().join("candidates");
+    fs::create_dir(&candidate_directory).unwrap();
+    fs::set_permissions(&candidate_directory, fs::Permissions::from_mode(0o700)).unwrap();
+    let candidate_path = candidate_directory.join("engine.sock");
+    let candidate_socket = UnixDatagram::bind(&candidate_path).unwrap();
+    fs::set_permissions(&candidate_path, fs::Permissions::from_mode(0o600)).unwrap();
+    candidate_socket
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let (flooded_tx, flooded_rx) = std::sync::mpsc::channel();
+    let malformed_candidate = thread::spawn(move || {
+        let mut request = [0; 1024];
+        let (_, coordinator_addr) = candidate_socket.recv_from(&mut request).unwrap();
+        let coordinator_path = coordinator_addr.as_pathname().unwrap();
+        candidate_socket.set_nonblocking(true).unwrap();
+        for _ in 0..128 {
+            if candidate_socket
+                .send_to(b"invalid-candidate-response", coordinator_path)
+                .is_err()
+            {
+                break;
+            }
+        }
+        let _ = flooded_tx.send(());
+    });
+    let coordinator_path = socket_directory.join("coordinator.sock");
+    let coordinator_thread = {
+        let socket_directory = socket_directory.clone();
+        let candidate_directory = candidate_directory.clone();
+        thread::spawn(move || {
+            EcuProcessCoordinator::connect_external_with_candidates(
+                socket_directory,
+                candidate_directory,
+            )
+        })
+    };
+    wait_for_path(&coordinator_path);
+    wait_for_path(&candidate_directory.join("coordinator.sock"));
+    let mut active = ExternalWorkerProcesses::start(&socket_directory, &coordinator_path);
+    let mut coordinator = coordinator_thread.join().unwrap().unwrap();
+    let engine_input = [sdv_core::bus::Frame::Safety(Default::default())];
+    let brake_input = [sdv_core::bus::Frame::Safety(Default::default())];
+    let steering_input = [sdv_core::bus::Frame::Safety(Default::default())];
+    let inputs = [
+        engine_input.as_slice(),
+        brake_input.as_slice(),
+        steering_input.as_slice(),
+    ];
+    for cycle_index in 0..2 {
+        let cycle_id = coordinator.next_cycle_id().unwrap();
+        let cycle_started = Instant::now();
+        let result =
+            coordinator.exchange_cycle(cycle_id, inputs, cycle_started + Duration::from_millis(10));
+        assert!(
+            result.is_ok(),
+            "candidate protocol error stopped active workers: {result:?}"
+        );
+        assert!(
+            cycle_started.elapsed() < Duration::from_millis(10),
+            "candidate maintenance consumed the 10 ms active cycle budget"
+        );
+        if cycle_index == 0 {
+            // The first cycle queues the shadow request. Wait until the candidate flood is on
+            // its private coordinator socket before measuring the active cycle that drains it.
+            flooded_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        }
+    }
+    assert_eq!(
+        wait_for_candidate_status(&coordinator, |status| {
+            matches!(status, CandidateStatus::Failed(_))
+        }),
+        CandidateStatus::Failed(CandidateFailure::Protocol)
+    );
+    malformed_candidate.join().unwrap();
+    drop(coordinator);
+    active.stop();
+}
+
+#[test]
+fn duplicate_candidate_response_does_not_consume_active_replies() {
+    let root = TempDirectory::new();
+    let socket_directory = private_worker_directory(&root);
+    let candidate_directory = root.path().join("candidates");
+    fs::create_dir(&candidate_directory).unwrap();
+    fs::set_permissions(&candidate_directory, fs::Permissions::from_mode(0o700)).unwrap();
+    let candidate_path = candidate_directory.join("engine.sock");
+    let candidate_socket = UnixDatagram::bind(&candidate_path).unwrap();
+    fs::set_permissions(&candidate_path, fs::Permissions::from_mode(0o600)).unwrap();
+    candidate_socket
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let duplicate_candidate = thread::spawn(move || {
+        let mut request = [0; WORKER_DATAGRAM_MAX_SIZE + 1];
+        let (received, coordinator_addr) = candidate_socket.recv_from(&mut request).unwrap();
+        let coordinator_path = coordinator_addr.as_pathname().unwrap();
+        let mut worker = VirtualEcuWorker::new(VirtualEcuId::Engine, &Config::default());
+        let mut response = [0; WORKER_DATAGRAM_MAX_SIZE];
+        let response_len = worker
+            .handle_datagram(&request[..received], &mut response)
+            .unwrap();
+        candidate_socket
+            .send_to(&response[..response_len], coordinator_path)
+            .unwrap();
+        candidate_socket
+            .send_to(&response[..response_len], coordinator_path)
+            .unwrap();
+    });
+    let coordinator_path = socket_directory.join("coordinator.sock");
+    let coordinator_thread = {
+        let socket_directory = socket_directory.clone();
+        let candidate_directory = candidate_directory.clone();
+        thread::spawn(move || {
+            EcuProcessCoordinator::connect_external_with_candidates(
+                socket_directory,
+                candidate_directory,
+            )
+        })
+    };
+    wait_for_path(&coordinator_path);
+    wait_for_path(&candidate_directory.join("coordinator.sock"));
+    let mut active = ExternalWorkerProcesses::start(&socket_directory, &coordinator_path);
+    let mut coordinator = coordinator_thread.join().unwrap().unwrap();
+    let engine_input = [sdv_core::bus::Frame::Safety(Default::default())];
+    let brake_input = [sdv_core::bus::Frame::Safety(Default::default())];
+    let steering_input = [sdv_core::bus::Frame::Safety(Default::default())];
+    let inputs = [
+        engine_input.as_slice(),
+        brake_input.as_slice(),
+        steering_input.as_slice(),
+    ];
+
+    for _ in 0..2 {
+        let cycle_id = coordinator.next_cycle_id().unwrap();
+        let outputs = coordinator
+            .exchange_cycle(
+                cycle_id,
+                inputs,
+                Instant::now() + Duration::from_millis(100),
+            )
+            .unwrap();
+        assert!(outputs
+            .iter()
+            .all(|output| matches!(output.alive, sdv_core::bus::Frame::Alive { .. })));
+    }
+    duplicate_candidate.join().unwrap();
+    assert_eq!(
+        wait_for_candidate_status(&coordinator, |status| {
+            matches!(status, CandidateStatus::Failed(_))
+        }),
+        CandidateStatus::Failed(CandidateFailure::DuplicateResponse)
+    );
+    drop(coordinator);
+    active.stop();
+}
+
+#[test]
 fn external_coordinator_waits_for_workers_and_cleans_up_only_its_socket() {
     let root = TempDirectory::new();
     let socket_directory = private_worker_directory(&root);
@@ -360,6 +797,45 @@ fn external_connect_requires_an_existing_private_socket_directory() {
         Err(CoordinatorError::Io(_)) | Err(CoordinatorError::UnsafeSocketPath)
     ));
     assert!(!socket_directory.exists());
+}
+
+#[test]
+fn invalid_candidate_socket_configuration_does_not_block_active_cycles() {
+    let root = TempDirectory::new();
+    let socket_directory = private_worker_directory(&root);
+    let coordinator_path = socket_directory.join("coordinator.sock");
+    let coordinator_thread = {
+        let socket_directory = socket_directory.clone();
+        let candidate_directory = socket_directory.clone();
+        thread::spawn(move || {
+            EcuProcessCoordinator::connect_external_with_candidates(
+                socket_directory,
+                candidate_directory,
+            )
+        })
+    };
+    wait_for_path(&coordinator_path);
+    let mut active = ExternalWorkerProcesses::start(&socket_directory, &coordinator_path);
+    let mut coordinator = coordinator_thread.join().unwrap().unwrap();
+    assert_eq!(
+        coordinator.candidate_statuses()[0],
+        CandidateStatus::Failed(CandidateFailure::UnsafeSocket)
+    );
+
+    let input = [sdv_core::bus::Frame::Safety(Default::default())];
+    let cycle_id = coordinator.next_cycle_id().unwrap();
+    let outputs = coordinator
+        .exchange_cycle(
+            cycle_id,
+            [input.as_slice(), input.as_slice(), input.as_slice()],
+            Instant::now() + Duration::from_millis(100),
+        )
+        .unwrap();
+    assert!(outputs
+        .iter()
+        .all(|output| matches!(output.alive, sdv_core::bus::Frame::Alive { .. })));
+    drop(coordinator);
+    active.stop();
 }
 
 #[test]

@@ -102,7 +102,7 @@ It accepts one named option, `--config <file.json>`. The JSON config contains:
 | `gpio_chip`, `left_direction_line`, `right_direction_line` | GPIO chip device path and line offsets |
 | `input_socket`, `input_max_age_ms` | Local input socket path and maximum input age |
 | `trial_stationary_speed_tolerance_mps`, `trial_stationary_throttle_tolerance` | Maximum estimated speed and requested throttle accepted by the FOTA trial health check |
-| `virtual_ecu_workers` | Optional worker-process mode. `mode` defaults to `spawn` for existing configs and requires a trusted `binary`; set `mode` to `external` and omit `binary` to connect to externally managed workers. Invalid mode/binary combinations are rejected. Omit the whole field to keep in-process ECU tasks. |
+| `virtual_ecu_workers` | Optional worker-process mode. `mode` defaults to `spawn` for existing configs and requires a trusted `binary`; set `mode` to `external` and omit `binary` to connect to externally managed workers. External mode may set `candidate_socket_directory` for isolated shadow trial workers. Invalid mode/binary combinations are rejected. Omit the whole field to keep in-process ECU tasks. |
 | `motor` | Forward direction polarity and measured minimum/maximum PWM duty |
 | `vehicle` | Measured drive and steering calibration used by the ECU adapter |
 
@@ -153,16 +153,28 @@ first integration, ECU services use the existing `sdv-app` UID/GID with empty su
 they receive no `gpio` or `i2c` groups. Sharing the vehicle UID does not create OS privilege
 isolation. Each worker holds a mode-0600 per-socket lock, refuses a second live instance, and only
 reclaims an owner-owned stale socket in the private directory after the socket is unresponsive and
-its inode is rechecked. The host systemd unit prepares the private directory; external mode requires
-that existing directory. The coordinator remains responsible for fail-closed output application if any worker is
-missing or returns an invalid response. ECU trial/candidate startup, output hold, candidate health,
-socket cutover, and commit/rollback are not connected yet.
+its inode is rechecked. The host systemd unit prepares the private worker and candidate directories;
+external mode requires those directories to exist. When external mode sets
+`candidate_socket_directory` to `/run/sdv-picarx/candidates`, the host binds a second coordinator
+socket there. Start an ECU's `sdv-fota-ecu-candidate@<ecu>.service` only after that ECU has a
+pending trial image. Candidate requests and responses use the separate socket and are processed
+independently of active worker replies. After validating active replies, the host enqueues a fixed
+request snapshot through a capacity-one `try_send` queue. Candidate filesystem checks, datagram
+I/O, timeout accounting, and journal writes run on a separate thread. A full queue or expired
+snapshot skips only that shadow cycle, and candidate coordinator setup errors do not prevent active
+worker startup. A matching response is recorded as `Ready` in the host journal, but its command and
+alive frame are discarded; the active route remains in use. Candidate timeout, malformed or
+duplicate response, and socket changes mark only that candidate failed. They do not fail or delay
+the active vehicle cycle. This is not output-route approval or a stable health verdict.
+There is no output hold, route cutover, commit, or automatic rollback in this slice. The coordinator
+still fails closed if an active worker is missing or returns an invalid response.
 
 Install and enable the worker units after initializing an active image in each ECU state root and
 installing the target-aware FOTA launcher configuration:
 
 ```sh
 sudo install -m 0644 deploy/systemd/sdv-fota-ecu@.service /etc/systemd/system/
+sudo install -m 0644 deploy/systemd/sdv-fota-ecu-candidate@.service /etc/systemd/system/
 sudo install -m 0644 deploy/systemd/sdv-fota-workers.target /etc/systemd/system/
 sudo install -m 0644 deploy/systemd/sdv-fota-launcher.service /etc/systemd/system/
 sudo systemctl daemon-reload
@@ -170,6 +182,24 @@ sudo systemctl stop sdv-fota-workers.target
 sudo systemctl restart sdv-fota-launcher.service
 sudo systemctl enable --now sdv-fota-workers.target
 ```
+
+After staging and verifying one ECU's pending trial package, start only that ECU's shadow worker.
+For example, with a valid Engine trial and the external config above:
+
+```sh
+sudo sdv-fota status --state-root /var/lib/sdv-fota --target engine
+sudo sdv-fota verify-images --state-root /var/lib/sdv-fota --target engine
+sudo systemctl start sdv-fota-ecu-candidate@engine.service
+sudo journalctl -u sdv-fota-launcher.service -f
+```
+
+The candidate launcher snapshots the pending slot and verifies its digest without calling
+`select_for_boot`; `boots_left`, active slot, trial metadata, and digests remain unchanged. The boot
+record lock protects snapshot and exec startup, and the per-ECU image update lock is released after
+the candidate process starts. Stop the candidate before replacing its package or running
+`sdv-fota rollback-trial --state-root /var/lib/sdv-fota --target engine`. Candidate output is never
+applied. This shadow path has no stationary output hold, production-route cutover, trial commit, or
+automatic rollback.
 
 `binary` remains set in `config/pi5.worker-processes.disabled.example.json` for the original
 coordinator-spawn mode. Omitting `virtual_ecu_workers` preserves the existing in-process runtime
@@ -183,8 +213,12 @@ initialized active image, install the external config, start the host launcher, 
 active while stopping the target makes the host fail closed and restart because its workers are
 missing.
 
-Per-ECU FOTA package staging and trial metadata use separate state roots, but the FOTA launcher does
-not yet select worker images or connect per-ECU trial health, commit, or rollback.
+Per-ECU FOTA package staging and trial metadata use separate state roots. The candidate service
+launches only the pending image into its candidate-only socket, without consuming boots, changing
+metadata, or selecting candidate outputs. Stop `sdv-fota-ecu-candidate@<ecu>.service` before
+installing a replacement or running administrative rollback; otherwise a shadow process may
+continue after metadata changes. Output hold, active/candidate route cutover, stable candidate
+health, commit, and rollback coordination are a later stage.
 
 `config/pi5.disabled.example.json` is a commissioning template. Its zero motor duty and zero
 forward-power limit keep drive output disabled. `config/pi5.fota.disabled.example.json` uses the
