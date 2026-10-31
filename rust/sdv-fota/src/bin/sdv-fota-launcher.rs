@@ -20,6 +20,7 @@ enum Invocation {
         health_args: Vec<OsString>,
         app_args: Vec<OsString>,
         trial_candidate: bool,
+        hold_socket: Option<PathBuf>,
     },
 }
 
@@ -72,6 +73,7 @@ fn run(
             health_args,
             app_args,
             trial_candidate,
+            hold_socket,
         } => match target {
             Ecu::Vehicle if !trial_candidate => {
                 run_selected_target_image_as_with_groups_and_app_args(
@@ -90,7 +92,15 @@ fn run(
             Ecu::Vehicle => Err(sdv_fota::linux::Error::InvalidTargetLaunchMode),
             Ecu::Engine | Ecu::Brake | Ecu::Steering if trial_candidate => {
                 run_trial_candidate_target_image_as_with_groups_and_app_args(
-                    base_root, target, uid, gid, &groups, &app_args,
+                    base_root,
+                    target,
+                    uid,
+                    gid,
+                    &groups,
+                    &app_args,
+                    hold_socket
+                        .as_deref()
+                        .expect("candidate invocation requires a hold socket"),
                 )
             }
             Ecu::Engine | Ecu::Brake | Ecu::Steering => {
@@ -134,6 +144,7 @@ fn parse_flag_invocation(args: &[OsString]) -> Result<Invocation, String> {
     let mut health_args = Vec::new();
     let mut app_args = Vec::new();
     let mut trial_candidate = false;
+    let mut hold_socket = None;
     let mut args = args.iter();
 
     while let Some(option) = args.next() {
@@ -159,6 +170,7 @@ fn parse_flag_invocation(args: &[OsString]) -> Result<Invocation, String> {
             "--health-program" => set_once(&mut health_program, value.clone(), option)?,
             "--health-arg" => health_args.push(value.clone()),
             "--app-arg" => app_args.push(value.clone()),
+            "--hold-socket" => set_once(&mut hold_socket, value.clone(), option)?,
             _ => return Err(format!("unknown option: {option}\n{}", usage())),
         }
     }
@@ -188,6 +200,12 @@ fn parse_flag_invocation(args: &[OsString]) -> Result<Invocation, String> {
             usage()
         ));
     }
+    if trial_candidate != hold_socket.is_some() {
+        return Err(format!(
+            "--trial-candidate requires exactly one --hold-socket; other modes reject it\n{}",
+            usage()
+        ));
+    }
     Ok(Invocation::Flags {
         base_root: PathBuf::from(required(state_root, "--state-root")?),
         target,
@@ -195,6 +213,7 @@ fn parse_flag_invocation(args: &[OsString]) -> Result<Invocation, String> {
         health_args,
         app_args,
         trial_candidate,
+        hold_socket: hold_socket.map(PathBuf::from),
     })
 }
 
@@ -284,7 +303,7 @@ fn configured_id(name: &str) -> Result<u32, String> {
 }
 
 fn usage() -> String {
-    "usage:\n  sdv-fota-launcher <state-root> <health-check-program> [health-check-args...]\n  sdv-fota-launcher --state-root <base-dir> --target vehicle --health-program <path> [--health-arg <arg> ...] [--app-arg <arg> ...]\n  sdv-fota-launcher --state-root <base-dir> --target <engine|brake|steering> [--app-arg <arg> ...] (active image only)\n  sdv-fota-launcher --state-root <base-dir> --target <engine|brake|steering> --trial-candidate [--app-arg <arg> ...] (pending image, shadow only; no metadata changes)".to_owned()
+    "usage:\n  sdv-fota-launcher <state-root> <health-check-program> [health-check-args...]\n  sdv-fota-launcher --state-root <base-dir> --target vehicle --health-program <path> [--health-arg <arg> ...] [--app-arg <arg> ...]\n  sdv-fota-launcher --state-root <base-dir> --target <engine|brake|steering> [--app-arg <arg> ...] (active image only)\n  sdv-fota-launcher --state-root <base-dir> --target <engine|brake|steering> --trial-candidate --hold-socket <root-control-socket> [--app-arg <arg> ...] (zero-output hold required; pending image remains shadow-only; no metadata changes)".to_owned()
 }
 
 #[cfg(test)]
@@ -466,6 +485,8 @@ mod tests {
             "--target".into(),
             "engine".into(),
             "--trial-candidate".into(),
+            "--hold-socket".into(),
+            "/run/sdv-picarx/control.sock".into(),
             "--app-arg".into(),
             "--ecu".into(),
             "--app-arg".into(),
@@ -499,7 +520,26 @@ mod tests {
             "--target".into(),
             "brake".into(),
             "--trial-candidate".into(),
+            "--hold-socket".into(),
+            "/run/sdv-picarx/control.sock".into(),
             "--trial-candidate".into(),
+        ])
+        .is_err());
+        assert!(parse_invocation([
+            "--state-root".into(),
+            "/var/lib/sdv-fota".into(),
+            "--target".into(),
+            "engine".into(),
+            "--trial-candidate".into(),
+        ])
+        .is_err());
+        assert!(parse_invocation([
+            "--state-root".into(),
+            "/var/lib/sdv-fota".into(),
+            "--target".into(),
+            "engine".into(),
+            "--hold-socket".into(),
+            "/run/sdv-picarx/control.sock".into(),
         ])
         .is_err());
     }
