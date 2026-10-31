@@ -12,11 +12,13 @@ use sdv_fota::{
 use sdv_sec::{ed25519_public_key, ed25519_sign, sha256};
 use std::ffi::OsString;
 use std::fs;
+use std::io::{Read, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Barrier};
+use std::sync::{mpsc, Arc, Barrier};
 
 static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
 const SIGNING_SEED: [u8; 32] = [7; 32];
@@ -64,6 +66,31 @@ fn write_arg_recording_image(root: &Path, slot: Slot, log_path: &Path, stay_aliv
         slot,
         &format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{log_path}'\n{trial_behavior}exit 0\n"),
     );
+}
+
+fn start_output_hold_server(
+    path: &Path,
+) -> (
+    mpsc::Receiver<()>,
+    mpsc::Sender<()>,
+    std::thread::JoinHandle<()>,
+) {
+    let listener = UnixListener::bind(path).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    let (request_seen_tx, request_seen_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0u8; 9];
+        stream.read_exact(&mut request).unwrap();
+        assert_eq!(&request, b"SDVHOLD1\n");
+        let mut trailing = [0u8; 1];
+        assert_eq!(stream.read(&mut trailing).unwrap(), 0);
+        request_seen_tx.send(()).unwrap();
+        release_rx.recv().unwrap();
+        stream.write_all(b"SDVHELD1\n").unwrap();
+    });
+    (request_seen_rx, release_tx, worker)
 }
 
 #[test]
@@ -415,6 +442,49 @@ fn linux_launcher_commits_trial_after_health_command_succeeds() {
 }
 
 #[test]
+fn vehicle_launcher_sets_startup_hold_only_while_an_ecu_trial_is_pending() {
+    let root = TempRoot::new();
+    let hold_marker = root.0.join("pending-ecu-trial-env");
+    let vehicle_boot = FileBootControl::new(&root.0);
+    vehicle_boot.initialize(Slot::A, "1.0.0", 1).unwrap();
+    write_slot_image(
+        &root.0,
+        Slot::A,
+        &format!(
+            "#!/bin/sh\nprintf '%s' \"${{SDV_FOTA_PENDING_ECU_TRIAL:-}}\" > '{}'\nexit 0\n",
+            hold_marker.display()
+        ),
+    );
+    let health = root.0.join("health-check");
+    write_executable(&health, "#!/bin/sh\nexit 0\n");
+
+    fs::create_dir_all(root.0.join("ecus")).unwrap();
+    let engine_root = state_root_for_target(&root.0, Ecu::Engine);
+    let mut engine_boot = FileBootControl::new(&engine_root);
+    engine_boot.initialize(Slot::A, "1.0.0", 7).unwrap();
+    engine_boot
+        .schedule_trial(TrialImage {
+            slot: Slot::B,
+            version: fixed_version("1.1.0"),
+            security_version: 8,
+            boots_left: 3,
+            trial_window_ms: 5_000,
+        })
+        .unwrap();
+
+    assert!(run_selected_image_with_app_args(&root.0, &health, &[], &[])
+        .unwrap()
+        .success());
+    assert_eq!(fs::read_to_string(&hold_marker).unwrap(), "1");
+
+    engine_boot.rollback_trial().unwrap();
+    assert!(run_selected_image_with_app_args(&root.0, &health, &[], &[])
+        .unwrap()
+        .success());
+    assert_eq!(fs::read_to_string(&hold_marker).unwrap(), "");
+}
+
+#[test]
 fn launcher_usage_errors_keep_the_legacy_exit_code() {
     let missing_arguments = Command::new(env!("CARGO_BIN_EXE_sdv-fota-launcher"))
         .output()
@@ -721,6 +791,7 @@ fn ecu_trial_candidate_runs_pending_image_without_changing_any_boot_metadata() {
     let engine_root = state_root_for_target(&root.0, Ecu::Engine);
     let candidate_log = root.0.join("candidate-ecu-argv.txt");
     let candidate_env = root.0.join("candidate-ecu-env.txt");
+    let hold_socket = root.0.join("hold.sock");
     let mut boot = FileBootControl::new(&engine_root);
     boot.initialize(Slot::A, "1.0.0", 7).unwrap();
     write_slot_image(&engine_root, Slot::A, "#!/bin/sh\nexit 0\n");
@@ -766,9 +837,25 @@ printf '%s|%s\n' "${{SDV_TRIAL_SLOT:-}}" "${{SDV_TRIAL_CANDIDATE_SLOT:-}}" > '{}
         OsString::from("/run/sdv-picarx/candidates/engine.sock"),
         OsString::from("one argument with spaces"),
     ];
-
-    let status =
-        run_trial_candidate_target_image_with_app_args(&root.0, Ecu::Engine, &app_args).unwrap();
+    let (hold_requested, release_hold, hold_server) = start_output_hold_server(&hold_socket);
+    let candidate_root = root.0.clone();
+    let candidate_args = app_args.clone();
+    let candidate_socket = hold_socket.clone();
+    let candidate = std::thread::spawn(move || {
+        run_trial_candidate_target_image_with_app_args(
+            candidate_root,
+            Ecu::Engine,
+            &candidate_args,
+            &candidate_socket,
+        )
+    });
+    hold_requested
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    assert!(!candidate_log.exists(), "candidate ran before hold ACK");
+    release_hold.send(()).unwrap();
+    let status = candidate.join().unwrap().unwrap();
+    hold_server.join().unwrap();
 
     assert!(status.success());
     assert_eq!(
@@ -820,6 +907,7 @@ fn ecu_trial_candidate_releases_image_update_lock_after_exec_starts() {
     fs::create_dir_all(root.0.join("ecus")).unwrap();
     let engine_root = state_root_for_target(&root.0, Ecu::Engine);
     let started_marker = root.0.join("candidate-started");
+    let hold_socket = root.0.join("hold.sock");
     let mut boot = FileBootControl::new(&engine_root);
     boot.initialize(Slot::A, "1.0.0", 7).unwrap();
     write_slot_image(&engine_root, Slot::A, "#!/bin/sh\nexit 0\n");
@@ -836,14 +924,21 @@ fn ecu_trial_candidate_releases_image_update_lock_after_exec_starts() {
         trial_window_ms: 5_000,
     })
     .unwrap();
+    let (hold_requested, release_hold, hold_server) = start_output_hold_server(&hold_socket);
     let root_path = root.0.clone();
+    let socket_path = hold_socket.clone();
     let candidate = std::thread::spawn(move || {
         run_trial_candidate_target_image_with_app_args(
             root_path,
             Ecu::Engine,
             &[OsString::from("--ecu"), OsString::from("engine")],
+            &socket_path,
         )
     });
+    hold_requested
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    release_hold.send(()).unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     while !started_marker.exists() && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(5));
@@ -854,6 +949,97 @@ fn ecu_trial_candidate_releases_image_update_lock_after_exec_starts() {
     assert!(storage.begin_inactive_image(Slot::A, 1).is_ok());
     drop(storage);
     assert!(candidate.join().unwrap().unwrap().success());
+    hold_server.join().unwrap();
+}
+
+#[test]
+fn ecu_trial_candidate_fails_without_hold_endpoint_before_spawning_image() {
+    let root = TempRoot::new();
+    fs::create_dir_all(root.0.join("ecus")).unwrap();
+    let engine_root = state_root_for_target(&root.0, Ecu::Engine);
+    let marker = root.0.join("candidate-ran");
+    let hold_socket = root.0.join("not-a-private-socket");
+    let mut boot = FileBootControl::new(&engine_root);
+    boot.initialize(Slot::A, "1.0.0", 7).unwrap();
+    write_slot_image(&engine_root, Slot::A, "#!/bin/sh\nexit 0\n");
+    write_slot_image(
+        &engine_root,
+        Slot::B,
+        &format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+    );
+    boot.schedule_trial(TrialImage {
+        slot: Slot::B,
+        version: fixed_version("1.1.0"),
+        security_version: 8,
+        boots_left: 3,
+        trial_window_ms: 5_000,
+    })
+    .unwrap();
+    fs::write(&hold_socket, b"not a socket").unwrap();
+    fs::set_permissions(&hold_socket, fs::Permissions::from_mode(0o644)).unwrap();
+    let before = boot.state().unwrap();
+
+    let error = run_trial_candidate_target_image_with_app_args(
+        &root.0,
+        Ecu::Engine,
+        &[OsString::from("--ecu"), OsString::from("engine")],
+        &hold_socket,
+    )
+    .unwrap_err();
+
+    assert!(matches!(error, sdv_fota::linux::Error::OutputHoldFailed));
+    assert!(!marker.exists());
+    assert_eq!(boot.state().unwrap(), before);
+}
+
+#[test]
+fn ecu_trial_candidate_rejects_not_ready_without_spawning_or_changing_trial() {
+    let root = TempRoot::new();
+    fs::create_dir_all(root.0.join("ecus")).unwrap();
+    let engine_root = state_root_for_target(&root.0, Ecu::Engine);
+    let hold_socket = root.0.join("hold-not-ready.sock");
+    let candidate_marker = root.0.join("candidate-started");
+    let mut boot = FileBootControl::new(&engine_root);
+    boot.initialize(Slot::A, "1.0.0", 7).unwrap();
+    write_slot_image(&engine_root, Slot::A, "#!/bin/sh\nexit 0\n");
+    write_slot_image(
+        &engine_root,
+        Slot::B,
+        &format!("#!/bin/sh\ntouch '{}'\n", candidate_marker.display()),
+    );
+    boot.schedule_trial(TrialImage {
+        slot: Slot::B,
+        version: fixed_version("1.1.0"),
+        security_version: 8,
+        boots_left: 3,
+        trial_window_ms: 5_000,
+    })
+    .unwrap();
+    let before = boot.state().unwrap();
+    let listener = UnixListener::bind(&hold_socket).unwrap();
+    fs::set_permissions(&hold_socket, fs::Permissions::from_mode(0o600)).unwrap();
+    let hold_server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0u8; 9];
+        stream.read_exact(&mut request).unwrap();
+        assert_eq!(&request, b"SDVHOLD1\n");
+        let mut trailing = [0u8; 1];
+        assert_eq!(stream.read(&mut trailing).unwrap(), 0);
+        stream.write_all(b"SDVNOTREADY\n").unwrap();
+    });
+
+    let error = run_trial_candidate_target_image_with_app_args(
+        &root.0,
+        Ecu::Engine,
+        &[OsString::from("--ecu"), OsString::from("engine")],
+        &hold_socket,
+    )
+    .unwrap_err();
+    hold_server.join().unwrap();
+
+    assert!(matches!(error, sdv_fota::linux::Error::OutputHoldNotReady));
+    assert!(!candidate_marker.exists());
+    assert_eq!(boot.state().unwrap(), before);
 }
 
 #[test]

@@ -8,6 +8,7 @@ pub mod linux_gpio;
 pub mod linux_i2c;
 #[cfg(target_os = "linux")]
 pub mod linux_input;
+pub mod output_hold;
 pub mod pwm;
 pub mod robothat;
 #[cfg(target_os = "linux")]
@@ -192,6 +193,27 @@ mod tests {
         .unwrap();
         assert_eq!(car.hardware().power, 0.2);
         assert_eq!(car.hardware().steer, -23.0);
+    }
+
+    #[test]
+    fn sticky_output_hold_maps_to_zero_power_and_calibrated_steering_center() {
+        let hold = output_hold::StickyOutputHold::new(true);
+        let mut car = PiCarX::new(Inputs, Hat::default(), calibration()).unwrap();
+        hold.apply(
+            &mut car,
+            VehicleActuation {
+                command: ActuatorCmd {
+                    drive_accel_cmd: 1.5,
+                    brake_decel_cmd: 0.0,
+                    steer_angle_cmd: 0.3,
+                },
+                safety: Safety::default(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(car.hardware().power, 0.0);
+        assert_eq!(car.hardware().steer, calibration().steering_center_degrees);
     }
     #[test]
     fn braking_and_estop_cut_drive() {

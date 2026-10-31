@@ -133,37 +133,50 @@ cycle, and socket inode. A timeout, malformed packet, duplicate response, or soc
 that candidate failed and leaves active worker outputs in use. Candidate commands and alive frames
 are always discarded. A `Ready` journal entry means only that one matching shadow response was
 decoded; it is not a promotion or a stable health verdict. Candidate coordinator setup errors also
-disable shadow checking without preventing active worker startup.
+disable shadow checking without preventing active worker startup. The root `sdv-fota-launcher`
+service binds `/run/sdv-fota/control.sock` inside its root-owned runtime directory and passes the
+already-open listener descriptor to the vehicle process. The application UID cannot replace the
+pathname with a fake server; the vehicle accepts hold requests only from a root peer.
 
-After an ECU package is staged and its active and trial digests verify, start one candidate service.
-This example is for Engine only; Brake and Steering remain on their active workers:
+After an ECU package is staged and its active and trial digests verify, ensure the vehicle is
+stationary and physically secured, and confirm the vehicle health command reports `READY`. Start
+one candidate service only while readiness remains current. Zero motor power is not a mechanical
+brake. This example is for Engine only; Brake and Steering remain on their active workers:
 
 ```sh
 sudo sdv-fota status --state-root /var/lib/sdv-fota --target engine
 sudo sdv-fota verify-images --state-root /var/lib/sdv-fota --target engine
+sudo sdv-picarx-health --socket /run/sdv-picarx/health.sock
 sudo systemctl start sdv-fota-ecu-candidate@engine.service
 sudo journalctl -u sdv-fota-launcher.service -f
 ```
 
-The candidate launcher starts the pending slot under the configured ECU identity with
-`--ecu engine`, its own `/run/sdv-picarx/candidates/engine.sock`, and the candidate coordinator
-socket. It reads the pending trial and verifies the signed-install digest but does not call
+Before starting the candidate executable, the root launcher requests the host's sticky output hold
+through `/run/sdv-fota/control.sock`. It waits for an acknowledgement sent only after the PiCar-X
+platform successfully applies zero drive and centered steering. If the hold request fails or times
+out, the candidate executable is not started. After the acknowledgement, the launcher starts the
+pending slot under the configured ECU identity with `--ecu engine`, its own
+`/run/sdv-picarx/candidates/engine.sock`, and the candidate coordinator socket. It does not call
 `select_for_boot`, decrement `boots_left`, change active metadata, commit, or roll back. The boot
-record lock protects the snapshot and spawn. The image update lock is held through exec startup and
-released immediately after spawn; installers fail closed while that startup is in progress. Stop
-the candidate service before installing a replacement candidate or running administrative
-rollback, so an obsolete shadow process cannot remain after metadata changes:
+record lock protects the snapshot and spawn. The image update lock is released immediately after
+spawn; installers fail closed while startup is in progress. The hold keeps zero output applied on
+every vehicle cycle and remains latched after candidate timeout, protocol failure, or process exit.
+No release command exists in this slice. Stop the candidate service before installing a replacement
+or running administrative rollback:
 
 ```sh
 sudo systemctl stop sdv-fota-ecu-candidate@engine.service
 sudo sdv-fota rollback-trial --state-root /var/lib/sdv-fota --target engine
+sudo systemctl restart sdv-fota-launcher.service
 ```
 
-This is a shadow-only slice. Active output routing remains unchanged; there is no actuator output
-hold, route cutover, trial commit, or automatic rollback based on candidate response status. A later
-stage must require an explicit safe hold, switch only at a cycle boundary, prove the production
-route, and commit only after that route acknowledgement. Do not treat a running candidate service
-or a `Ready` log as approval to use its outputs.
+Restart the host only after rollback has cleared the pending ECU trial. The root launcher scans the
+per-ECU boot records at vehicle startup; any pending trial sets `SDV_FOTA_PENDING_ECU_TRIAL=1`, so
+the host starts held before its first runtime cycle. After an administrative rollback clears the
+pending trial, restarting the host clears this process-local hold. This is still a shadow-only slice:
+active output routing remains unchanged, candidate outputs are discarded, and neither cutover nor
+trial commit/automatic rollback is implemented. Do not treat a running candidate service or a
+`Ready` log as approval to use its outputs.
 
 To switch from external workers to coordinator-spawn or in-process mode, stop both the host and
 worker target, disable the target, install the root-owned vehicle config for the selected mode, and
@@ -413,9 +426,10 @@ dedicated non-root account. If it is configured to the same UID as the vehicle p
 not provide privilege isolation. The launcher requires `CAP_SETGID` to clear inherited groups.
 The fixed `ecus` parent must be a real launcher-owned directory; a symlink is rejected. The example
 `sdv-picarx-health` command is vehicle-only and cannot validate an ECU worker. Shadow mode connects
-the pending image to a separate candidate socket and validates matching protocol responses only;
-it does not provide stable worker health, actuator output hold, route cutover, or post-cutover
-commit/rollback. Do not treat either launcher form as an approved ECU promotion procedure.
+the pending image to a separate candidate socket and validates matching protocol responses only.
+Candidate launch now latches zero actuator output through a root-owned inherited control socket, but
+it does not provide stable worker health, route cutover, or post-cutover commit/rollback. Do not
+treat either launcher form as an approved ECU promotion procedure.
 
 Install the example unit from `deploy/systemd/sdv-fota-launcher.service`. Its health command checks
 the vehicle runtime's Unix socket, which reports ready only after a successful control cycle. The
@@ -453,9 +467,10 @@ a pending candidate, so use the target-aware ECU form instead. An ECU target req
 `SDV_FOTA_ECU_APP_UID/GID`; supplementary ECU groups default to empty. The installed
 `sdv-picarx-health` command checks vehicle runtime health and is not an ECU worker health check, so
 the example systemd unit remains vehicle-only. Shadow response validation is not a stable candidate
-health verdict. Coordinator-managed actuator hold, route cutover, proof of production-route
+health verdict. A root-owned inherited control socket can latch zero actuator output before
+candidate launch; it has no release operation yet. Route cutover, proof of production-route
 operation, and commit/rollback after cutover remain the next integration stage. Candidate protocol
-failure is isolated and does not stop the active worker cycle. Virtual ECU worker processes can
+failure is isolated from active worker-cycle processing while the sticky output hold remains set. Virtual ECU worker processes can
 be enabled as an alternative Linux runtime mode. The Pi path can sign a package on a separate host, verify and
 stage it incrementally, and exercise whole-vehicle A/B trial boot and rollback on Linux. HTTPS
 artifact transfer uses the device's system CA store and can use mutual TLS. Private repository
