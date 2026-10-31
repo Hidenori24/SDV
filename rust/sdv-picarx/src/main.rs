@@ -6,6 +6,7 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -13,9 +14,11 @@ use std::time::{Duration, Instant};
 use sdv_core::platform::{PlatformInputs, VehicleExecutor, VehiclePlatform};
 use sdv_core::rte::ActuatorCmd;
 use sdv_core::runtime::VehicleActuation;
-use sdv_core::runtime::VehicleRuntime;
+use sdv_core::runtime::{VehicleRuntime, VirtualEcuId};
 use sdv_core::runtime_host::{self, SystemClock, ECU_PERIOD};
-use sdv_picarx::ecu_process_coordinator::{EcuProcessCoordinator, EcuProcessVehicleExecutor};
+use sdv_picarx::ecu_process_coordinator::{
+    CandidatePromotionRequest, EcuProcessCoordinator, EcuProcessVehicleExecutor,
+};
 use sdv_picarx::linux_gpio::LinuxMotorDirections;
 use sdv_picarx::linux_i2c::I2cTransport;
 use sdv_picarx::linux_input::{Error as InputError, UnixDatagramInputSource};
@@ -212,6 +215,9 @@ const HOLD_REQUEST: &[u8] = b"SDVHOLD1\n";
 const HOLD_ACK: &[u8] = b"SDVHELD1\n";
 const HOLD_NOT_READY: &[u8] = b"SDVNOTREADY\n";
 const HOLD_ACK_TIMEOUT: Duration = Duration::from_secs(2);
+const PROMOTION_REQUEST_PREFIX: &[u8] = b"SDVPROMOTE1 ";
+const PROMOTION_REQUEST_DEADLINE: Duration = Duration::from_secs(4);
+const PROMOTION_ACK_TIMEOUT: Duration = Duration::from_secs(5);
 const HOLD_LISTENER_FD_ENV: &str = "SDV_FOTA_HOLD_LISTENER_FD";
 
 struct HoldControlServer {
@@ -224,6 +230,7 @@ impl HoldControlServer {
         fd: i32,
         hold: StickyOutputHold,
         health: Arc<RuntimeHealth>,
+        promotions: Option<SyncSender<CandidatePromotionRequest>>,
     ) -> io::Result<Self> {
         if fd < 3 {
             return Err(io::Error::new(
@@ -294,13 +301,19 @@ impl HoldControlServer {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let thread_health = Arc::clone(&health);
+        let thread_promotions = promotions;
         let worker = thread::Builder::new()
             .name("sdv-output-hold-control".into())
             .spawn(move || {
                 while !thread_stop.load(Ordering::Relaxed) {
                     match listener.accept() {
                         Ok((stream, _)) => {
-                            if let Err(error) = handle_hold_client(stream, &hold, &thread_health) {
+                            if let Err(error) = handle_control_client(
+                                stream,
+                                &hold,
+                                &thread_health,
+                                thread_promotions.as_ref(),
+                            ) {
                                 eprintln!("sdv-picarx: output hold request rejected: {error}");
                             }
                         }
@@ -331,22 +344,34 @@ impl Drop for HoldControlServer {
     }
 }
 
-fn handle_hold_client(
+fn handle_control_client(
     stream: UnixStream,
     hold: &StickyOutputHold,
     health: &RuntimeHealth,
+    promotions: Option<&SyncSender<CandidatePromotionRequest>>,
 ) -> io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(1)))?;
     stream.set_write_timeout(Some(Duration::from_secs(1)))?;
     let uid = peer_uid(stream.as_raw_fd())?;
-    handle_hold_client_with_uid(stream, uid, hold, health)
+    handle_control_client_with_uid(stream, uid, hold, health, promotions)
 }
 
+#[cfg(test)]
 fn handle_hold_client_with_uid(
+    stream: UnixStream,
+    uid: u32,
+    hold: &StickyOutputHold,
+    health: &RuntimeHealth,
+) -> io::Result<()> {
+    handle_control_client_with_uid(stream, uid, hold, health, None)
+}
+
+fn handle_control_client_with_uid(
     mut stream: UnixStream,
     uid: u32,
     hold: &StickyOutputHold,
     health: &RuntimeHealth,
+    promotions: Option<&SyncSender<CandidatePromotionRequest>>,
 ) -> io::Result<()> {
     if uid != 0 {
         return Err(io::Error::new(
@@ -354,33 +379,77 @@ fn handle_hold_client_with_uid(
             "hold control is restricted to root",
         ));
     }
-    let mut request = [0u8; HOLD_REQUEST.len()];
-    if let Err(error) = stream.read_exact(&mut request) {
+    let mut request = Vec::with_capacity(32);
+    if let Err(error) = (&mut stream).take(65).read_to_end(&mut request) {
         let _ = hold.request_and_wait(Duration::ZERO);
         return Err(error);
     }
-    let mut trailing = [0u8; 1];
-    match stream.read(&mut trailing) {
-        Ok(0) => {}
-        Ok(_) => {
-            let _ = hold.request_and_wait(Duration::ZERO);
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "hold control request contains trailing bytes",
-            ));
-        }
-        Err(error) => {
-            let _ = hold.request_and_wait(Duration::ZERO);
-            return Err(error);
-        }
+    if request.len() > 64 {
+        let _ = hold.request_and_wait(Duration::ZERO);
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "control request is too long",
+        ));
     }
-    if request != HOLD_REQUEST {
+    if request.as_slice() == HOLD_REQUEST {
+        return handle_hold_request(&mut stream, hold, health);
+    }
+    let Some(target) = parse_promotion_request(&request) else {
         let _ = hold.request_and_wait(Duration::ZERO);
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "unknown hold control request",
         ));
+    };
+    let Some(promotions) = promotions else {
+        return write_promotion_failure(&mut stream, "external candidate routing is unavailable");
+    };
+    if !health.is_healthy() {
+        stream.write_all(HOLD_NOT_READY)?;
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "vehicle runtime is not ready for candidate promotion",
+        ));
     }
+    if !hold.request_and_wait(HOLD_ACK_TIMEOUT) {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "zero actuator output was not applied before promotion",
+        ));
+    }
+    let (completion, response) = mpsc::sync_channel(1);
+    match promotions.try_send(CandidatePromotionRequest {
+        ecu: target,
+        // Leave the control thread a full second to return a result after the host stops
+        // accepting new shadow snapshots at the request deadline.
+        deadline: Instant::now() + PROMOTION_REQUEST_DEADLINE,
+        completion,
+    }) {
+        Ok(()) => {}
+        Err(TrySendError::Full(_)) => {
+            return write_promotion_failure(&mut stream, "another promotion is pending")
+        }
+        Err(TrySendError::Disconnected(_)) => {
+            return write_promotion_failure(&mut stream, "vehicle cycle is unavailable")
+        }
+    }
+    match response.recv_timeout(PROMOTION_ACK_TIMEOUT) {
+        Ok(Ok(())) => stream.write_all(promotion_ack(target).as_bytes()),
+        Ok(Err(error)) => write_promotion_failure(&mut stream, &error),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            write_promotion_failure(&mut stream, "promotion cycle timed out")
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            write_promotion_failure(&mut stream, "promotion cycle is unavailable")
+        }
+    }
+}
+
+fn handle_hold_request(
+    stream: &mut UnixStream,
+    hold: &StickyOutputHold,
+    health: &RuntimeHealth,
+) -> io::Result<()> {
     if !health.is_healthy() {
         stream.write_all(HOLD_NOT_READY)?;
         return Err(io::Error::new(
@@ -395,6 +464,37 @@ fn handle_hold_client_with_uid(
         ));
     }
     stream.write_all(HOLD_ACK)
+}
+
+fn parse_promotion_request(request: &[u8]) -> Option<VirtualEcuId> {
+    let target = request.strip_prefix(PROMOTION_REQUEST_PREFIX)?;
+    match target {
+        b"engine\n" => Some(VirtualEcuId::Engine),
+        b"brake\n" => Some(VirtualEcuId::Brake),
+        b"steering\n" => Some(VirtualEcuId::Steering),
+        _ => None,
+    }
+}
+
+fn promotion_ack(target: VirtualEcuId) -> String {
+    format!("SDVPROMOTED {}\n", ecu_name(target))
+}
+
+fn ecu_name(target: VirtualEcuId) -> &'static str {
+    match target {
+        VirtualEcuId::Engine => "engine",
+        VirtualEcuId::Brake => "brake",
+        VirtualEcuId::Steering => "steering",
+    }
+}
+
+fn write_promotion_failure(stream: &mut UnixStream, reason: &str) -> io::Result<()> {
+    let sanitized = reason.replace(['\n', '\r'], " ");
+    stream.write_all(format!("SDVPROMOTION_FAILED {sanitized}\n").as_bytes())?;
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "candidate promotion was rejected",
+    ))
 }
 
 fn peer_uid(fd: std::os::fd::RawFd) -> io::Result<u32> {
@@ -596,6 +696,10 @@ fn run() -> Result<(), String> {
     let config: HostConfig = serde_json::from_slice(&config_data)
         .map_err(|error| format!("invalid configuration: {error}"))?;
     let (motor_calibration, vehicle_calibration) = config.calibrations().map_err(str::to_owned)?;
+    let candidate_promotion_enabled = config.virtual_ecu_workers.as_ref().is_some_and(|workers| {
+        workers.mode == VirtualEcuWorkerMode::External
+            && workers.candidate_socket_directory.is_some()
+    });
     let output_hold = StickyOutputHold::new(ecu_trial_hold);
 
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -622,9 +726,16 @@ fn run() -> Result<(), String> {
     ));
     let mut health_server = HealthServer::bind(config.health_socket, Arc::clone(&health))
         .map_err(|error| format!("cannot bind vehicle health socket: {error}"))?;
+    let (promotion_sender, promotion_receiver) = mpsc::sync_channel(1);
+    let promotion_sender = candidate_promotion_enabled.then_some(promotion_sender);
     let mut hold_server = hold_listener_fd
         .map(|fd| {
-            HoldControlServer::from_inherited_fd(fd, output_hold.clone(), Arc::clone(&health))
+            HoldControlServer::from_inherited_fd(
+                fd,
+                output_hold.clone(),
+                Arc::clone(&health),
+                promotion_sender.clone(),
+            )
         })
         .transpose()
         .map_err(|error| format!("cannot accept inherited output hold socket: {error}"))?;
@@ -656,7 +767,7 @@ fn run() -> Result<(), String> {
         platform,
         health,
         trial_mode,
-        output_hold,
+        output_hold: output_hold.clone(),
     };
     let result = match config.virtual_ecu_workers {
         Some(worker_config) => {
@@ -691,6 +802,9 @@ fn run() -> Result<(), String> {
                 reporting_platform,
                 coordinator,
             );
+            if candidate_promotion_enabled {
+                executor = executor.with_promotion_control(output_hold.clone(), promotion_receiver);
+            }
             runtime_host::run(&mut executor, &mut SystemClock::default(), || {
                 shutdown.load(Ordering::Relaxed)
             })
@@ -894,9 +1008,13 @@ mod tests {
         let fd = listener.as_raw_fd();
         std::mem::forget(listener);
         let health = Arc::new(RuntimeHealth::new(Duration::from_secs(1), 0.02, 0.0));
-        let mut server =
-            HoldControlServer::from_inherited_fd(fd, StickyOutputHold::new(false), health.clone())
-                .unwrap();
+        let mut server = HoldControlServer::from_inherited_fd(
+            fd,
+            StickyOutputHold::new(false),
+            health.clone(),
+            None,
+        )
+        .unwrap();
         // SAFETY: `fd` remains owned by the inherited-listener server thread.
         let descriptor_flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
         assert_ne!(descriptor_flags & libc::FD_CLOEXEC, 0);
@@ -912,6 +1030,7 @@ mod tests {
             stream.as_raw_fd(),
             StickyOutputHold::new(false),
             health,
+            None,
         )
         .err()
         .unwrap();
@@ -1056,6 +1175,88 @@ mod tests {
         assert_eq!(&ack, HOLD_ACK);
         assert_eq!(platform.applied.unwrap().command, ActuatorCmd::default());
         worker.join().unwrap();
+    }
+
+    #[test]
+    fn root_promotion_request_waits_for_cycle_ack_after_latching_hold() {
+        let hold = StickyOutputHold::new(false);
+        let server_hold = hold.clone();
+        let health = Arc::new(ready_runtime_health());
+        let thread_health = Arc::clone(&health);
+        let (promotion_sender, promotion_receiver) = mpsc::sync_channel(1);
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let worker = thread::spawn(move || {
+            handle_control_client_with_uid(
+                server,
+                0,
+                &server_hold,
+                &thread_health,
+                Some(&promotion_sender),
+            )
+        });
+        client.write_all(b"SDVPROMOTE1 engine\n").unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        while !hold.is_held() {
+            thread::sleep(Duration::from_millis(1));
+        }
+        let mut platform = HoldTestPlatform::default();
+        hold.apply(&mut platform, VehicleActuation::default())
+            .unwrap();
+        let promotion = promotion_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(promotion.ecu, VirtualEcuId::Engine);
+        assert!(promotion.deadline > Instant::now());
+        assert!(hold.has_zero_apply_acknowledgement());
+        assert_eq!(platform.applied.unwrap().command, ActuatorCmd::default());
+        promotion.completion.send(Ok(())).unwrap();
+
+        let mut response = String::new();
+        std::io::BufReader::new(client)
+            .read_line(&mut response)
+            .unwrap();
+        assert_eq!(response, "SDVPROMOTED engine\n");
+        worker.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn promotion_control_is_unavailable_without_external_candidate_routing() {
+        let hold = StickyOutputHold::new(false);
+        let health = ready_runtime_health();
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let server_hold = hold.clone();
+        let worker = thread::spawn(move || {
+            handle_control_client_with_uid(server, 0, &server_hold, &health, None)
+        });
+        client.write_all(b"SDVPROMOTE1 engine\n").unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut response = String::new();
+        std::io::BufReader::new(client)
+            .read_line(&mut response)
+            .unwrap();
+        assert_eq!(
+            response,
+            "SDVPROMOTION_FAILED external candidate routing is unavailable\n"
+        );
+        assert_eq!(
+            worker.join().unwrap().unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert!(!hold.is_held());
+    }
+
+    #[test]
+    fn promotion_protocol_accepts_only_named_ecu_targets() {
+        assert_eq!(
+            parse_promotion_request(b"SDVPROMOTE1 engine\n"),
+            Some(VirtualEcuId::Engine)
+        );
+        assert_eq!(
+            parse_promotion_request(b"SDVPROMOTE1 steering\n"),
+            Some(VirtualEcuId::Steering)
+        );
+        assert_eq!(parse_promotion_request(b"SDVPROMOTE1 vehicle\n"), None);
+        assert_eq!(parse_promotion_request(b"SDVPROMOTE1 engine extra\n"), None);
     }
 
     #[test]

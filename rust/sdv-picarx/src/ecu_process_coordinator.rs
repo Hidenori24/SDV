@@ -14,7 +14,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -23,6 +23,7 @@ use sdv_core::bus::Frame;
 use sdv_core::platform::{HostCycleExecutor, VehiclePlatform};
 use sdv_core::runtime::{EcuTaskOutput, ExternalEcuCycleError, VehicleRuntime, VirtualEcuId};
 
+use crate::output_hold::StickyOutputHold;
 use crate::virtual_ecu_worker::{
     decode_response, encode_request, WorkerError, WORKER_DATAGRAM_MAX_SIZE,
 };
@@ -57,6 +58,9 @@ pub struct EcuProcessVehicleExecutor<P> {
     runtime: VehicleRuntime,
     platform: P,
     coordinator: EcuProcessCoordinator,
+    output_hold: Option<StickyOutputHold>,
+    promotion_requests: Option<Receiver<CandidatePromotionRequest>>,
+    pending_promotion: Option<(CandidatePromotionRequest, u64)>,
 }
 
 impl<P> EcuProcessVehicleExecutor<P> {
@@ -65,7 +69,21 @@ impl<P> EcuProcessVehicleExecutor<P> {
             runtime,
             platform,
             coordinator,
+            output_hold: None,
+            promotion_requests: None,
+            pending_promotion: None,
         }
+    }
+
+    /// Attach the root control channel used for one-way ECU candidate route promotion.
+    pub fn with_promotion_control(
+        mut self,
+        output_hold: StickyOutputHold,
+        requests: Receiver<CandidatePromotionRequest>,
+    ) -> Self {
+        self.output_hold = Some(output_hold);
+        self.promotion_requests = Some(requests);
+        self
     }
 
     pub fn platform(&self) -> &P {
@@ -75,12 +93,116 @@ impl<P> EcuProcessVehicleExecutor<P> {
     pub fn platform_mut(&mut self) -> &mut P {
         &mut self.platform
     }
+
+    pub fn route_for_ecu(&self, ecu: VirtualEcuId) -> EcuRoute {
+        self.coordinator.route_for_ecu(ecu)
+    }
 }
 
 impl<P: VehiclePlatform> HostCycleExecutor for EcuProcessVehicleExecutor<P> {
     type Error = VehicleCycleError<P::Error>;
 
     fn host_cycle(&mut self, remaining_budget: Duration) -> Result<(), Self::Error> {
+        self.run_host_cycle(remaining_budget)
+    }
+
+    fn host_stop(&mut self) -> Result<(), Self::Error> {
+        self.platform.stop().map_err(VehicleCycleError::Stop)
+    }
+}
+
+impl<P: VehiclePlatform> EcuProcessVehicleExecutor<P> {
+    fn begin_cycle_promotion(&mut self) -> Option<(CandidatePromotionRequest, u64)> {
+        if let Some((request, hold_generation)) = self.pending_promotion.take() {
+            if Instant::now() >= request.deadline {
+                self.coordinator.cancel_candidate_quiesce(request.ecu);
+                let _ = request.completion.send(Err(
+                    "promotion request expired while quiescing shadow transport".into(),
+                ));
+                return None;
+            }
+            let Some(hold) = self.output_hold.as_ref() else {
+                self.coordinator.cancel_candidate_quiesce(request.ecu);
+                let _ = request
+                    .completion
+                    .send(Err("output hold control is unavailable".into()));
+                return None;
+            };
+            return match self
+                .coordinator
+                .finish_candidate_promotion(request.ecu, hold)
+            {
+                Ok(true) => Some((request, hold_generation)),
+                Ok(false) => {
+                    self.pending_promotion = Some((request, hold_generation));
+                    None
+                }
+                Err(error) => {
+                    self.coordinator.cancel_candidate_quiesce(request.ecu);
+                    let _ = request.completion.send(Err(error.to_string()));
+                    None
+                }
+            };
+        }
+        let request = match self.promotion_requests.as_ref()?.try_recv() {
+            Ok(request) => request,
+            Err(TryRecvError::Empty | TryRecvError::Disconnected) => return None,
+        };
+        if Instant::now() >= request.deadline {
+            let _ = request.completion.send(Err(
+                "promotion request expired before a host-cycle boundary".into(),
+            ));
+            return None;
+        }
+        let Some(hold) = self.output_hold.as_ref() else {
+            let _ = request
+                .completion
+                .send(Err("output hold control is unavailable".into()));
+            return None;
+        };
+        if !hold.is_held() || !hold.has_zero_apply_acknowledgement() {
+            let _ = request
+                .completion
+                .send(Err("zero-output hold has not been acknowledged".into()));
+            return None;
+        }
+        let hold_generation = hold.zero_apply_generation();
+        match self.coordinator.begin_candidate_quiesce(request.ecu, hold) {
+            Ok(()) => {
+                self.pending_promotion = Some((request, hold_generation));
+                None
+            }
+            Err(error) => {
+                let _ = request.completion.send(Err(error.to_string()));
+                None
+            }
+        }
+    }
+
+    fn finish_cycle_promotion(
+        &self,
+        promotion: Option<(CandidatePromotionRequest, u64)>,
+        cycle_result: &Result<(), VehicleCycleError<P::Error>>,
+    ) {
+        let Some((request, previous_generation)) = promotion else {
+            return;
+        };
+        let result = match (cycle_result, self.output_hold.as_ref()) {
+            (Ok(()), Some(hold))
+                if hold.is_held() && hold.zero_apply_generation() > previous_generation =>
+            {
+                Ok(())
+            }
+            (Ok(()), _) => Err("promotion cycle did not confirm a new zero-output apply".into()),
+            (Err(_), _) => Err("active ECU cycle failed during candidate promotion".into()),
+        };
+        let _ = request.completion.send(result);
+    }
+
+    fn run_host_cycle(
+        &mut self,
+        remaining_budget: Duration,
+    ) -> Result<(), VehicleCycleError<P::Error>> {
         let deadline = Instant::now()
             .checked_add(remaining_budget)
             .ok_or_else(|| VehicleCycleError::DeadlineExceeded {
@@ -101,41 +223,92 @@ impl<P: VehiclePlatform> HostCycleExecutor for EcuProcessVehicleExecutor<P> {
             });
         }
 
-        self.runtime.set_estop_request(inputs.estop);
-        let coordinator = &mut self.coordinator;
-        let actuation = match self.runtime.step_10ms_with_external_ecus(
-            inputs.driver,
-            inputs.vehicle,
-            true,
-            |_, ecu_inputs| {
-                let cycle_id = coordinator.next_cycle_id().map_err(|error| error)?;
-                coordinator.exchange_cycle(cycle_id, ecu_inputs, deadline)
-            },
-        ) {
-            Ok(actuation) => actuation,
-            Err(source) => {
-                return Err(VehicleCycleError::Workers {
+        // Delay the route change until sampling succeeds. The root control thread has already
+        // requested the sticky hold and waited for a successful zero-output apply.
+        let promotion = self.begin_cycle_promotion();
+        let result = (|| {
+            self.runtime.set_estop_request(inputs.estop);
+            let coordinator = &mut self.coordinator;
+            let actuation = match self.runtime.step_10ms_with_external_ecus(
+                inputs.driver,
+                inputs.vehicle,
+                true,
+                |_, ecu_inputs| {
+                    let cycle_id = coordinator.next_cycle_id().map_err(|error| error)?;
+                    coordinator.exchange_cycle(cycle_id, ecu_inputs, deadline)
+                },
+            ) {
+                Ok(actuation) => actuation,
+                Err(source) => {
+                    return Err(VehicleCycleError::Workers {
+                        source,
+                        stop_error: self.platform.stop().err(),
+                    })
+                }
+            };
+            if Instant::now() >= deadline {
+                return Err(VehicleCycleError::DeadlineExceeded {
+                    stop_error: self.platform.stop().err(),
+                });
+            }
+            if let Err(source) = self.platform.apply(actuation) {
+                return Err(VehicleCycleError::Apply {
                     source,
                     stop_error: self.platform.stop().err(),
-                })
+                });
             }
-        };
-        if Instant::now() >= deadline {
-            return Err(VehicleCycleError::DeadlineExceeded {
-                stop_error: self.platform.stop().err(),
-            });
-        }
-        if let Err(source) = self.platform.apply(actuation) {
-            return Err(VehicleCycleError::Apply {
-                source,
-                stop_error: self.platform.stop().err(),
-            });
-        }
-        Ok(())
+            Ok(())
+        })();
+        self.finish_cycle_promotion(promotion, &result);
+        result
     }
+}
 
-    fn host_stop(&mut self) -> Result<(), Self::Error> {
-        self.platform.stop().map_err(VehicleCycleError::Stop)
+/// A root-authorized request waiting for the next host-cycle boundary.
+pub struct CandidatePromotionRequest {
+    pub ecu: VirtualEcuId,
+    pub deadline: Instant,
+    pub completion: SyncSender<Result<(), String>>,
+}
+
+/// Per-ECU route selected by the vehicle coordinator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EcuRoute {
+    Active,
+    Candidate,
+}
+
+/// Why a candidate route could not be promoted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromotionError {
+    HoldNotConfirmed,
+    CandidateNotReady,
+    CandidateEndpointUnavailable,
+    CandidateSocketChanged,
+    AlreadyPromoted,
+    ShadowCoordinatorUnavailable,
+    ShadowCoordinatorPanicked,
+}
+
+impl fmt::Display for PromotionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::HoldNotConfirmed => formatter.write_str("zero-output hold is not confirmed"),
+            Self::CandidateNotReady => formatter.write_str("candidate is not Ready"),
+            Self::CandidateEndpointUnavailable => {
+                formatter.write_str("candidate worker endpoint is unavailable")
+            }
+            Self::CandidateSocketChanged => {
+                formatter.write_str("candidate worker socket identity changed")
+            }
+            Self::AlreadyPromoted => formatter.write_str("candidate route is already promoted"),
+            Self::ShadowCoordinatorUnavailable => {
+                formatter.write_str("shadow coordinator is unavailable")
+            }
+            Self::ShadowCoordinatorPanicked => {
+                formatter.write_str("shadow coordinator did not stop cleanly")
+            }
+        }
     }
 }
 
@@ -200,13 +373,14 @@ pub enum CandidateStatus {
     Unavailable,
     WarmingUp { consecutive_responses: u16 },
     Ready,
+    Promoted,
     Failed(CandidateFailure),
 }
 
 impl CandidateStatus {
     fn after_window_reset(self) -> Self {
         match self {
-            Self::Disabled | Self::Unavailable | Self::Failed(_) => self,
+            Self::Disabled | Self::Unavailable | Self::Promoted | Self::Failed(_) => self,
             Self::WarmingUp { .. } | Self::Ready => Self::WarmingUp {
                 consecutive_responses: 0,
             },
@@ -406,6 +580,7 @@ struct CandidateShadowWorker {
     stability: [CandidateStability; 3],
     shared_statuses: Arc<Mutex<[CandidateStatus; 3]>>,
     shared_last_response_cycle: Arc<Mutex<[Option<u64>; 3]>>,
+    shared_ready_socket_identities: Arc<Mutex<[Option<SocketIdentity>; 3]>>,
     queue_drop_generation: Arc<AtomicUsize>,
     applied_queue_drop_generation: Arc<AtomicUsize>,
     pending_cycle: [Option<u64>; 3],
@@ -429,6 +604,11 @@ pub struct EcuProcessCoordinator {
     socket_directory_identity: SocketIdentity,
     owner: u32,
     workers: Vec<WorkerProcess>,
+    routes: [EcuRoute; 3],
+    candidate_socket_directory: Option<PathBuf>,
+    candidate_socket_directory_identity: Option<SocketIdentity>,
+    candidate_ready_socket_identities: Arc<Mutex<[Option<SocketIdentity>; 3]>>,
+    quiescing_candidate: Option<(usize, SocketIdentity)>,
     candidate_sender: Option<SyncSender<CandidateCycleSnapshot>>,
     candidate_dropped_cycles: Option<Arc<AtomicUsize>>,
     candidate_queue_drop_generation: Arc<AtomicUsize>,
@@ -547,19 +727,29 @@ impl EcuProcessCoordinator {
             false,
         )?;
         if let Some(candidate_directory) = candidate_socket_directory {
-            match start_candidate_shadow_worker(
-                candidate_directory,
-                &coordinator.socket_directory,
-                owner,
-                Arc::clone(&coordinator.candidate_statuses),
-                Arc::clone(&coordinator.candidate_last_response_cycles),
-                Arc::clone(&coordinator.candidate_queue_drop_generation),
-                Arc::clone(&coordinator.candidate_applied_queue_drop_generation),
-            ) {
-                Ok((sender, dropped_cycles, worker)) => {
+            let candidate_directory = candidate_directory.to_path_buf();
+            let candidate_start = validate_existing_socket_directory(&candidate_directory, owner)
+                .and_then(|candidate_directory_identity| {
+                    start_candidate_shadow_worker(
+                        &candidate_directory,
+                        candidate_directory_identity,
+                        &coordinator.socket_directory,
+                        owner,
+                        Arc::clone(&coordinator.candidate_statuses),
+                        Arc::clone(&coordinator.candidate_last_response_cycles),
+                        Arc::clone(&coordinator.candidate_ready_socket_identities),
+                        Arc::clone(&coordinator.candidate_queue_drop_generation),
+                        Arc::clone(&coordinator.candidate_applied_queue_drop_generation),
+                    )
+                    .map(|started| (started, candidate_directory_identity))
+                });
+            match candidate_start {
+                Ok(((sender, dropped_cycles, worker), directory_identity)) => {
                     coordinator.candidate_sender = Some(sender);
                     coordinator.candidate_dropped_cycles = Some(dropped_cycles);
                     coordinator.candidate_thread = Some(worker);
+                    coordinator.candidate_socket_directory = Some(candidate_directory);
+                    coordinator.candidate_socket_directory_identity = Some(directory_identity);
                 }
                 Err(error) => {
                     if let Ok(mut statuses) = coordinator.candidate_statuses.lock() {
@@ -612,6 +802,11 @@ impl EcuProcessCoordinator {
             socket_directory_identity,
             owner,
             workers: Vec::with_capacity(ECU_IDS.len()),
+            routes: [EcuRoute::Active; 3],
+            candidate_socket_directory: None,
+            candidate_socket_directory_identity: None,
+            candidate_ready_socket_identities: Arc::new(Mutex::new([None; 3])),
+            quiescing_candidate: None,
             candidate_sender: None,
             candidate_dropped_cycles: None,
             candidate_queue_drop_generation: Arc::new(AtomicUsize::new(0)),
@@ -661,6 +856,152 @@ impl EcuProcessCoordinator {
             queue_drop_generation,
             applied_queue_drop_generation,
         )
+    }
+
+    /// Return the output route currently used for an ECU task.
+    pub fn route_for_ecu(&self, ecu: VirtualEcuId) -> EcuRoute {
+        self.routes[ecu_index(ecu)]
+    }
+
+    /// Stop accepting shadow requests before a later cycle-boundary promotion attempt.
+    ///
+    /// This operation is nonblocking. The host keeps using its active route while the shadow
+    /// thread drains and exits; [`Self::finish_candidate_promotion`] switches the route only after
+    /// the thread has finished and the exact candidate socket inode is revalidated.
+    pub fn begin_candidate_quiesce(
+        &mut self,
+        ecu: VirtualEcuId,
+        hold: &StickyOutputHold,
+    ) -> Result<(), PromotionError> {
+        let index = ecu_index(ecu);
+        if !hold.is_held() || !hold.has_zero_apply_acknowledgement() {
+            return Err(PromotionError::HoldNotConfirmed);
+        }
+        if self.routes[index] == EcuRoute::Candidate {
+            return Err(PromotionError::AlreadyPromoted);
+        }
+        if self.candidate_statuses()[index] != CandidateStatus::Ready {
+            return Err(PromotionError::CandidateNotReady);
+        }
+
+        let candidate_directory = self
+            .candidate_socket_directory
+            .as_ref()
+            .ok_or(PromotionError::CandidateEndpointUnavailable)?
+            .clone();
+        let directory_identity = self
+            .candidate_socket_directory_identity
+            .as_ref()
+            .ok_or(PromotionError::CandidateEndpointUnavailable)?
+            .to_owned();
+        let identity = self
+            .candidate_ready_socket_identities
+            .lock()
+            .map_err(|_| PromotionError::CandidateEndpointUnavailable)?[index]
+            .ok_or(PromotionError::CandidateEndpointUnavailable)?;
+        let candidate_path = candidate_directory.join(CANDIDATE_SOCKET_NAMES[index]);
+        if let Err(error) = validate_candidate_socket(
+            &candidate_directory,
+            &directory_identity,
+            self.owner,
+            &candidate_path,
+            &identity,
+        ) {
+            self.quiescing_candidate = None;
+            return Err(error);
+        }
+
+        if self.candidate_sender.is_none() || self.candidate_thread.is_none() {
+            return Err(PromotionError::ShadowCoordinatorUnavailable);
+        }
+        self.quiescing_candidate = Some((index, identity));
+        self.candidate_sender.take();
+        Ok(())
+    }
+
+    /// Cancel a pending quiesce request without changing the active route.
+    pub fn cancel_candidate_quiesce(&mut self, ecu: VirtualEcuId) {
+        if self
+            .quiescing_candidate
+            .is_some_and(|(index, _)| index == ecu_index(ecu))
+        {
+            self.quiescing_candidate = None;
+        }
+    }
+
+    /// Complete a pending quiesce and switch the requested ECU route without waiting for the
+    /// shadow thread. Returns `Ok(false)` while that thread is still draining.
+    pub fn finish_candidate_promotion(
+        &mut self,
+        ecu: VirtualEcuId,
+        hold: &StickyOutputHold,
+    ) -> Result<bool, PromotionError> {
+        let index = ecu_index(ecu);
+        if !hold.is_held() || !hold.has_zero_apply_acknowledgement() {
+            return Err(PromotionError::HoldNotConfirmed);
+        }
+        if self.routes[index] == EcuRoute::Candidate {
+            return Err(PromotionError::AlreadyPromoted);
+        }
+        let (quiescing_index, identity) = self
+            .quiescing_candidate
+            .ok_or(PromotionError::ShadowCoordinatorUnavailable)?;
+        if quiescing_index != index {
+            return Err(PromotionError::ShadowCoordinatorUnavailable);
+        }
+        let worker = self
+            .candidate_thread
+            .as_ref()
+            .ok_or(PromotionError::ShadowCoordinatorUnavailable)?;
+        if !worker.is_finished() {
+            return Ok(false);
+        }
+        let worker = self
+            .candidate_thread
+            .take()
+            .ok_or(PromotionError::ShadowCoordinatorUnavailable)?;
+        if worker.join().is_err() {
+            self.quiescing_candidate = None;
+            return Err(PromotionError::ShadowCoordinatorPanicked);
+        }
+
+        // A queued shadow snapshot may have exposed a timeout or queue drop while the thread
+        // drained. Require Ready again after quiescence before making the endpoint active.
+        if self.candidate_statuses()[index] != CandidateStatus::Ready {
+            self.quiescing_candidate = None;
+            return Err(PromotionError::CandidateNotReady);
+        }
+        let candidate_directory = self
+            .candidate_socket_directory
+            .as_ref()
+            .ok_or(PromotionError::CandidateEndpointUnavailable)?
+            .clone();
+        let directory_identity = self
+            .candidate_socket_directory_identity
+            .as_ref()
+            .ok_or(PromotionError::CandidateEndpointUnavailable)?
+            .to_owned();
+        let candidate_path = candidate_directory.join(CANDIDATE_SOCKET_NAMES[index]);
+        if let Err(error) = validate_candidate_socket(
+            &candidate_directory,
+            &directory_identity,
+            self.owner,
+            &candidate_path,
+            &identity,
+        ) {
+            self.quiescing_candidate = None;
+            return Err(error);
+        }
+
+        self.workers[index].socket_path = candidate_path;
+        self.workers[index].socket_identity = Some(identity);
+        self.routes[index] = EcuRoute::Candidate;
+        self.quiescing_candidate = None;
+        if let Ok(mut statuses) = self.candidate_statuses.lock() {
+            *statuses = [CandidateStatus::Unavailable; 3];
+            statuses[index] = CandidateStatus::Promoted;
+        }
+        Ok(true)
     }
 
     /// Return the last candidate response cycle validated per ECU.
@@ -912,6 +1253,18 @@ impl EcuProcessCoordinator {
             &self.socket_directory_identity,
         )
         .map_err(|_| Error::UnsafeSocketPath)?;
+        if self.routes[index] == EcuRoute::Candidate {
+            let candidate_directory = self
+                .candidate_socket_directory
+                .as_ref()
+                .ok_or(Error::UnsafeSocketPath)?;
+            let candidate_identity = self
+                .candidate_socket_directory_identity
+                .as_ref()
+                .ok_or(Error::UnsafeSocketPath)?;
+            validate_private_directory(candidate_directory, self.owner, candidate_identity)
+                .map_err(|_| Error::UnsafeSocketPath)?;
+        }
         if let Some(child) = self.workers[index].child.as_mut() {
             if let Some(status) = child.try_wait()? {
                 return Err(Error::WorkerExited {
@@ -964,10 +1317,12 @@ impl Drop for EcuProcessCoordinator {
 
 fn start_candidate_shadow_worker(
     candidate_directory: &Path,
+    socket_directory_identity: SocketIdentity,
     active_directory: &Path,
     owner: u32,
     shared_statuses: Arc<Mutex<[CandidateStatus; 3]>>,
     shared_last_response_cycle: Arc<Mutex<[Option<u64>; 3]>>,
+    shared_ready_socket_identities: Arc<Mutex<[Option<SocketIdentity>; 3]>>,
     queue_drop_generation: Arc<AtomicUsize>,
     applied_queue_drop_generation: Arc<AtomicUsize>,
 ) -> Result<
@@ -981,7 +1336,8 @@ fn start_candidate_shadow_worker(
     if candidate_directory == active_directory {
         return Err(Error::UnsafeSocketPath);
     }
-    let socket_directory_identity = validate_existing_socket_directory(candidate_directory, owner)?;
+    validate_private_directory(candidate_directory, owner, &socket_directory_identity)
+        .map_err(|_| Error::UnsafeSocketPath)?;
     let socket_path = candidate_directory.join(COORDINATOR_SOCKET_NAME);
     ensure_path_absent(&socket_path)?;
     let socket = UnixDatagram::bind(&socket_path)?;
@@ -1017,6 +1373,7 @@ fn start_candidate_shadow_worker(
         stability: std::array::from_fn(|_| CandidateStability::default()),
         shared_statuses: Arc::clone(&shared_statuses),
         shared_last_response_cycle: Arc::clone(&shared_last_response_cycle),
+        shared_ready_socket_identities: Arc::clone(&shared_ready_socket_identities),
         processed_queue_drop_generation: queue_drop_generation.load(Ordering::Acquire),
         queue_drop_generation,
         applied_queue_drop_generation,
@@ -1097,6 +1454,15 @@ impl CandidateShadowWorker {
             self.processed_queue_drop_generation = final_queue_drop_generation;
         }
         self.log_candidate_status_changes(previous_statuses);
+        // Promotion must bind to the exact socket that produced Ready evidence. Publishing the
+        // observed inode while still WarmingUp could pair a stale Ready snapshot with a newly
+        // replaced socket during the background thread's next status update.
+        for index in 0..self.statuses.len() {
+            let ready_identity = (self.statuses[index] == CandidateStatus::Ready)
+                .then_some(self.workers[index].socket_identity)
+                .flatten();
+            self.publish_ready_socket_identity(index, ready_identity);
+        }
         if let Ok(mut statuses) = self.shared_statuses.lock() {
             *statuses = self.statuses;
             // Publish the status snapshot and its applied queue-drop generation together. Readers
@@ -1385,6 +1751,7 @@ impl CandidateShadowWorker {
                         );
                     }
                 }
+                CandidateStatus::Promoted => {}
                 CandidateStatus::Unavailable => self.last_logged_warming_progress[index] = 0,
                 CandidateStatus::Failed(_) => {
                     if self.statuses[index] != previous[index] {
@@ -1420,6 +1787,12 @@ impl CandidateShadowWorker {
             )
             .is_ok()
     }
+
+    fn publish_ready_socket_identity(&self, index: usize, identity: Option<SocketIdentity>) {
+        if let Ok(mut identities) = self.shared_ready_socket_identities.lock() {
+            identities[index] = identity;
+        }
+    }
 }
 
 fn ecu_name(ecu: VirtualEcuId) -> &'static str {
@@ -1428,6 +1801,27 @@ fn ecu_name(ecu: VirtualEcuId) -> &'static str {
         VirtualEcuId::Brake => "brake",
         VirtualEcuId::Steering => "steering",
     }
+}
+
+fn ecu_index(ecu: VirtualEcuId) -> usize {
+    match ecu {
+        VirtualEcuId::Engine => 0,
+        VirtualEcuId::Brake => 1,
+        VirtualEcuId::Steering => 2,
+    }
+}
+
+fn validate_candidate_socket(
+    directory: &Path,
+    directory_identity: &SocketIdentity,
+    owner: u32,
+    path: &Path,
+    expected_identity: &SocketIdentity,
+) -> Result<(), PromotionError> {
+    validate_private_directory(directory, owner, directory_identity)
+        .map_err(|_| PromotionError::CandidateSocketChanged)?;
+    validate_owned_socket(path, owner, expected_identity)
+        .map_err(|_| PromotionError::CandidateSocketChanged)
 }
 
 fn ensure_path_absent(path: &Path) -> Result<(), Error> {
@@ -1802,6 +2196,7 @@ mod candidate_stability_tests {
             ],
             shared_statuses: Arc::clone(&shared_statuses),
             shared_last_response_cycle: Arc::clone(&shared_last_response_cycle),
+            shared_ready_socket_identities: Arc::new(Mutex::new([None; 3])),
             queue_drop_generation,
             applied_queue_drop_generation,
             pending_cycle: [Some(800), None, None],

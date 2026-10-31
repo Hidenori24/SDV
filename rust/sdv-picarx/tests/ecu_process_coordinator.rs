@@ -3,7 +3,8 @@ use std::os::unix::fs::{symlink, PermissionsExt};
 use std::os::unix::net::UnixDatagram;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -15,9 +16,11 @@ use sdv_core::rte::DriverInput;
 use sdv_core::runtime::{ExternalEcuCycleError, VehicleActuation, VehicleRuntime, VirtualEcuId};
 use sdv_core::runtime_host::{self, RunError, SystemClock};
 use sdv_picarx::ecu_process_coordinator::{
-    CandidateFailure, CandidateStatus, EcuProcessCoordinator, EcuProcessVehicleExecutor,
-    Error as CoordinatorError, VehicleCycleError,
+    CandidateFailure, CandidatePromotionRequest, CandidateStatus, EcuProcessCoordinator,
+    EcuProcessVehicleExecutor, EcuRoute, Error as CoordinatorError, PromotionError,
+    VehicleCycleError,
 };
+use sdv_picarx::output_hold::StickyOutputHold;
 use sdv_picarx::virtual_ecu_worker::{VirtualEcuWorker, WORKER_DATAGRAM_MAX_SIZE};
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
@@ -124,6 +127,15 @@ impl ExternalWorkerProcesses {
     }
 
     fn start_one(ecu: &str, socket_directory: &Path, coordinator_socket: &Path) -> Self {
+        Self::start_one_with_allowed(ecu, socket_directory, coordinator_socket, None)
+    }
+
+    fn start_one_with_allowed(
+        ecu: &str,
+        socket_directory: &Path,
+        coordinator_socket: &Path,
+        allowed_coordinator_socket: Option<&Path>,
+    ) -> Self {
         let child = Command::new(worker_binary())
             .arg("--ecu")
             .arg(ecu)
@@ -131,9 +143,15 @@ impl ExternalWorkerProcesses {
             .arg(socket_directory.join(format!("{ecu}.sock")))
             .arg("--coordinator-socket")
             .arg(coordinator_socket)
+            .args(allowed_coordinator_socket.into_iter().flat_map(|path| {
+                [
+                    std::ffi::OsString::from("--allowed-coordinator-socket"),
+                    path.as_os_str().to_owned(),
+                ]
+            }))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::inherit())
             .spawn()
             .unwrap();
         Self(vec![child])
@@ -151,6 +169,89 @@ impl Drop for ExternalWorkerProcesses {
     }
 }
 
+struct CandidateResponder {
+    stop: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl CandidateResponder {
+    fn start(path: &Path, fail_active_route: bool) -> Self {
+        let socket = UnixDatagram::bind(path).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_millis(20)))
+            .unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let thread = thread::spawn(move || {
+            let mut worker = VirtualEcuWorker::new(VirtualEcuId::Engine, &Config::default());
+            let mut request = [0; WORKER_DATAGRAM_MAX_SIZE + 1];
+            let mut response = [0; WORKER_DATAGRAM_MAX_SIZE];
+            while !thread_stop.load(Ordering::Relaxed) {
+                let (received, coordinator) = match socket.recv_from(&mut request) {
+                    Ok(received) => received,
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) =>
+                    {
+                        continue
+                    }
+                    Err(_) => break,
+                };
+                let Some(coordinator_path) = coordinator.as_pathname() else {
+                    continue;
+                };
+                if fail_active_route && coordinator_path.to_string_lossy().contains("/workers/") {
+                    let _ = socket.send_to(b"invalid-candidate-response\n", coordinator_path);
+                    continue;
+                }
+                let response_len = match worker.handle_datagram(&request[..received], &mut response)
+                {
+                    Ok(response_len) => response_len,
+                    Err(_) => continue,
+                };
+                let _ = socket.send_to(&response[..response_len], coordinator_path);
+            }
+        });
+        Self {
+            stop,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for CandidateResponder {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(worker) = self.thread.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+struct HeldRecordingPlatform {
+    inner: RecordingPlatform,
+    hold: StickyOutputHold,
+}
+
+impl VehiclePlatform for HeldRecordingPlatform {
+    type Error = &'static str;
+
+    fn sample(&mut self) -> Result<PlatformInputs, Self::Error> {
+        self.inner.sample()
+    }
+
+    fn apply(&mut self, actuation: VehicleActuation) -> Result<(), Self::Error> {
+        self.hold.apply(&mut self.inner, actuation)
+    }
+
+    fn stop(&mut self) -> Result<(), Self::Error> {
+        self.inner.stop()
+    }
+}
+
 fn wait_for_path(path: &Path) {
     let deadline = Instant::now() + Duration::from_secs(1);
     while !path.exists() && Instant::now() < deadline {
@@ -161,6 +262,70 @@ fn wait_for_path(path: &Path) {
         "socket path did not appear: {}",
         path.display()
     );
+}
+
+fn start_external_coordinator(
+    root: &TempDirectory,
+    candidate_directory: &Path,
+) -> (EcuProcessCoordinator, ExternalWorkerProcesses, PathBuf) {
+    let socket_directory = private_worker_directory(root);
+    let coordinator_path = socket_directory.join("coordinator.sock");
+    let candidate_coordinator_path = candidate_directory.join("coordinator.sock");
+    let coordinator_thread = {
+        let socket_directory = socket_directory.clone();
+        let candidate_directory = candidate_directory.to_path_buf();
+        thread::spawn(move || {
+            EcuProcessCoordinator::connect_external_with_candidates(
+                socket_directory,
+                candidate_directory,
+            )
+        })
+    };
+    wait_for_path(&coordinator_path);
+    wait_for_path(&candidate_coordinator_path);
+    let active = ExternalWorkerProcesses::start(&socket_directory, &coordinator_path);
+    let coordinator = coordinator_thread.join().unwrap().unwrap();
+    (coordinator, active, socket_directory)
+}
+
+fn candidate_inputs() -> [Vec<sdv_core::bus::Frame>; 3] {
+    let safety = sdv_core::bus::Frame::Safety(Default::default());
+    [vec![safety], vec![safety], vec![safety]]
+}
+
+fn run_candidate_until_ready(coordinator: &mut EcuProcessCoordinator) {
+    let frames = candidate_inputs();
+    let inputs = [
+        frames[0].as_slice(),
+        frames[1].as_slice(),
+        frames[2].as_slice(),
+    ];
+    for _ in 0..102 {
+        thread::sleep(Duration::from_millis(10));
+        let cycle_id = coordinator.next_cycle_id().unwrap();
+        coordinator
+            .exchange_cycle(
+                cycle_id,
+                inputs,
+                Instant::now() + Duration::from_millis(100),
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        wait_for_candidate_status(coordinator, |status| status == CandidateStatus::Ready),
+        CandidateStatus::Ready
+    );
+}
+
+fn confirmed_output_hold() -> StickyOutputHold {
+    let hold = StickyOutputHold::new(false);
+    assert!(!hold.request_and_wait(Duration::ZERO));
+    let mut platform = RecordingPlatform::default();
+    hold.apply(&mut platform, VehicleActuation::default())
+        .unwrap();
+    assert!(hold.is_held());
+    assert!(hold.has_zero_apply_acknowledgement());
+    hold
 }
 
 fn wait_for_candidate_status(
@@ -568,6 +733,291 @@ fn candidate_pending_request_clears_ready_and_times_out_after_two_cycles() {
 }
 
 #[test]
+fn promotion_requires_a_ready_candidate_and_confirmed_zero_output_hold() {
+    let root = TempDirectory::new();
+    let candidate_directory = root.path().join("candidates");
+    fs::create_dir(&candidate_directory).unwrap();
+    fs::set_permissions(&candidate_directory, fs::Permissions::from_mode(0o700)).unwrap();
+    let candidate_socket = UnixDatagram::bind(candidate_directory.join("engine.sock")).unwrap();
+    fs::set_permissions(
+        candidate_directory.join("engine.sock"),
+        fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let (mut coordinator, mut active, _) = start_external_coordinator(&root, &candidate_directory);
+
+    let unconfirmed_hold = StickyOutputHold::new(false);
+    assert_eq!(
+        coordinator.begin_candidate_quiesce(VirtualEcuId::Engine, &unconfirmed_hold),
+        Err(PromotionError::HoldNotConfirmed)
+    );
+    let confirmed_hold = confirmed_output_hold();
+    assert_eq!(
+        coordinator.begin_candidate_quiesce(VirtualEcuId::Engine, &confirmed_hold),
+        Err(PromotionError::CandidateNotReady)
+    );
+    assert_eq!(
+        coordinator.route_for_ecu(VirtualEcuId::Engine),
+        EcuRoute::Active
+    );
+    assert!(confirmed_hold.is_held());
+
+    drop(candidate_socket);
+    drop(coordinator);
+    active.stop();
+}
+
+#[test]
+fn expired_promotion_request_is_canceled_and_never_switches_route_later() {
+    let root = TempDirectory::new();
+    let candidate_directory = root.path().join("candidates");
+    fs::create_dir(&candidate_directory).unwrap();
+    fs::set_permissions(&candidate_directory, fs::Permissions::from_mode(0o700)).unwrap();
+    let candidate_socket = UnixDatagram::bind(candidate_directory.join("engine.sock")).unwrap();
+    fs::set_permissions(
+        candidate_directory.join("engine.sock"),
+        fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let (coordinator, mut active, _) = start_external_coordinator(&root, &candidate_directory);
+    let hold = confirmed_output_hold();
+    let (request_tx, request_rx) = std::sync::mpsc::sync_channel(1);
+    let (completion, response) = std::sync::mpsc::sync_channel(1);
+    request_tx
+        .send(CandidatePromotionRequest {
+            ecu: VirtualEcuId::Engine,
+            deadline: Instant::now() - Duration::from_millis(1),
+            completion,
+        })
+        .unwrap();
+    let platform = HeldRecordingPlatform {
+        inner: RecordingPlatform::default(),
+        hold: hold.clone(),
+    };
+    let mut executor =
+        EcuProcessVehicleExecutor::new(VehicleRuntime::default(), platform, coordinator)
+            .with_promotion_control(hold.clone(), request_rx);
+
+    executor.host_cycle(Duration::from_millis(100)).unwrap();
+    assert!(response
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .is_err());
+    assert_eq!(
+        executor.route_for_ecu(VirtualEcuId::Engine),
+        EcuRoute::Active
+    );
+    thread::sleep(Duration::from_millis(20));
+    assert_eq!(
+        executor.route_for_ecu(VirtualEcuId::Engine),
+        EcuRoute::Active,
+        "an expired request must not switch asynchronously"
+    );
+    assert!(hold.is_held());
+
+    drop(candidate_socket);
+    drop(executor);
+    active.stop();
+}
+
+#[test]
+fn changed_candidate_socket_inode_is_rejected_before_route_switch() {
+    let root = TempDirectory::new();
+    let candidate_directory = root.path().join("candidates");
+    fs::create_dir(&candidate_directory).unwrap();
+    fs::set_permissions(&candidate_directory, fs::Permissions::from_mode(0o700)).unwrap();
+    let candidate_path = candidate_directory.join("engine.sock");
+    let responder = CandidateResponder::start(&candidate_path, false);
+    let (mut coordinator, mut active, _) = start_external_coordinator(&root, &candidate_directory);
+    run_candidate_until_ready(&mut coordinator);
+    // Keep the old socket bound while replacing its pathname so the filesystem cannot
+    // immediately reuse its inode. This models a live candidate worker whose socket FD
+    // remains open after an attacker or operator replaces the socket path.
+    fs::remove_file(&candidate_path).unwrap();
+    let replacement = CandidateResponder::start(&candidate_path, false);
+    drop(responder);
+    let hold = confirmed_output_hold();
+
+    let promotion = coordinator.begin_candidate_quiesce(VirtualEcuId::Engine, &hold);
+    assert!(
+        matches!(
+            promotion,
+            Err(PromotionError::CandidateSocketChanged | PromotionError::CandidateNotReady)
+        ),
+        "replaced candidate socket must never satisfy the Ready gate: {promotion:?}"
+    );
+    assert_eq!(
+        coordinator.route_for_ecu(VirtualEcuId::Engine),
+        EcuRoute::Active
+    );
+    assert!(hold.is_held());
+
+    drop(replacement);
+    drop(coordinator);
+    active.stop();
+}
+
+#[test]
+fn promotion_switches_only_the_requested_ecu_and_acks_a_held_candidate_cycle() {
+    let root = TempDirectory::new();
+    let candidate_directory = root.path().join("candidates");
+    fs::create_dir(&candidate_directory).unwrap();
+    fs::set_permissions(&candidate_directory, fs::Permissions::from_mode(0o700)).unwrap();
+    let (mut coordinator, mut active, active_directory) =
+        start_external_coordinator(&root, &candidate_directory);
+    let candidate_coordinator = candidate_directory.join("coordinator.sock");
+    let mut candidate = ExternalWorkerProcesses::start_one_with_allowed(
+        "engine",
+        &candidate_directory,
+        &candidate_coordinator,
+        Some(&active_directory.join("coordinator.sock")),
+    );
+    wait_for_path(&candidate_directory.join("engine.sock"));
+    run_candidate_until_ready(&mut coordinator);
+
+    let hold = StickyOutputHold::new(false);
+    assert!(!hold.request_and_wait(Duration::ZERO));
+    let mut platform = HeldRecordingPlatform {
+        inner: RecordingPlatform::default(),
+        hold: hold.clone(),
+    };
+    hold.apply(&mut platform.inner, VehicleActuation::default())
+        .unwrap();
+    let initial_zero_generation = hold.zero_apply_generation();
+    let (request_tx, request_rx) = std::sync::mpsc::sync_channel(1);
+    let (completion, response) = std::sync::mpsc::sync_channel(1);
+    request_tx
+        .send(CandidatePromotionRequest {
+            ecu: VirtualEcuId::Engine,
+            deadline: Instant::now() + Duration::from_secs(5),
+            completion,
+        })
+        .unwrap();
+    let mut executor =
+        EcuProcessVehicleExecutor::new(VehicleRuntime::default(), platform, coordinator)
+            .with_promotion_control(hold.clone(), request_rx);
+
+    assert_eq!(
+        executor.route_for_ecu(VirtualEcuId::Engine),
+        EcuRoute::Active
+    );
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        executor.host_cycle(Duration::from_millis(100)).unwrap();
+        if let Ok(result) = response.try_recv() {
+            result.unwrap_or_else(|error| {
+                panic!(
+                    "{error}; candidate socket={:?}, worker status={:?}",
+                    fs::symlink_metadata(candidate_directory.join("engine.sock")),
+                    candidate.0[0].try_wait()
+                )
+            });
+            break;
+        }
+        assert!(Instant::now() < deadline, "promotion was not acknowledged");
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        executor.route_for_ecu(VirtualEcuId::Engine),
+        EcuRoute::Candidate
+    );
+    assert_eq!(
+        executor.route_for_ecu(VirtualEcuId::Brake),
+        EcuRoute::Active
+    );
+    assert_eq!(
+        executor.route_for_ecu(VirtualEcuId::Steering),
+        EcuRoute::Active
+    );
+    assert!(hold.is_held());
+    assert!(hold.zero_apply_generation() > initial_zero_generation);
+    assert_eq!(
+        executor.platform().inner.applied.last().unwrap().command,
+        Default::default()
+    );
+
+    for _ in 0..3 {
+        executor.host_cycle(Duration::from_millis(100)).unwrap();
+    }
+
+    drop(executor);
+    candidate.stop();
+    active.stop();
+}
+
+#[test]
+fn candidate_active_cycle_failure_stops_vehicle_and_keeps_output_hold_latched() {
+    let root = TempDirectory::new();
+    let candidate_directory = root.path().join("candidates");
+    fs::create_dir(&candidate_directory).unwrap();
+    fs::set_permissions(&candidate_directory, fs::Permissions::from_mode(0o700)).unwrap();
+    let responder = CandidateResponder::start(&candidate_directory.join("engine.sock"), true);
+    let (mut coordinator, mut active, _) = start_external_coordinator(&root, &candidate_directory);
+    run_candidate_until_ready(&mut coordinator);
+    let hold = StickyOutputHold::new(false);
+    assert!(!hold.request_and_wait(Duration::ZERO));
+    let mut platform = HeldRecordingPlatform {
+        inner: RecordingPlatform::default(),
+        hold: hold.clone(),
+    };
+    hold.apply(&mut platform.inner, VehicleActuation::default())
+        .unwrap();
+    let (request_tx, request_rx) = std::sync::mpsc::sync_channel(1);
+    let (completion, response) = std::sync::mpsc::sync_channel(1);
+    request_tx
+        .send(CandidatePromotionRequest {
+            ecu: VirtualEcuId::Engine,
+            deadline: Instant::now() + Duration::from_secs(5),
+            completion,
+        })
+        .unwrap();
+    let mut executor =
+        EcuProcessVehicleExecutor::new(VehicleRuntime::default(), platform, coordinator)
+            .with_promotion_control(hold.clone(), request_rx);
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut failed = false;
+    loop {
+        match executor.host_cycle(Duration::from_millis(100)) {
+            Ok(()) => {}
+            Err(_) => {
+                failed = true;
+                break;
+            }
+        }
+        if response.try_recv().is_ok() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "candidate cycle did not fail closed"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        failed,
+        "candidate protocol failure must fail the active cycle"
+    );
+    assert_eq!(
+        executor.route_for_ecu(VirtualEcuId::Engine),
+        EcuRoute::Candidate
+    );
+    assert!(hold.is_held());
+    assert!(executor.platform().inner.stops > 0);
+    assert!(executor
+        .platform()
+        .inner
+        .applied
+        .iter()
+        .all(|actuation| actuation.command == Default::default()));
+
+    drop(executor);
+    drop(responder);
+    active.stop();
+}
+
+#[test]
 fn malformed_candidate_response_flood_is_isolated_from_active_workers() {
     let root = TempDirectory::new();
     let socket_directory = private_worker_directory(&root);
@@ -702,7 +1152,7 @@ fn duplicate_candidate_response_does_not_consume_active_replies() {
         steering_input.as_slice(),
     ];
 
-    for _ in 0..2 {
+    for cycle_index in 0..2 {
         let cycle_id = coordinator.next_cycle_id().unwrap();
         let outputs = coordinator
             .exchange_cycle(
@@ -714,6 +1164,12 @@ fn duplicate_candidate_response_does_not_consume_active_replies() {
         assert!(outputs
             .iter()
             .all(|output| matches!(output.alive, sdv_core::bus::Frame::Alive { .. })));
+        if cycle_index == 0 {
+            // Give the background shadow coordinator time to consume the first bounded snapshot;
+            // otherwise queue saturation can correctly reset stability before it observes the
+            // duplicate pair under test.
+            thread::sleep(Duration::from_millis(10));
+        }
     }
     duplicate_candidate.join().unwrap();
     assert_eq!(
