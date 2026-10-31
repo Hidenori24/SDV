@@ -202,6 +202,18 @@ a held, cycle-boundary return to the active worker:
 sudo sdv-fota revert-candidate --control-socket /run/sdv-fota/control.sock --target engine
 ```
 
+Before considering a trial for completion, ask the host to confirm the promoted candidate over a
+sustained held interval:
+
+```sh
+sudo sdv-fota verify-candidate --control-socket /run/sdv-fota/control.sock --target engine --stability-ms 2000
+```
+
+Each check waits for a successful candidate cycle and zero-output apply at a host-cycle boundary.
+The command keeps the hold latched and fails if the route is not still candidate, the host is
+unhealthy, or a candidate cycle fails. This is runtime protocol and host-health evidence; it does
+not establish application behavior and does not commit or roll back trial metadata.
+
 The host validates the original active worker socket and acknowledges only after an active-worker
 cycle succeeds and zero output is applied. The hold stays latched. This changes only the current
 process route; it does not stop the candidate service or alter trial metadata. Keep the vehicle

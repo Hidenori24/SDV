@@ -217,6 +217,7 @@ const HOLD_ACK: &[u8] = b"SDVHELD1\n";
 const HOLD_NOT_READY: &[u8] = b"SDVNOTREADY\n";
 const HOLD_ACK_TIMEOUT: Duration = Duration::from_secs(2);
 const PROMOTION_REQUEST_PREFIX: &[u8] = b"SDVPROMOTE1 ";
+const CANDIDATE_VERIFY_REQUEST_PREFIX: &[u8] = b"SDVVERIFY1 ";
 const ROUTE_CHANGE_REQUEST_DEADLINE: Duration = Duration::from_secs(4);
 const ROUTE_CHANGE_ACK_TIMEOUT: Duration = Duration::from_secs(5);
 const HOLD_LISTENER_FD_ENV: &str = "SDV_FOTA_HOLD_LISTENER_FD";
@@ -423,19 +424,19 @@ fn handle_control_client_with_uid(
             ));
         }
     } else {
-        // A route reversion is a recovery operation. Latch and confirm the hold before checking
-        // runtime health so even a rejected recovery request leaves output held.
+        // Reversion and verification are recovery/health operations. Latch and confirm the hold
+        // before checking runtime health so even a rejected request leaves output held.
         if !hold.request_and_wait(HOLD_ACK_TIMEOUT) {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
-                "zero actuator output was not applied before route reversion",
+                "zero actuator output was not applied before candidate route check",
             ));
         }
         if !health.is_healthy() {
             stream.write_all(HOLD_NOT_READY)?;
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
-                "vehicle runtime is not ready for candidate route reversion",
+                "vehicle runtime is not ready for candidate route check",
             ));
         }
     }
@@ -500,6 +501,8 @@ fn parse_route_change_request(request: &[u8]) -> Option<(VirtualEcuId, Candidate
         (target, CandidateRouteOperation::Promote)
     } else if let Some(target) = request.strip_prefix(b"SDVREVERT1 ") {
         (target, CandidateRouteOperation::ReturnToActive)
+    } else if let Some(target) = request.strip_prefix(CANDIDATE_VERIFY_REQUEST_PREFIX) {
+        (target, CandidateRouteOperation::VerifyCandidate)
     } else {
         return None;
     };
@@ -517,6 +520,9 @@ fn route_change_ack(target: VirtualEcuId, operation: CandidateRouteOperation) ->
         CandidateRouteOperation::Promote => format!("SDVPROMOTED {}\n", ecu_name(target)),
         CandidateRouteOperation::ReturnToActive => {
             format!("SDVREVERTED {}\n", ecu_name(target))
+        }
+        CandidateRouteOperation::VerifyCandidate => {
+            format!("SDVVERIFIED {}\n", ecu_name(target))
         }
     }
 }
@@ -1299,6 +1305,13 @@ mod tests {
             parse_route_change_request(b"SDVREVERT1 brake\n"),
             Some((VirtualEcuId::Brake, CandidateRouteOperation::ReturnToActive))
         );
+        assert_eq!(
+            parse_route_change_request(b"SDVVERIFY1 steering\n"),
+            Some((
+                VirtualEcuId::Steering,
+                CandidateRouteOperation::VerifyCandidate
+            ))
+        );
         assert_eq!(parse_route_change_request(b"SDVPROMOTE1 vehicle\n"), None);
         assert_eq!(parse_route_change_request(b"SDVREVERT1 vehicle\n"), None);
         assert_eq!(
@@ -1348,6 +1361,48 @@ mod tests {
             .read_line(&mut response)
             .unwrap();
         assert_eq!(response, "SDVREVERTED engine\n");
+        worker.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn root_candidate_verification_latches_hold_and_waits_for_candidate_cycle_ack() {
+        let hold = StickyOutputHold::new(false);
+        let server_hold = hold.clone();
+        let health = Arc::new(ready_runtime_health());
+        let thread_health = Arc::clone(&health);
+        let (route_sender, route_receiver) = mpsc::sync_channel(1);
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let worker = thread::spawn(move || {
+            handle_control_client_with_uid(
+                server,
+                0,
+                &server_hold,
+                &thread_health,
+                Some(&route_sender),
+            )
+        });
+        client.write_all(b"SDVVERIFY1 engine\n").unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        while !hold.is_held() {
+            thread::sleep(Duration::from_millis(1));
+        }
+        let mut platform = HoldTestPlatform::default();
+        hold.apply(&mut platform, VehicleActuation::default())
+            .unwrap();
+        let verification = route_receiver.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(verification.ecu, VirtualEcuId::Engine);
+        assert_eq!(
+            verification.operation,
+            CandidateRouteOperation::VerifyCandidate
+        );
+        verification.completion.send(Ok(())).unwrap();
+
+        let mut response = String::new();
+        std::io::BufReader::new(client)
+            .read_line(&mut response)
+            .unwrap();
+        assert_eq!(response, "SDVVERIFIED engine\n");
+        assert!(hold.is_held());
         worker.join().unwrap().unwrap();
     }
 

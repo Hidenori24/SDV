@@ -1002,6 +1002,36 @@ fn promotion_switches_only_the_requested_ecu_and_acks_a_held_candidate_cycle() {
         executor.host_cycle(Duration::from_millis(100)).unwrap();
     }
 
+    let generation_before_verification = hold.zero_apply_generation();
+    let (completion, response) = std::sync::mpsc::sync_channel(1);
+    request_tx
+        .send(CandidateRouteRequest {
+            ecu: VirtualEcuId::Engine,
+            operation: CandidateRouteOperation::VerifyCandidate,
+            deadline: Instant::now() + Duration::from_secs(5),
+            completion,
+        })
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        executor.host_cycle(Duration::from_millis(100)).unwrap();
+        if let Ok(result) = response.try_recv() {
+            result.unwrap_or_else(|error| panic!("candidate verification failed: {error}"));
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "candidate was not cycle-verified"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        executor.route_for_ecu(VirtualEcuId::Engine),
+        EcuRoute::Candidate
+    );
+    assert!(hold.is_held());
+    assert!(hold.zero_apply_generation() > generation_before_verification);
+
     let generation_before_reversion = hold.zero_apply_generation();
     let (completion, response) = std::sync::mpsc::sync_channel(1);
     request_tx
