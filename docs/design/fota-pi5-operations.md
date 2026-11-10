@@ -169,8 +169,8 @@ every vehicle cycle and remains latched after candidate timeout, protocol failur
 The candidate worker is configured to accept only the shadow coordinator and active coordinator
 socket paths, after checking each endpoint's owner, mode, and inode. It replies to the coordinator
 that sent each request, so a promoted worker can use the active response socket without a restart.
-No release command exists in this slice. Stop the candidate service before installing a replacement
-or running administrative rollback:
+No in-process hold release command exists in this slice. Stop the candidate service before installing
+a replacement or running administrative rollback:
 
 ```sh
 sudo systemctl stop sdv-fota-ecu-candidate@engine.service
@@ -214,6 +214,25 @@ The command keeps the hold latched and fails if the route is not still candidate
 unhealthy, or a candidate cycle fails. This is runtime protocol and host-health evidence; it does
 not establish application behavior and does not commit or roll back trial metadata.
 
+To commit a candidate after a held stability window, use the explicit commit operation. It checks
+that the ECU still has the same pending trial, verifies the image digest before and after the window,
+holds the per-ECU installer lock, repeats the candidate cycle checks for the requested interval, and
+then commits the trial metadata. A failed check leaves the hold latched and does not commit the
+candidate. The command does not release the hold in the running host:
+
+```sh
+sudo sdv-fota commit-candidate --state-root /var/lib/sdv-fota \
+  --control-socket /run/sdv-fota/control.sock --target engine --stability-ms 2000
+```
+
+After a successful commit, keep the vehicle secured and restart the launcher so the active ECU
+worker and host reload from the committed slots. With no pending ECU trial, that restart clears the
+process-local hold:
+
+```sh
+sudo systemctl restart sdv-fota-launcher.service
+```
+
 The host validates the original active worker socket and acknowledges only after an active-worker
 cycle succeeds and zero output is applied. The hold stays latched. This changes only the current
 process route; it does not stop the candidate service or alter trial metadata. Keep the vehicle
@@ -228,10 +247,9 @@ sudo sdv-fota rollback-trial --state-root /var/lib/sdv-fota --target engine
 sudo systemctl restart sdv-fota-launcher.service
 ```
 
-This flow does not commit a promoted trial or release the hold in the running host. The host process
-supports one candidate promotion because it stops the shadow coordinator for cutover; a reverted
-candidate cannot be promoted again in that process. Route selection is process-local and returns to
-the active worker after a host restart.
+Route selection is process-local and returns to the active worker after a host restart. Reversion
+does not commit trial metadata; a verified candidate uses the separate `commit-candidate` operation
+above. Neither operation releases the hold in the running host.
 
 To switch from external workers to coordinator-spawn or in-process mode, stop both the host and
 worker target, disable the target, install the root-owned vehicle config for the selected mode, and
@@ -384,9 +402,11 @@ sudo sdv-fota verify-images --state-root /var/lib/sdv-fota --target engine
 
 Use `--target brake` or `--target steering` for those state roots. `init`, `install`/`install-url`,
 `status`, `verify-images`, `record-active-integrity`, and `rollback-trial` all select the same
-target-specific root. Omitting `--target` from the state-management commands retains the legacy
-`vehicle` root. The signed package is verified and written to that ECU's inactive slot, and its
-version, security counter, and trial record stay independent from other targets.
+target-specific root. `commit-candidate` selects the ECU's target-specific root, confirms the
+candidate through the host control socket, and commits only the trial image that was verified.
+Omitting `--target` from the state-management commands retains the legacy `vehicle` root. The signed
+package is verified and written to that ECU's inactive slot, and its version, security counter, and
+trial record stay independent from other targets.
 
 This prepares per-ECU staging and trial metadata. The installed systemd unit still starts the whole
 vehicle application from the `vehicle` state root. An explicit target-aware ECU invocation starts
@@ -485,7 +505,10 @@ the pending image to a separate candidate socket and validates matching protocol
 Candidate launch latches zero actuator output through a root-owned inherited control socket. The
 separate `sdv-fota promote-candidate` command can switch a `Ready` candidate route at a host-cycle
 boundary while keeping that hold latched. Neither the launcher nor the promotion command provides
-application-semantic or vehicle-health evidence, trial commit, rollback, or hold release.
+application-semantic or vehicle-health evidence. `verify-candidate` does not change trial metadata;
+`commit-candidate` performs an explicit held verification and commits the matching ECU trial. A
+separate administrative rollback is still used after candidate failure, and the running hold is
+cleared only when the launcher restarts after the pending trial is cleared or committed.
 
 Install the example unit from `deploy/systemd/sdv-fota-launcher.service`. Its health command checks
 the vehicle runtime's Unix socket, which reports ready only after a successful control cycle. The

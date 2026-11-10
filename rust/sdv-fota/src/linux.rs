@@ -68,6 +68,7 @@ pub enum Error {
     AlreadyInitialized,
     TrialAlreadyPending,
     NoTrialPending,
+    TrialChanged,
     ImageWriteInProgress,
     InvalidImageWrite,
     InvalidRecord,
@@ -347,6 +348,18 @@ impl FileSlotStorage {
             pending: None,
             update_lock: None,
         }
+    }
+
+    /// Hold the per-target image update lock while an operator verifies and commits a candidate.
+    ///
+    /// The guard is retained by this storage value and released when it is dropped. This prevents
+    /// a concurrent installer from replacing the pending image during the verification window.
+    pub fn lock_updates(&mut self) -> Result<(), Error> {
+        if self.update_lock.is_some() {
+            return Err(Error::UpdateInProgress);
+        }
+        self.update_lock = Some(acquire_update_lock(&self.root)?);
+        Ok(())
     }
 
     pub fn image_path(&self, slot: Slot) -> PathBuf {
@@ -1492,6 +1505,30 @@ impl FileBootControl {
         Self { root: root.into() }
     }
 
+    /// Commit the same trial image captured before candidate verification.
+    ///
+    /// The boot-record lock protects this comparison and transition as one operation. Boot-attempt
+    /// counters may change while the candidate is running, so image identity uses the slot,
+    /// version, and security version rather than `boots_left`.
+    pub fn commit_trial_if_matches(&self, expected: TrialImage) -> Result<(), Error> {
+        self.commit_trial_inner(Some(expected))
+    }
+
+    fn commit_trial_inner(&self, expected: Option<TrialImage>) -> Result<(), Error> {
+        let _lock = BootRecordLock::acquire(&self.root)?;
+        let (sequence, mut state) = self.load()?;
+        let trial = state.trial.ok_or(Error::NoTrialPending)?;
+        if expected.is_some_and(|expected| !same_trial_image(trial, expected)) {
+            return Err(Error::TrialChanged);
+        }
+        state.trial = None;
+        state.active = trial.slot;
+        state.active_version = trial.version;
+        state.highest_security_version = state.highest_security_version.max(trial.security_version);
+        state.last_trial = Some(LastTrialResult::from_trial(trial, TrialOutcome::Committed));
+        self.save(sequence.checked_add(1).ok_or(Error::InvalidRecord)?, &state)
+    }
+
     /// Record the slot installed during provisioning. Refuses to overwrite existing state.
     pub fn initialize(
         &self,
@@ -1653,14 +1690,7 @@ impl BootControl for FileBootControl {
     }
 
     fn commit_trial(&mut self) -> Result<(), Self::Error> {
-        let _lock = BootRecordLock::acquire(&self.root)?;
-        let (sequence, mut state) = self.load()?;
-        let trial = state.trial.take().ok_or(Error::NoTrialPending)?;
-        state.active = trial.slot;
-        state.active_version = trial.version;
-        state.highest_security_version = state.highest_security_version.max(trial.security_version);
-        state.last_trial = Some(LastTrialResult::from_trial(trial, TrialOutcome::Committed));
-        self.save(sequence.checked_add(1).ok_or(Error::InvalidRecord)?, &state)
+        self.commit_trial_inner(None)
     }
 
     fn rollback_trial(&mut self) -> Result<(), Self::Error> {
@@ -1670,6 +1700,12 @@ impl BootControl for FileBootControl {
         state.last_trial = Some(LastTrialResult::from_trial(trial, TrialOutcome::RolledBack));
         self.save(sequence.checked_add(1).ok_or(Error::InvalidRecord)?, &state)
     }
+}
+
+fn same_trial_image(current: TrialImage, expected: TrialImage) -> bool {
+    current.slot == expected.slot
+        && current.version == expected.version
+        && current.security_version == expected.security_version
 }
 
 fn encode_record(sequence: u64, state: &impl Serialize) -> Result<Vec<u8>, Error> {

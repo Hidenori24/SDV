@@ -255,6 +255,22 @@ Reversion does not stop the candidate service or change trial metadata; a revert
 be promoted again in the same host process. `Ready`, promotion, and reversion are protocol and route
 evidence only; they do not establish application behavior or vehicle health.
 
+To commit a promoted candidate, use `commit-candidate`. It repeats the held stability window,
+checks the pending image digest before and after verification, prevents concurrent image installs,
+and commits only the same trial image that was verified:
+
+```sh
+sudo sdv-fota commit-candidate --state-root /var/lib/sdv-fota \
+  --control-socket /run/sdv-fota/control.sock --target engine --stability-ms 2000
+```
+
+The commit does not release the running host's hold. Keep the vehicle secured, then restart the
+launcher to run the committed image through the active worker service:
+
+```sh
+sudo systemctl restart sdv-fota-launcher.service
+```
+
 If promotion fails, zero output remains held. If the route switched before the failure, request
 `revert-candidate` and wait for its active-cycle acknowledgement before assuming the active worker is
 selected. If the host cannot complete reversion, keep the vehicle secured; restarting the host with
@@ -294,7 +310,9 @@ metadata, or selecting candidate outputs. While it is still shadowing, stop
 rollback; otherwise a shadow process may continue after metadata changes. Output hold is sticky in the host process. Route promotion is
 available through `sdv-fota promote-candidate`; root-only `sdv-fota revert-candidate` can return to
 the active worker while keeping the hold latched. Trial-metadata rollback is still a separate
-administrative operation. Application/vehicle health evidence, trial commit, and hold release remain
+administrative operation. `sdv-fota commit-candidate` commits a trial only after a held candidate
+stability window and image-integrity recheck; the hold is released only when the launcher restarts.
+Application/vehicle health evidence and automatic rollback after candidate failure remain
 unimplemented.
 
 `config/pi5.disabled.example.json` is a commissioning template. Its zero motor duty and zero

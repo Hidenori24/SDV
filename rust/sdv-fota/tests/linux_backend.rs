@@ -322,6 +322,77 @@ fn linux_backend_stages_image_and_commits_trial() {
 }
 
 #[test]
+fn candidate_commit_matches_trial_identity_while_allowing_boot_counter_changes() {
+    let root = TempRoot::new();
+    let mut boot = FileBootControl::new(&root.0);
+    boot.initialize(Slot::A, "1.0.0", 1).unwrap();
+    let expected = TrialImage {
+        slot: Slot::B,
+        version: fixed_version("1.1.0"),
+        security_version: 2,
+        boots_left: 3,
+        trial_window_ms: 5_000,
+    };
+    boot.schedule_trial(expected).unwrap();
+    boot.select_for_boot().unwrap();
+
+    boot.commit_trial_if_matches(expected).unwrap();
+
+    let state = boot.state().unwrap();
+    assert_eq!(state.active, Slot::B);
+    assert_eq!(state.active_version, "1.1.0");
+    assert_eq!(state.highest_security_version, 2);
+    assert!(state.trial.is_none());
+    assert_eq!(state.last_trial.unwrap().outcome, TrialOutcome::Committed);
+}
+
+#[test]
+fn candidate_commit_refuses_a_different_trial_image() {
+    let root = TempRoot::new();
+    let mut boot = FileBootControl::new(&root.0);
+    boot.initialize(Slot::A, "1.0.0", 1).unwrap();
+    let original = TrialImage {
+        slot: Slot::B,
+        version: fixed_version("1.1.0"),
+        security_version: 2,
+        boots_left: 3,
+        trial_window_ms: 5_000,
+    };
+    boot.schedule_trial(original).unwrap();
+    boot.rollback_trial().unwrap();
+    boot.schedule_trial(TrialImage {
+        version: fixed_version("1.2.0"),
+        security_version: 3,
+        ..original
+    })
+    .unwrap();
+
+    assert!(matches!(
+        boot.commit_trial_if_matches(original),
+        Err(sdv_fota::linux::Error::TrialChanged)
+    ));
+    let state = boot.state().unwrap();
+    assert_eq!(state.active, Slot::A);
+    assert_eq!(state.trial.unwrap().version, "1.2.0");
+}
+
+#[test]
+fn candidate_commit_update_guard_blocks_a_concurrent_installer() {
+    let root = TempRoot::new();
+    FileBootControl::new(&root.0)
+        .initialize(Slot::A, "1.0.0", 1)
+        .unwrap();
+    let mut commit_guard = FileSlotStorage::new(&root.0);
+    commit_guard.lock_updates().unwrap();
+
+    let mut installer_storage = FileSlotStorage::new(&root.0);
+    assert!(matches!(
+        installer_storage.begin_inactive_image(Slot::A, 16),
+        Err(sdv_fota::linux::Error::UpdateInProgress)
+    ));
+}
+
+#[test]
 fn incomplete_replacement_preserves_previous_inactive_image() {
     let root = TempRoot::new();
     let mut images = FileSlotStorage::new(&root.0);
