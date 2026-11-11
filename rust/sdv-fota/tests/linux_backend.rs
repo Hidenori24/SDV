@@ -1146,8 +1146,12 @@ fn linux_launcher_runs_trial_image_and_health_check_as_configured_user() {
     let root = TempRoot::new();
     let mut boot = FileBootControl::new(&root.0);
     boot.initialize(Slot::A, "1.0.0", 1).unwrap();
-    let run_as = fs::metadata("/proc/self").unwrap();
-    let uid_record = root.0.join("candidate-uid");
+    let (run_uid, run_gid) = unprivileged_identity();
+    // The application runs as another user when this test runs as root, so it needs a directory it can write to.
+    let record_dir = root.0.join("record");
+    fs::create_dir(&record_dir).unwrap();
+    fs::set_permissions(&record_dir, fs::Permissions::from_mode(0o777)).unwrap();
+    let uid_record = record_dir.join("candidate-uid");
     write_slot_image(
         &root.0,
         Slot::B,
@@ -1159,7 +1163,7 @@ fn linux_launcher_runs_trial_image_and_health_check_as_configured_user() {
     let health = root.0.join("health-check");
     write_executable(
         &health,
-        &format!("#!/bin/sh\ntest \"$(id -u)\" = {}\n", run_as.uid()),
+        &format!("#!/bin/sh\ntest \"$(id -u)\" = {run_uid}\n"),
     );
     boot.schedule_trial(TrialImage {
         slot: Slot::B,
@@ -1171,15 +1175,26 @@ fn linux_launcher_runs_trial_image_and_health_check_as_configured_user() {
     .unwrap();
 
     let status =
-        sdv_fota::linux::run_selected_image_as(&root.0, &health, &[], run_as.uid(), run_as.gid())
-            .unwrap();
+        sdv_fota::linux::run_selected_image_as(&root.0, &health, &[], run_uid, run_gid).unwrap();
 
     assert!(status.success());
     assert_eq!(
         fs::read_to_string(uid_record).unwrap().trim(),
-        run_as.uid().to_string()
+        run_uid.to_string()
     );
     assert_eq!(boot.state().unwrap().active, Slot::B);
+}
+
+/// The identity the launcher is asked to run the application as. The launcher refuses root, so a test run by
+/// a normal user uses that user's own identity; run as root (a container, a devcontainer), it uses the
+/// conventional unprivileged `nobody` (65534) - root can switch to it.
+fn unprivileged_identity() -> (u32, u32) {
+    let me = fs::metadata("/proc/self").unwrap();
+    if me.uid() == 0 {
+        (65534, 65534)
+    } else {
+        (me.uid(), me.gid())
+    }
 }
 
 #[test]
