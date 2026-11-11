@@ -15,5 +15,8 @@ Rust 実装のテストは `rust/sdv-core/tests/`（`cargo test`）にあり、C
 
 詳細な手順とPRのOK条件は [CONTRIBUTING.md](../CONTRIBUTING.md) を参照。
 
+## GUI の E2E
+ブラウザで GUI を動かす少数のスモークテストは [../e2e/README.md](../e2e/README.md)。
+
 ## 結合テスト
 シミュレータ全体を通す「シナリオ + 期待値」のテストは [integration/README.md](integration/README.md)（ビルド済みの WASM を Node で動かす。CI の `integration` ジョブ）。

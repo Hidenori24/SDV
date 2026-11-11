@@ -23,6 +23,7 @@
 | Rust: sdv-fota | `cargo test --manifest-path rust/sdv-fota/Cargo.toml`（`--features host-signing`、`cargo check --no-default-features`、`rust/sdv-fota/tests/c_smoke.sh` も CI で実行） |
 | Rust: sdv-picarx | `cargo test --manifest-path rust/sdv-picarx/Cargo.toml` |
 | Rust: sdv-sec | `cd rust/sdv-sec && cargo test --features sign && ./tests/c_smoke.sh` |
+| GUI の E2E（ブラウザ） | WASM をビルドして `web/` に置いたあと、`cd e2e && npm ci && E2E_BROWSER_PATH=<Chromium のパス> npm test`（[e2e/README.md](e2e/README.md)） |
 | 結合テスト（ビルド済み WASM） | `cargo build --release --target wasm32-unknown-unknown --manifest-path rust/sdv-core/Cargo.toml && node tests/integration/run_wasm.mjs`（[tests/integration/README.md](tests/integration/README.md)） |
 
 C のコードを追加する場合も同じ流れです。`CMakeLists.txt` に `C` 言語を有効化し、テスト実行ファイルを `add_test` で登録すれば CI の `ctest` に自動で含まれます。
@@ -48,6 +49,7 @@ cp logs/latest.csv rust/sdv-core/tests/golden/cpp_latest.csv
 - `lint`: 全 crate の `cargo fmt --check` と `cargo clippy --all-targets`（**clippy のエラーは失敗、警告は当面許容**。`sdv-fota` / `sdv-picarx` には既存の警告が残っている。新しいコードで警告を増やさない。削減は別 PR で進め、いずれ `-D warnings` にする）
 - `sec-tests`: `sdv-sec` の既知の値・フレーム MAC・ヘッダ一致、no_std の WASM ビルド、C ABI スモークテスト
 - `integration`: ビルド済みの `sdv_core.wasm` を Node で動かす結合テスト（C++ の基準ログの全行再現 + シナリオ + 期待値）
+- `e2e`: ブラウザの GUI を実際に動かす少数のスモークテスト（`e2e/`。ロジックは `integration` が見るので、ブラウザでしか確かめられないものだけ）
 - `aarch64`: Pi 5 の実ターゲット（aarch64-unknown-linux-gnu）でのビルドと、`qemu-user` でのテスト（手元で同じことをする手順は末尾）
 - `golden-log`: C++ ログがコミット済みの基準ログと一致すること
 - `ci-ok`: 上記すべての集約結果

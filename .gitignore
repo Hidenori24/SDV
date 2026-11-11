@@ -58,6 +58,7 @@ __pycache__/
 make/**
 # Rust
 rust/**/target/
+e2e/node_modules/
 web/sdv_core.wasm
 
 # simulator output (generated on every run)

@@ -176,6 +176,26 @@ jobs:
             rust/sdv-picarx/target/aarch64-unknown-linux-gnu/release/sdv-picarx-ecu-worker
             rust/sdv-picarx/target/aarch64-unknown-linux-gnu/release/sdv-picarx-health
 
+  e2e:
+    name: e2e
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Build the WASM and put it where the page loads it from
+        run: |
+          cargo build --release --target wasm32-unknown-unknown --manifest-path rust/sdv-core/Cargo.toml
+          cp rust/sdv-core/target/wasm32-unknown-unknown/release/sdv_core.wasm web/
+      - name: Install the test dependencies (playwright-core only; the browser is the Chrome of the runner image)
+        working-directory: e2e
+        run: npm ci
+      - name: Browser smoke tests
+        working-directory: e2e
+        run: npm test
+
   golden-log:
     name: golden-log
     needs: cpp-tests
@@ -202,7 +222,7 @@ jobs:
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [cpp-tests, rust-tests, lint, sec-tests, integration, aarch64, golden-log]
+    needs: [cpp-tests, rust-tests, lint, sec-tests, integration, aarch64, e2e, golden-log]
     runs-on: ubuntu-24.04
     steps:
       - name: All required jobs succeeded
