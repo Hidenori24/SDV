@@ -1,0 +1,10 @@
+{
+  "name": "sdv-intro-video",
+  "private": true,
+  "type": "module",
+  "description": "SDV Playground 紹介動画の生成ツール",
+  "dependencies": {
+    "playwright": "^1.50.0",
+    "three": "0.170.0"
+  }
+}
