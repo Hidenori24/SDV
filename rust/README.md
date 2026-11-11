@@ -52,7 +52,12 @@ cargo build --release --target wasm32-unknown-unknown # -> target/wasm32-unknown
 - `load()`: Active が正常なら採用、壊れていれば Backup、両方だめなら既定値。どの面から読んだか・各面の状態（空 / 正常 / 破損）も返す
 - `rollback()`: `Active ← Backup`、Backup は空にする（連続では戻れない）。世代番号は常に増える
 - 記憶装置は `NvmStorage` で抽象化（テスト・WASM はメモリ、ブラウザは localStorage に保存する予定）
-- `tests/nvm.rs`: CRC の標準値、コミット/ロールバック/フォールバック、破損・切り詰め・他形式のデータ、起動への利用
+- `tests/nvm.rs`: CRC の標準値、コミット/ロールバック/フォールバック、破損・切り詰め・他形式のデータ、起動への利用、失敗した更新を諦める `abandon_update`
+
+`trial.rs`: **Config の試験適用**（[ADR-0003](../docs/adr/ADR-0003-config-nvm.md) §5）の判定。更新して再起動したあと、一定時間（シミュレーション時間）のあいだに Degraded / EStop になったら不合格とする純粋な状態機械（I/O も時計もない）。運転者が押した E-Stop は Config のせいではないので対象外（解除のあと、Safety の周期が一巡するまでの古い状態も 100 ms だけ許す）。不合格のときの巻き戻しと再起動は `lib.rs`（C ABI）が行う: NVM を「ひとつ前の Config」（Backup があればそれ、初回の更新なら既定値）に戻し、`Sim` を再起動する。
+`config_log.rs`: Config の履歴（起動・保存・手動の巻き戻し・試験適用の開始/合格/不合格・自動の巻き戻し）。**シミュレーションの CSV と golden には触れず**、別の記録として JSON で出す（`sdv_config_log_json`）。時刻はシミュレーション時間で、コアは実時計を持たない（実時計が要るホストは自分で付ける）。
+- `tests/trial.rs`: 試験適用の判定（合格の境界、Degraded/EStop の理由、最後のティックでの失敗、運転者の E-Stop とその直後の猶予）
+- `tests/wasm_trial_api.rs`: C ABI 越しの試験適用（問題のない更新は残る、初回の更新が不合格なら既定値へ、不合格ならひとつ前の Config へ、運転者の E-Stop は無関係、起動で試験は終わる、履歴）
 - 次のPR: WASM API と GUI
 
 ## Safety（ウォッチドッグ）
@@ -169,6 +174,9 @@ post-cutover commit/rollback are not connected yet.
 | `sdv_derived_json_for(ptr, n)` | 保存前の編集中 Config（JSON）の導出値を計算してバッファに入れる。0 成功 / 1 不正（理由をバッファへ）/ 2 文字コード不正。何も保存・適用しない（GUI の導出値のライブ表示用） |
 | `sdv_nvm_commit(ptr, len)` | JSON を検証して Active に保存。0 成功 / 1 不正（理由は1行1件でバッファ）/ 2 文字コード不正。適用は次の `sdv_boot` |
 | `sdv_nvm_rollback()` | `Active ← Backup`。0 成功 / 1 バックアップなし |
+| `sdv_trial_start(window_ms)` | いま起動した Config を**試験適用**にする（100〜60000 ms）。その間に Degraded / EStop になったら、`sdv_step` が自動で NVM をひとつ前の Config（なければ既定値）に戻して再起動する。0 成功 / 1 窓が範囲外。`sdv_boot` で試験は終わる |
+| `sdv_trial_cancel()` | 試験適用を判定なしで終える（Config は残る） |
+| `sdv_config_log_json()` | Config の履歴（`boot` / `commit` / `rollback` / `trial_started` / `trial_passed` / `trial_failed` / `rolled_back` / `trial_cancelled`）を JSON 配列でバッファに入れる。各要素は `{boot, t_s, event, seq, detail}`（`t_s` はその起動からのシミュレーション時間、`seq` は Active の世代、0 = 既定値） |
 | `sdv_nvm_slot_status(slot)` | -1 空 / -2 破損 / それ以外は世代番号（slot 0 Active, 1 Backup） |
 | `sdv_nvm_read(slot)` / `sdv_nvm_write(slot, ptr, len)` / `sdv_nvm_erase(slot)` | 面の生バイトの取り出し・復元・消去（ブラウザの永続化用） |
 | `sdv_nvm_corrupt(slot)` | 故障注入: 面の中央の1バイトを反転 |
@@ -176,6 +184,6 @@ post-cutover commit/rollback are not connected yet.
 | `sdv_set_scenario(ptr, len)` / `sdv_scenario_json()` / `sdv_demo_scenario_json()` | シナリオJSONの検証と設定（0 成功 / 1 不正（理由は1行1件でバッファ）/ 2 文字コード不正。不正なら実行中のシナリオは不変）、実行中・内蔵デモのJSON取得。`sdv_use_scenario(1)` で有効、`sdv_reset()` で最初から再生 |
 | `sdv_set_stall(component, on)` | SWC の故障注入。component: 0 engine / 1 brake / 2 steering / 3 vehicledynamics |
 | `sdv_step(n)` | 10ms × n 進める |
-| `sdv_out_ptr()` / `sdv_out_len()` | 出力バッファ（f32）: `t,x,y,yaw,v,yaw_rate,wheel_omega,throttle,brake,steer,drive_accel_cmd,brake_decel_cmd,steer_angle_cmd,estop,system_state` に続けて、SWCごとの無応答時間 `silent_ms`（engine, brake, steering, vehicledynamics）。続いて ECU（engine, brake, steering）ごとのフェイルセーフ状態（bit0: DriverInput途絶, bit1: Safety途絶）。続いて注入中の故障（1.0 = 有効）: stalled[engine, brake, steering, plant, vcu], bus_down。全28要素 |
+| `sdv_out_ptr()` / `sdv_out_len()` | 出力バッファ（f32）: `t,x,y,yaw,v,yaw_rate,wheel_omega,throttle,brake,steer,drive_accel_cmd,brake_decel_cmd,steer_angle_cmd,estop,system_state` に続けて、SWCごとの無応答時間 `silent_ms`（engine, brake, steering, vehicledynamics）。続いて ECU（engine, brake, steering）ごとのフェイルセーフ状態（bit0: DriverInput途絶, bit1: Safety途絶）。続いて注入中の故障（1.0 = 有効）: stalled[engine, brake, steering, plant, vcu], bus_down。続いて試験適用: [28] 状態（0 なし / 1 試験中 / 2 合格 / 3 不合格）、[29] 残り ms、[30] 不合格の理由（1 Degraded / 2 EStop）、[31] 起動中の Config の世代（0 = 既定値）。全32要素 |
 
 RustもTDDで進めます（先に失敗するテスト→最小実装→整理）。CIとPRのOK条件は [CONTRIBUTING.md](../CONTRIBUTING.md) を参照。

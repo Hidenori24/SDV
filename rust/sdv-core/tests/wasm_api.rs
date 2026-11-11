@@ -9,7 +9,7 @@ fn out() -> Vec<f32> {
 
 #[test]
 fn c_api_exposes_bus_faults_vcu_stall_and_failsafe_flags() {
-    assert_eq!(sdv_out_len(), 28);
+    assert_eq!(sdv_out_len(), 32, "28 signals + 4 for the config trial");
 
     sdv_reset();
     sdv_use_scenario(0);

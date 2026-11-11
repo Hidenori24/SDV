@@ -193,7 +193,7 @@ flowchart TB
 flowchart LR
     UI["web/index.html + app.js<br/>スライダー・ECU構成図・設定・シナリオ"] <-->|"C ABI<br/>sdv_*"| WASM["sdv_core.wasm<br/>(rust/sdv-core)"]
     UI <-->|"保存/復元"| LS[("localStorage<br/>疑似NVM")]
-    WASM -->|"出力バッファ 28要素<br/>状態・SWC無応答時間・フェイルセーフ・故障フラグ"| UI
+    WASM -->|"出力バッファ 32要素<br/>状態・SWC無応答時間・フェイルセーフ・故障フラグ・Config試験適用"| UI
 ```
 
 - シミュレーションの本体は WASM（Rust）。GUI は入力を渡し、出力バッファを描画するだけ

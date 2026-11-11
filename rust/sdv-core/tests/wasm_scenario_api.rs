@@ -60,7 +60,7 @@ fn scenario_and_state_flags_through_the_c_api() {
     assert!(buf().contains("\"name\": \"faults\""));
     sdv_reset();
     sdv_use_scenario(1);
-    assert_eq!(sdv_out_len(), 28);
+    assert_eq!(sdv_out_len(), 32, "28 signals + 4 for the config trial");
     sdv_step(50);
     let o = out();
     assert_eq!(&o[22..28], &[0.0; 6], "nothing yet at 0.5 s");
