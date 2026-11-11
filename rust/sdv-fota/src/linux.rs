@@ -52,8 +52,9 @@ const OUTPUT_HOLD_RESPONSE_TIMEOUT: Duration = Duration::from_secs(7);
 const HOLD_SOCKET_ENV: &str = "SDV_FOTA_HOLD_SOCKET";
 const HOLD_LISTENER_FD_ENV: &str = "SDV_FOTA_HOLD_LISTENER_FD";
 const HOLD_FD_MINIMUM: RawFd = 32;
-// Linux O_NOFOLLOW: reject a final path component that is a symbolic link.
-const O_NOFOLLOW: i32 = 0x20_000;
+// Reject a final path component that is a symbolic link. The value differs by architecture (x86-64 0x20000,
+// aarch64 0x8000), so it must come from libc, never be written out by hand.
+const O_NOFOLLOW: i32 = libc::O_NOFOLLOW;
 const UNSAFE_WRITE_BITS: u32 = 0o022;
 static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(0);
 
