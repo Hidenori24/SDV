@@ -21,6 +21,7 @@ test("the simulator starts: the wasm loads and time advances", () =>
 test("config: a valid config is saved, an invalid one is rejected with the reason, and the previous one comes back", () =>
   withPage("", async ({ page }) => {
     await page.click("#cfgbox summary");
+    await page.uncheck("#trialOn"); // this test is about saving, not about the trial
     const set = async (id, value) => { await page.fill(id, String(value)); await page.dispatchEvent(id, "input"); };
 
     await set("#f_tuning_safety_heartbeat_timeout_ms", 300);
@@ -64,6 +65,21 @@ test("steering sign: left makes the yaw rate positive, right negative", () =>
       await page.keyboard.up(key);
       await page.keyboard.up("ArrowUp");
     }
+  }));
+
+test("config trial: a watchdog that is too strict is rolled back by itself after a short bus outage", () =>
+  withPage("", async ({ page }) => {
+    await page.click("#cfgbox summary");
+    await page.fill("#f_tuning_safety_heartbeat_timeout_ms", "200");
+    await page.dispatchEvent("#f_tuning_safety_heartbeat_timeout_ms", "input");
+    await page.click("#cfgSave");
+    await page.waitForSelector("#trialStatus.running");
+    await page.click("#bdown"); // bus down: with 200 ms this looks like dead ECUs; the default 1000 ms would ignore it
+    await page.waitForTimeout(800);
+    await page.click("#bdown");
+    await page.waitForSelector("#trialStatus.failed", { timeout: 10_000 });
+    assert.match(await text(page, "#cfgMsg"), /自動で元の設定に戻しました/);
+    assert.equal(await page.inputValue("#f_tuning_safety_heartbeat_timeout_ms"), "1000", "the factory defaults run again");
   }));
 
 test("FOTA demo: drive, update while parked, drive the same course again", () =>
