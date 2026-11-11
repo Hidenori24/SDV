@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="仮想Steering ECUの制御ロジック変更を通じて、A/B FOTAの試験起動とrollbackを体験するブラウザデモ。">
+<title>FOTA Demo | SDV</title>
+<style>
+:root{color-scheme:light dark;--bg:#f4f5f7;--panel:#fff;--ink:#1d2330;--sub:#626b7b;--line:#dfe3ea;--accent:#2563eb;--accent-soft:#eaf0ff;--ok:#15803d;--ok-soft:#e8f7ed;--warn:#b45309;--warn-soft:#fff4df;--bad:#b91c1c;--bad-soft:#fff0ef;--track:#e8ebf1}
+@media(prefers-color-scheme:dark){:root{--bg:#0f131a;--panel:#171c26;--ink:#e6e9f0;--sub:#a4adbf;--line:#303847;--accent:#85aaff;--accent-soft:#1e2b45;--ok:#5ed28a;--ok-soft:#173323;--warn:#ffc45e;--warn-soft:#382d18;--bad:#ff8585;--bad-soft:#3d2225;--track:#303847}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 system-ui,-apple-system,"Segoe UI","Hiragino Sans",sans-serif}a{color:var(--accent)}header,main,footer{max-width:1080px;margin:auto;padding:16px}header{display:flex;align-items:center;gap:16px}header h1{font-size:19px;margin:0}header nav{margin-left:auto;display:flex;gap:16px;font-size:14px}main{padding-top:0}.hero{padding:24px;background:linear-gradient(120deg,var(--panel),var(--accent-soft));border:1px solid var(--line);border-radius:14px;margin:4px 0 14px}.eyebrow,.tag{display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:999px;padding:3px 10px;color:var(--sub);font-size:12px}.hero h2{font-size:clamp(22px,4vw,32px);line-height:1.25;margin:12px 0 8px}.hero p{max-width:760px;color:var(--sub);margin:0}.layout{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(320px,.95fr);gap:14px}.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;margin-bottom:14px}.card h2{font-size:17px;margin:0 0 6px}.sub{color:var(--sub);font-size:13px;margin:4px 0 14px}.variants{display:grid;grid-template-columns:1fr 1fr;gap:10px}.variant{display:block;border:1px solid var(--line);border-radius:10px;padding:12px;cursor:pointer}.variant:has(input:checked){border-color:var(--accent);box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 22%,transparent)}.variant input{accent-color:var(--accent)}.variant strong{display:block;margin:3px 0}.variant span{display:block;color:var(--sub);font-size:13px}.metricrow{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:14px 0}.metric{background:var(--bg);border:1px solid var(--line);border-radius:9px;padding:9px 11px}.metric span{display:block;color:var(--sub);font-size:12px}.metric strong{font-size:19px;font-variant-numeric:tabular-nums}.sliderrow{display:grid;grid-template-columns:105px 1fr 65px;gap:10px;align-items:center;margin:10px 0}.sliderrow label{color:var(--sub)}input[type=range]{width:100%;accent-color:var(--accent)}output{text-align:right;font-variant-numeric:tabular-nums}.chartwrap{border:1px solid var(--line);border-radius:9px;background:var(--bg);padding:8px}.chartwrap svg{display:block;width:100%;height:auto}.legend{display:flex;gap:16px;flex-wrap:wrap;color:var(--sub);font-size:12px;margin:6px 4px 0}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px;background:var(--sub)}.dot.new{background:var(--accent)}.slots{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px}.slot{border:1px solid var(--line);border-radius:10px;padding:12px;min-height:120px;position:relative}.slot.active{border-color:var(--ok);background:var(--ok-soft)}.slot.trial{border-color:var(--warn);background:var(--warn-soft)}.slot.failed{border-color:var(--bad);background:var(--bad-soft)}.slotname{font-weight:750;font-size:16px}.slotstate{float:right;font-size:12px;border:1px solid currentColor;border-radius:999px;padding:1px 8px;color:var(--sub)}.slot.active .slotstate{color:var(--ok)}.slot.trial .slotstate{color:var(--warn)}.slot.failed .slotstate{color:var(--bad)}.slot p{margin:8px 0 0;font-size:13px;color:var(--sub)}.flow{display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin:14px 0}.flowstep{border:1px solid var(--line);border-radius:8px;padding:8px 5px;text-align:center;color:var(--sub);font-size:11px;line-height:1.35}.flowstep b{display:block;font-size:14px;margin-bottom:4px}.flowstep.done{color:var(--ok);border-color:var(--ok);background:var(--ok-soft)}.flowstep.current{color:var(--accent);border-color:var(--accent);background:var(--accent-soft);font-weight:700}.flowstep.failed{color:var(--bad);border-color:var(--bad);background:var(--bad-soft);font-weight:700}.progress{height:9px;background:var(--track);border-radius:9px;overflow:hidden}.progress i{display:block;height:100%;width:0;background:var(--accent);transition:width .25s}.status{min-height:52px;padding:10px 12px;border-radius:9px;margin:10px 0;background:var(--bg);border:1px solid var(--line)}.status.ok{background:var(--ok-soft);color:var(--ok);border-color:var(--ok)}.status.fail{background:var(--bad-soft);color:var(--bad);border-color:var(--bad)}.log{max-height:150px;overflow:auto;padding-left:24px;margin:8px 0 0;color:var(--sub);font-size:12px}.log li{padding:2px 0}.actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:14px}button{font:inherit;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:9px 14px;cursor:pointer}button:hover:not(:disabled){border-color:var(--accent)}button:focus-visible,input:focus-visible{outline:3px solid color-mix(in srgb,var(--accent) 60%,transparent);outline-offset:2px}button.primary{color:#fff;background:var(--accent);border-color:var(--accent);font-weight:700}button:disabled{opacity:.55;cursor:not-allowed}.inject{display:flex;gap:9px;align-items:flex-start;border:1px dashed var(--line);border-radius:9px;padding:10px;margin-top:12px;font-size:13px}.inject input{margin-top:5px;accent-color:var(--warn)}.note{background:var(--warn-soft);border-radius:9px;padding:12px 14px;font-size:13px;margin:14px 0 0}.explain{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.explain div{border:1px solid var(--line);border-radius:9px;padding:11px}.explain strong{display:block;margin-bottom:4px}.explain span{font-size:13px;color:var(--sub)}footer{color:var(--sub);font-size:12px;padding-top:0}
+@media(max-width:780px){header{align-items:flex-start;flex-direction:column;gap:4px}header nav{margin-left:0}.layout{grid-template-columns:1fr}.flow{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:480px){header,main,footer{padding-left:12px;padding-right:12px}.hero,.card{padding:14px}.variants,.explain{grid-template-columns:1fr}.sliderrow{grid-template-columns:90px 1fr 55px}.metricrow{gap:5px}.metric{padding:7px}.metric strong{font-size:16px}.slots{gap:7px}.slot{padding:9px;min-height:128px}}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;transition:none!important}}
+</style>
+</head>
+<body>
+<header>
+  <h1>FOTA Lab — 仮想Steering ECU</h1>
+  <nav aria-label="ページ"><a href="index.html">SDVシミュレータ</a><a href="fota.html">Pi 5実装・手順</a></nav>
+</header>
+<main>
+  <section class="hero">
+    <span class="eyebrow">ブラウザだけで動くデモ</span>
+    <h2>ソフトを変えて、A/Bスロットを切り替える</h2>
+    <p>ステアリングECUの応答を変える更新パッケージを選び、inactive slotへの書込み、検証、試験起動、commitまたはrollbackを体験できます。実車・Pi・ネットワークには接続しません。</p>
+  </section>
+
+  <div class="layout">
+    <section>
+      <article class="card">
+        <h2>1. 更新パッケージを選ぶ</h2>
+        <p class="sub">どちらも現在のactive imageから作る署名済みパッケージを想定したシミュレーションです。</p>
+        <div class="variants" role="radiogroup" aria-label="更新内容">
+          <label class="variant"><input type="radio" name="variant" value="constant" checked>
+            <strong>定数を変更</strong><span id="packageChange">Steering gain: 0.80 → 1.00</span>
+            <span>同じ入力に対する舵角指令を強める</span>
+          </label>
+          <label class="variant"><input type="radio" name="variant" value="logic">
+            <strong>ロジックを変更</strong><span>Linear → deadband + smooth response</span>
+            <span>小さな入力の揺れを無視して応答を滑らかにする</span>
+          </label>
+        </div>
+
+        <div class="sliderrow">
+          <label for="inputAngle">Driver input</label>
+          <input id="inputAngle" type="range" min="-30" max="30" step="1" value="18">
+          <output id="inputValue" for="inputAngle">+18°</output>
+        </div>
+        <div class="metricrow" aria-live="polite">
+          <div class="metric"><span>更新前の出力</span><strong id="oldOutput">+14.4°</strong></div>
+          <div class="metric"><span>更新案の出力</span><strong id="newOutput">+18.0°</strong></div>
+          <div class="metric"><span>出力差</span><strong id="outputDelta">+3.6°</strong></div>
+        </div>
+        <div class="chartwrap">
+          <svg id="responseChart" viewBox="0 0 640 260" role="img" aria-label="入力角に対する更新前と更新案のステアリング出力"></svg>
+          <div class="legend"><span><i class="dot"></i>更新前</span><span><i class="dot new"></i>更新案</span></div>
+        </div>
+      </article>
+
+      <article class="card">
+        <h2>2. A/B image領域</h2>
+        <p class="sub">更新データはinactive slotへ先に書き、試験中はactive slotを残します。</p>
+        <div class="slots" aria-live="polite">
+          <div class="slot active" id="slotA"><span class="slotname">Slot A</span><span class="slotstate" id="stateA">active</span><p id="imageA">v1.0.0 · gain 0.80 · linear</p></div>
+          <div class="slot" id="slotB"><span class="slotname">Slot B</span><span class="slotstate" id="stateB">fallback</span><p id="imageB">v0.9.0 · gain 0.80 · linear</p></div>
+        </div>
+        <p class="sub" id="activeSummary" aria-live="polite">active slot: A · v1.0.0</p>
+      </article>
+    </section>
+
+    <section>
+      <article class="card">
+        <h2>3. FOTAを実行</h2>
+        <p class="sub">成功時はcandidateをactiveへcommit。失敗時はactive slotを維持してrollbackします。</p>
+        <div class="flow" aria-label="更新の進行状況">
+          <div class="flowstep" data-step="0"><b>01</b>署名検証</div>
+          <div class="flowstep" data-step="1"><b>02</b>inactiveへ書込</div>
+          <div class="flowstep" data-step="2"><b>03</b>digest検証</div>
+          <div class="flowstep" data-step="3"><b>04</b>試験起動</div>
+          <div class="flowstep" data-step="4"><b>05</b>health確認</div>
+          <div class="flowstep" data-step="5"><b>06</b>commit</div>
+        </div>
+        <div class="progress" id="progress" role="progressbar" aria-label="FOTA進行状況" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="progressFill"></i></div>
+        <div class="status" id="status" role="status" aria-live="polite">更新内容を選び、「FOTAを実行」を押してください。</div>
+        <label class="inject"><input id="failHealth" type="checkbox"><span><strong>health checkを失敗させる</strong><br>試験起動のあとhealth checkで異常を注入し、active slotが保持されることを確認します。</span></label>
+        <div class="actions">
+          <button id="runUpdate" class="primary">FOTAを実行</button>
+          <button id="resetDemo">最初から</button>
+          <span class="tag" id="targetSlot">書込先: Slot B</span>
+        </div>
+        <ol id="eventLog" class="log" aria-label="更新イベント"></ol>
+      </article>
+      <article class="card">
+        <h2>このデモで見せるFOTAの要点</h2>
+        <div class="explain">
+          <div><strong>activeを残す</strong><span>新imageはinactiveへ書くため、更新中も現在のimageを保持します。</span></div>
+          <div><strong>検証して試す</strong><span>digestを確認し、candidateのhealthを見てから切替えます。</span></div>
+          <div><strong>失敗時は戻る</strong><span>candidateが失敗してもactive slotは切り替わりません。</span></div>
+        </div>
+        <p class="note"><strong>デモ専用:</strong> ここでは実際の署名・暗号鍵・ECU image・Pi上のファイル書込みは行いません。処理手順とA/B状態をブラウザ内で再現しています。</p>
+      </article>
+    </section>
+  </div>
+</main>
+<footer>実装の範囲とPi 5でのセットアップは <a href="fota.html">FOTA実装・運用ページ</a> を参照してください。</footer>
+<script src="fota-demo.js"></script>
+</body>
+</html>

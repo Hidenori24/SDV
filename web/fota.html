@@ -8,16 +8,17 @@
 :root{color-scheme:light dark;--bg:#f4f5f7;--panel:#fff;--ink:#1d2330;--sub:#626b7b;--line:#dfe3ea;--accent:#2563eb;--note:#fff7df}
 @media(prefers-color-scheme:dark){:root{--bg:#0f131a;--panel:#171c26;--ink:#e6e9f0;--sub:#a4adbf;--line:#303847;--accent:#85aaff;--note:#342d1a}}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.65 system-ui,-apple-system,"Segoe UI","Hiragino Sans",sans-serif}
-header,main{max-width:900px;margin:auto;padding:18px}header{display:flex;justify-content:space-between;align-items:center}header h1{font-size:20px;margin:0}a{color:var(--accent)}main{padding-top:0}.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px;margin:12px 0}h2{font-size:17px;margin:0 0 8px}h3{font-size:14px;margin:20px 0 6px}p{margin:8px 0}.sub{color:var(--sub)}.note{background:var(--note);border-radius:8px;padding:12px 14px}pre{overflow:auto;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:12px;font-size:13px;line-height:1.5}ul{padding-left:22px}.pill{display:inline-block;border:1px solid var(--line);border-radius:99px;padding:2px 9px;font-size:12px;color:var(--sub)}
+header,main{max-width:900px;margin:auto;padding:18px}header{display:flex;justify-content:space-between;align-items:center}header nav{display:flex;gap:14px}header h1{font-size:20px;margin:0}a{color:var(--accent)}main{padding-top:0}.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px;margin:12px 0}h2{font-size:17px;margin:0 0 8px}h3{font-size:14px;margin:20px 0 6px}p{margin:8px 0}.sub{color:var(--sub)}.note{background:var(--note);border-radius:8px;padding:12px 14px}pre{overflow:auto;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:12px;font-size:13px;line-height:1.5}ul{padding-left:22px}.pill{display:inline-block;border:1px solid var(--line);border-radius:99px;padding:2px 9px;font-size:12px;color:var(--sub)}
 </style>
 </head>
 <body>
-<header><h1>FOTA — Pi 5 / Linux ホスト試作</h1><a href="index.html">← シミュレータへ</a></header>
+<header><h1>FOTA — Pi 5 / Linux ホスト試作</h1><nav><a href="fota-demo.html">FOTAデモ</a><a href="index.html">← シミュレータへ</a></nav></header>
 <main>
   <section class="card">
     <span class="pill">開発プレビュー</span>
     <p>vehicle targetの署名済みアプリイメージをHTTPSまたはファイルから受け取り、署名と互換性を検証して非稼働スロットへ書き込みます。HTTPS配信はシステムCAでサーバー証明書を検証し、必要に応じて端末証明書による相互TLS認証も使えます。相互TLS時は証明書の転送を避けるためリダイレクトを許可せず、配信先はパッケージを直接返す必要があります。どちらの場合もパッケージ署名の検証は必須です。vehicleイメージは起動時に記録済みSHA-256と照合してから試験起動し、ヘルスチェックに合格すれば確定、失敗すれば元のスロットへ戻ります。個別ECU packageの現在の適用範囲は下記を参照してください。</p>
-    <p class="sub">このページは実装済みのPi 5/Linuxホスト経路を説明します。ブラウザ上のシミュレータ自体はFOTA更新しません。</p>
+    <p class="sub">このページは実装済みのPi 5/Linuxホスト経路を説明します。ブラウザ上の処理手順デモは実機・Piの更新とは独立して動作します。</p>
+    <p class="note">FOTAのA/B更新をブラウザで試す: <a href="fota-demo.html">仮想Steering ECUの更新デモ</a>。定数変更・ロジック変更と、試験起動のcommit／rollbackを体験できます。</p>
   </section>
   <section class="card">
     <h2>Pi 5への初期セットアップ</h2>
