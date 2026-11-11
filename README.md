@@ -3,12 +3,15 @@
 本プロジェクトは、個人開発で「SDV（Software-Defined Vehicle）を自作していく」ための最小アーキテクチャと実装ベースを提供します。  
 最終的にはRCカー相当の構造へ載せ替え可能な設計とし、初期は完全シミュレータ（2D）で開発・検証します。
 
-実装は 2 つあります。
+実装は C++（参照実装）と Rust（主役）で、Rust は役割ごとに 4 つの crate に分かれています。
 
 | | 役割 | 場所 |
 |---|---|---|
 | **C++** | 参照実装（1 プロセス・1 RTE）。基準ログの生成元 | `src/`、`tests/` |
-| **Rust** | 主役。ECU ごとの RTE + 仮想バス、Watchdog / フェイルセーフ、Config / NVM、シナリオ。WASM にしてブラウザで動かす | `rust/sdv-core/` |
+| **Rust: sdv-core** | シミュレータ本体。ECU ごとの RTE + 仮想バス、Watchdog / フェイルセーフ、Config / NVM、シナリオ、実機向けの `VehicleRuntime`。WASM にしてブラウザで動かす | `rust/sdv-core/` |
+| **Rust: sdv-sec** | 通信の基礎ライブラリ（SHA-256・Ed25519 検証・フレーム MAC。`no_std`、C ABI） | `rust/sdv-sec/` |
+| **Rust: sdv-fota** | FOTA（署名済みパッケージの検証、A/B 更新、trial / commit / rollback、固定長の `CampaignManager`、Pi 5/Linux 向けの導入・起動、Classic 向け C ABI） | `rust/sdv-fota/`、`deploy/systemd/` |
+| **Rust: sdv-picarx** | Pi 5 + PiCar-X 向けのプラットフォーム（Robot HAT・I2C・GPIO・車両ホスト・仮想 ECU ワーカー）。**実機では未確認** | `rust/sdv-picarx/` |
 
 ブラウザで動くシミュレータ（GUI）は `web/` にあり、GitHub Pages で公開されます（下記）。
 
@@ -28,7 +31,7 @@
 - パラメータ更新（Config/NVM）で挙動が変わる（例：最大速度、最大舵角、最大減速度）
 - 同一入力でリプレイできる（ログ再現性）
 
-達成状況（Rust 実装）: E-Stop・Watchdog、Config/NVM（更新・ロールバック・破損復旧）、シナリオによる再現性は実装済み。詳細な進捗は [docs/design/00_overview.md](docs/design/00_overview.md)。
+達成状況（Rust 実装）: E-Stop・Watchdog、Config/NVM（更新・ロールバック・破損復旧）、シナリオによる再現性は実装済み。FOTA は Pi 5/Linux 上で「署名 → 導入 → trial 起動 → health check → commit / rollback」まで通っている（**実機での確認は未実施**）。未完了の一覧は [Issue #166](https://github.com/Hidenori24/SDV/issues/166)、進捗は [docs/design/00_overview.md](docs/design/00_overview.md)。
 
 ## アーキテクチャ概要（AUTOSAR-like）
 
@@ -75,12 +78,13 @@ flowchart TB
 
 ```
 src/        C++ 参照実装（app / bsw / model / rte / swc）
-tests/      C++ 単体テスト（Catch2）
-rust/       Rust 実装（sdv-core: シミュレータ本体 / sdv-sec: 署名・MAC などの通信の基礎ライブラリ）。WASM にして web/ から使う
-web/        ブラウザ GUI（HTML + JS）
+tests/      C++ 単体テスト（Catch2）と、結合テスト（tests/integration: シナリオ + 期待値）
+rust/       Rust 実装（sdv-core / sdv-sec / sdv-fota / sdv-picarx）。sdv-core は WASM にして web/ から使う
+web/        ブラウザ GUI（シミュレータ、FOTA デモ、FOTA 実装・手順のページ）
+deploy/     Pi 5 向けの systemd ユニット（FOTA ランチャー、ECU ワーカー、SDV データボリューム）
 docs/       設計文書（design/）と設計判断（adr/）
 tasks/      実装タスクの記録（SWC ごと）
-tools/      可視化などの補助スクリプト（Python）
+tools/      図の生成・可視化などの補助スクリプト
 ```
 
 ## ドキュメント
@@ -100,6 +104,9 @@ tools/      可視化などの補助スクリプト（Python）
 - [docs/design/fota-pi5-operations.md](docs/design/fota-pi5-operations.md) : Pi 5 FOTA運用。positional launcherはvehicle root専用、ECU target-aware launchはactive slot専用
 - [rust/README.md](rust/README.md) : Rust 実装の構成・WASM API
 - [rust/sdv-sec/README.md](rust/sdv-sec/README.md) : 通信の基礎ライブラリ（SHA-256・Ed25519 検証・フレーム MAC、C ABI）
+- [rust/sdv-picarx/README.md](rust/sdv-picarx/README.md) : PiCar-X プラットフォーム（Robot HAT・車両ホスト・仮想 ECU ワーカー）
+- [docs/design/fota_classic_architecture.md](docs/design/fota_classic_architecture.md) : AUTOSAR Classic を基準にした ECU / FOTA の責務境界案
+- [tests/integration/README.md](tests/integration/README.md) : 結合テスト（シナリオ + 期待値。ビルド済みの WASM を Node で実行）
 - [web/README.md](web/README.md) : ブラウザ GUI の使い方
 - [CONTRIBUTING.md](CONTRIBUTING.md) : TDD の進め方、テスト、CI
 
