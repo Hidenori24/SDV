@@ -329,7 +329,7 @@ function frame(ts) {
     while (hist.length && hist[0].t < hist[hist.length - 1].t - HISTORY_S - 1) hist.shift();
   }
   const o = out();
-  drawView(o); drawWheel(o); drawChart(); drawMap(o); updateHud(o); updateSwcs(o);
+  drawView(o); drawWheel(o); drawChart(); drawMap(o); updateHud(o); updateSwcs(o); pollTrial(o);
 }
 
 // ---------- Config / NVM（Rust側の sdv_nvm_* / sdv_boot に対応）----------
@@ -411,13 +411,69 @@ function applyConfigToUi() {
 }
 function bootFromNvm() {
   bootSource = wasm.sdv_boot();
-  applyConfigToUi(); setEstop(false); resetSim(); refreshNvm();
+  applyConfigToUi(); setEstop(false); resetSim(); refreshNvm(); refreshLog();
+}
+
+// ---------- 試験適用（Config を保存したあと一定時間だけ様子を見て、異常なら自動で元に戻す: ADR-0003 §5）----------
+// 出力バッファの末尾: [28] 状態(0なし 1試験中 2合格 3不合格) [29] 残りms [30] 理由(1 Degraded, 2 E-STOP) [31] Configの世代
+const TRIAL = { STATE: 28, REMAINING: 29, REASON: 30 };
+const TRIAL_REASONS = { 1: "Degraded（縮退）", 2: "E-STOP" };
+let lastTrialState = 0;
+
+function pollTrial(o) {
+  const state = o[TRIAL.STATE], box = $("trialStatus");
+  if (state === 1) {
+    box.className = "trialstatus running";
+    box.textContent = `試験適用中: 残り ${(o[TRIAL.REMAINING] / 1000).toFixed(1)} 秒（異常があれば自動で元に戻します）`;
+  } else if (state === 2) {
+    box.className = "trialstatus passed"; box.textContent = "試験適用: 合格。この設定が有効です。";
+  } else if (state === 3) {
+    box.className = "trialstatus failed";
+    box.textContent = `試験適用: 不合格（${TRIAL_REASONS[o[TRIAL.REASON]] || "異常"}）→ 自動で元の設定に戻しました。`;
+  } else { box.className = "trialstatus"; box.textContent = ""; }
+  if (state === lastTrialState) return;
+  lastTrialState = state;
+  refreshLog();
+  if (state === 3) {
+    // コアがNVMを元に戻して再起動した。ブラウザ側の保存・表示・故障注入の表示を追従させる
+    persistNvm();
+    // コアが再起動した。起動元は、NVMに有効な記録が残っていればそれ、なければ既定値
+    bootSource = wasm.sdv_nvm_slot_status(0) >= 0 ? 0 : wasm.sdv_nvm_slot_status(1) >= 0 ? 1 : 2;
+    applyConfigToUi(); setEstop(false); resetSim(); refreshNvm();
+    showMsg(`試験適用に失敗（${TRIAL_REASONS[o[TRIAL.REASON]] || "異常"}）したので、自動で元の設定に戻しました。`, false);
+  } else if (state === 2) {
+    showMsg("試験適用に合格しました。この設定が有効です。", true);
+  }
+}
+
+function refreshLog() {
+  wasm.sdv_config_log_json();
+  let entries = [];
+  try { entries = JSON.parse(bufText()); } catch (_) { /* ignore */ }
+  const DETAIL = {
+    trial_failed: { estop: "E-STOP", degraded: "Degraded" },
+    boot: { active: "Active から", backup: "Backup から", defaults: "既定値で" },
+    rolled_back: { "factory defaults": "既定値へ", "previous config": "ひとつ前の設定へ" },
+  };
+  const detail = (e) => (e.event === "trial_started" ? e.detail.replace(" ms", "ミリ秒") : (DETAIL[e.event] || {})[e.detail] || "");
+  const NAMES = { boot: "起動", commit: "保存", rollback: "手動で戻す", trial_started: "試験適用 開始", trial_passed: "試験適用 合格", trial_failed: "試験適用 不合格", rolled_back: "自動で戻した", trial_cancelled: "試験適用 中止" };
+  $("cfgLog").textContent = entries.slice(-30).map((e) =>
+    `起動#${e.boot} t=${e.t_s.toFixed(2)}s  世代${e.seq}  ${NAMES[e.event] || e.event}${detail(e) ? "（" + detail(e) + "）" : ""}`).join("\n") || "（まだありません）";
 }
 
 $("cfgSave").addEventListener("click", () => {
   const [p, n] = putText($("cfgText").value);
   const r = wasm.sdv_nvm_commit(p, n); wasm.sdv_free(p, n);
-  if (r === 0) { persistNvm(); bootFromNvm(); showMsg("検証に通ったので保存し、再起動して適用しました。", true); }
+  if (r === 0) {
+    persistNvm(); bootFromNvm();
+    const sec = parseFloat($("trialSec").value);
+    if ($("trialOn").checked && sec >= 0.1 && sec <= 60 && wasm.sdv_trial_start(Math.round(sec * 1000)) === 0) {
+      showMsg(`検証に通ったので保存し、再起動して適用しました。これから ${sec} 秒の試験適用です。`, true);
+    } else {
+      showMsg("検証に通ったので保存し、再起動して適用しました（試験適用なし）。", true);
+    }
+    refreshLog();
+  }
   else if (r === 1) showMsg("拒否しました（何も保存していません）:\n" + bufText(), false);
   else showMsg("文字コードが不正です。", false);
 });

@@ -100,6 +100,9 @@ pub struct Sim {
     /// true: DriverInput follows the built-in demo scenario (like the C++ app);
     /// false: the input is controlled from outside (GUI).
     use_scenario: bool,
+    /// The external E-Stop request as last set (UI / scenario). `rte.safety.estop` cannot tell it from the
+    /// watchdog latch, because the Safety SWC writes its output into the same signal.
+    driver_estop: bool,
     scenario: Scenario,
     /// Scenario events sorted by time, and how many have fired already.
     events: Vec<Event>,
@@ -128,6 +131,7 @@ impl Sim {
             failsafe: config.failsafe_params(),
             config,
             use_scenario: false,
+            driver_estop: false,
             scenario: Scenario::demo(),
             events: Vec::new(),
             next_event: 0,
@@ -281,7 +285,13 @@ impl Sim {
 
     /// External E-Stop request (UI / hardware); enters on the VCU and reaches the ECUs via the Safety frame.
     pub fn set_estop_request(&mut self, on: bool) {
+        self.driver_estop = on;
         self.vcu.rte.safety.estop = on;
+    }
+
+    /// Whether an external E-Stop is being requested right now (as opposed to a watchdog latch).
+    pub fn estop_requested(&self) -> bool {
+        self.driver_estop
     }
 
     /// Watchdog view of each supervised node: [engine, brake, steering, vehicledynamics].

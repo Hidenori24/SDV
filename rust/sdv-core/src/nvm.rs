@@ -215,6 +215,27 @@ impl<S: NvmStorage> Nvm<S> {
         Ok(seq)
     }
 
+    /// Generation of the running config: the sequence number of the Active record, or 0 when the factory defaults
+    /// run (nothing stored, or Active is empty or corrupt).
+    pub fn active_seq(&self) -> u32 {
+        self.record(Slot::Active).1.map_or(0, |r| r.seq)
+    }
+
+    /// Give up on a failed update (trial application, ADR-0003 §5): go back to the previous config.
+    /// With a valid Backup that is `rollback`. Without one - the failed config was the first ever stored - the
+    /// previous config is the factory defaults, so Active is erased and the next boot falls back to them.
+    /// Nothing stored is not an error. The failed config is dropped, not kept as the backup.
+    pub fn abandon_update(&mut self) -> Result<u32, NvmError> {
+        match self.rollback() {
+            Ok(seq) => Ok(seq),
+            Err(NvmError::NoBackup) => {
+                self.storage.erase(Slot::Active);
+                Ok(0)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// `Active <- Backup`; the backup is cleared. Fails if there is no valid backup.
     pub fn rollback(&mut self) -> Result<u32, NvmError> {
         let (_, ra) = self.record(Slot::Active);

@@ -213,3 +213,75 @@ fn a_sim_can_boot_from_the_nvm() {
         "4 m/s^2 engine reaches more than 1.5 m/s in 0.5 s"
     );
 }
+
+// ---- abandoning a failed update (trial application) ----
+
+#[test]
+fn active_seq_is_the_generation_of_the_running_config() {
+    let mut n = nvm();
+    assert_eq!(
+        n.active_seq(),
+        0,
+        "nothing stored: the factory defaults, generation 0"
+    );
+    assert_eq!(commit(&mut n, 3.0), 1);
+    assert_eq!(n.active_seq(), 1);
+    assert_eq!(commit(&mut n, 4.0), 2);
+    assert_eq!(n.active_seq(), 2);
+    corrupt(&mut n, Slot::Active);
+    assert_eq!(n.active_seq(), 0, "a corrupt Active is not a generation");
+}
+
+#[test]
+fn abandoning_an_update_goes_back_to_the_previous_config() {
+    let mut n = nvm();
+    commit(&mut n, 3.0);
+    commit(&mut n, 4.0);
+    n.abandon_update().expect("there is a previous config");
+    let l = n.load();
+    assert_eq!(accel(&l.config), 3.0);
+    assert_eq!(l.source, Source::Active);
+    assert_eq!(
+        l.slots[1],
+        SlotStatus::Empty,
+        "the failed config is gone, not kept as a backup"
+    );
+}
+
+#[test]
+fn abandoning_the_first_update_goes_back_to_the_factory_defaults() {
+    let mut n = nvm();
+    commit(&mut n, 3.0);
+    assert!(
+        matches!(n.rollback(), Err(NvmError::NoBackup)),
+        "a manual rollback needs a backup..."
+    );
+    n.abandon_update()
+        .expect("...but abandoning a failed first update does not");
+    let l = n.load();
+    assert_eq!(l.config, Config::default());
+    assert_eq!(l.source, Source::Defaults);
+    assert_eq!(l.slots, [SlotStatus::Empty, SlotStatus::Empty]);
+}
+
+#[test]
+fn abandoning_with_nothing_stored_is_a_no_op() {
+    let mut n = nvm();
+    n.abandon_update()
+        .expect("nothing to abandon is not an error");
+    assert_eq!(n.load().source, Source::Defaults);
+}
+
+#[test]
+fn the_next_commit_after_an_abandoned_update_gets_a_fresh_generation() {
+    let mut n = nvm();
+    commit(&mut n, 3.0);
+    commit(&mut n, 4.0);
+    n.abandon_update().unwrap();
+    let after = n.active_seq();
+    assert!(
+        after > 2,
+        "the rolled-back config is a new record, newer than the failed one (got {after})"
+    );
+    assert_eq!(commit(&mut n, 5.0), after + 1);
+}

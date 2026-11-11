@@ -81,6 +81,13 @@ button.estop.on{background:#fff;color:var(--danger);outline:4px solid var(--dang
 .derived dd{margin:0;text-align:right;font-variant-numeric:tabular-nums}
 .derived dt{color:var(--sub)}
 #turnChart{height:110px;margin-top:6px;background:var(--panel)}
+.trialrow{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:8px;font-size:12px}
+.trialrow input[type=number]{width:60px;font:12px ui-monospace,Menlo,Consolas,monospace;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:2px 6px;text-align:right}
+.trialstatus{margin-top:6px;padding:4px 8px;border-radius:6px;font-size:12px;display:none;border:1px solid var(--line)}
+.trialstatus.running{display:block;border-color:var(--warn)}
+.trialstatus.passed{display:block;border-color:var(--ok);color:var(--ok)}
+.trialstatus.failed{display:block;border-color:var(--danger);color:var(--danger);font-weight:700}
+.cfglog pre{margin:6px 0 0;max-height:160px;overflow:auto;font:11px/1.4 ui-monospace,Menlo,Consolas,monospace;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:6px;white-space:pre-wrap}
 button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
 .msg{margin-top:6px;font-size:12px;white-space:pre-wrap;min-height:1.2em}
 .msg.ok{color:var(--ok)}
@@ -146,6 +153,13 @@ h2{font-size:13px;margin:0 0 4px;color:var(--sub);font-weight:600}
     <details id="cfgbox" class="cfg">
       <summary>設定（Config / NVM）</summary>
       <div class="nvm" id="nvmStatus"></div>
+      <div class="trialrow">
+        <label><input id="trialOn" type="checkbox" checked> 試験適用</label>
+        <span class="hint" style="margin:0">保存して再起動したあと</span>
+        <input id="trialSec" type="number" min="0.1" max="60" step="0.5" value="5" aria-label="試験適用の秒数">
+        <span class="hint" style="margin:0">秒のあいだに Degraded / E-STOP になったら、自動で元の設定に戻します（自分で押した E-STOP は対象外）</span>
+      </div>
+      <div id="trialStatus" class="trialstatus" role="status" aria-live="polite"></div>
       <div class="cfgform" id="cfgForm"></div>
       <div class="derived" id="derived" aria-live="polite">
         <strong style="font-size:12px;color:var(--sub)">導出値（編集中の値から自動計算・変更不可）</strong>
@@ -172,6 +186,8 @@ h2{font-size:13px;margin:0 0 4px;color:var(--sub);font-weight:600}
         <button id="nvmWipe">NVM消去</button>
       </div>
       <div id="cfgMsg" class="msg" role="status" aria-live="polite"></div>
+      <details class="cfglog"><summary style="font-size:12px">設定の履歴（起動・保存・試験適用。時刻はシミュレーション時間）</summary>
+        <pre id="cfgLog" aria-label="設定の履歴"></pre></details>
       <p class="hint">未指定の項目は既定値、未知の項目や範囲外の値は拒否されます（保存されません）。保存したConfigは再起動で有効になり、ブラウザに保存されます。壊れた場合はBackup、両方だめなら既定値で起動します。</p>
     </details>
     <details id="scnbox" class="cfg">

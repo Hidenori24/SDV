@@ -8,6 +8,7 @@ export const SIGNALS = [
   "silent_engine_ms", "silent_brake_ms", "silent_steering_ms", "silent_plant_ms",
   "failsafe_engine", "failsafe_brake", "failsafe_steering",
   "stalled_engine", "stalled_brake", "stalled_steering", "stalled_plant", "stalled_vcu", "bus_down",
+  "trial_state", "trial_remaining_ms", "trial_reason", "config_seq",
 ];
 
 export async function load(wasmPath) {
@@ -23,8 +24,12 @@ export async function load(wasmPath) {
   const bufText = () => new TextDecoder().decode(new Uint8Array(mem(), w.sdv_buf_ptr(), w.sdv_buf_len()));
   const withText = (s, f) => { const [p, n] = text(s); try { return f(p, n); } finally { w.sdv_free(p, n); } };
 
-  /** Run a scenario (and optional partial config) for `seconds`; returns one row (Float32Array) per 10 ms tick. */
-  function run(scenario, seconds, config) {
+  /**
+   * Run a scenario (and optional partial config) for `seconds`; returns one row (Float32Array) per 10 ms tick.
+   * With `trialMs` the booted config is put on probation for that long (it is rolled back by itself if it makes the
+   * system unhealthy; the time column then restarts at 0 because the system reboots).
+   */
+  function run(scenario, seconds, config, trialMs) {
     w.sdv_nvm_erase(0); w.sdv_nvm_erase(1);
     if (config) {
       const r = withText(JSON.stringify(config), (p, n) => w.sdv_nvm_commit(p, n));
@@ -35,6 +40,10 @@ export async function load(wasmPath) {
     if (r !== 0) throw new Error("scenario rejected: " + bufText());
     w.sdv_use_scenario(1);
     w.sdv_reset();
+    if (trialMs) {
+      const r = w.sdv_trial_start(trialMs);
+      if (r !== 0) throw new Error(`trial window ${trialMs} ms refused`);
+    }
     const rows = [];
     for (let i = 0; i < Math.round(seconds * 100); i++) {
       w.sdv_step(1);

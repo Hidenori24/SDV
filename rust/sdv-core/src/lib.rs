@@ -3,6 +3,7 @@
 
 pub mod bus;
 pub mod config;
+pub mod config_log;
 pub mod failsafe;
 #[cfg(feature = "fota-simulator")]
 pub mod fota;
@@ -17,16 +18,22 @@ pub mod safety;
 pub mod scenario;
 pub mod sim;
 pub mod swc;
+pub mod trial;
 
 use bus::Node;
+use config_log::ConfigLog;
 use nvm::{MemStorage, Nvm, Slot, SlotStatus, Source};
 use sim::{Component, Row, Sim};
 use std::sync::Mutex;
+use trial::{ConfigTrial, FailReason, TrialEvent, TrialState};
 
 static SIM: Mutex<Option<Sim>> = Mutex::new(None);
 static OUT: Mutex<[f32; 40]> = Mutex::new([0.0; 40]);
 
 static NVM: Mutex<Option<Nvm<MemStorage>>> = Mutex::new(None);
+/// Trial application of the config that was just booted (ADR-0003 §5), and the log of the config lifecycle.
+static TRIAL: Mutex<ConfigTrial> = Mutex::new(ConfigTrial::new());
+static CONFIG_LOG: Mutex<ConfigLog> = Mutex::new(ConfigLog::new());
 /// Scratch buffer the host reads after calls that return text / bytes (`sdv_buf_ptr` / `sdv_buf_len`).
 static BUF: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 
@@ -58,7 +65,9 @@ fn with_sim<R>(f: impl FnOnce(&mut Sim) -> R) -> R {
 ///  silent_ms[engine, brake, steering, vehicledynamics],
 ///  failsafe[engine ECU, brake ECU, steering ECU],  (bit0: DriverInput timeout, bit1: Safety timeout)
 ///  injected faults: stalled[engine, brake, steering, plant, vcu], bus_down]  (1.0 = active)
-pub const OUT_LEN: usize = 28;
+///  config trial (ADR-0003 §5): [28] state (0 none, 1 running, 2 passed, 3 rolled back), [29] remaining ms while
+///  running, [30] why it was rolled back (1 degraded, 2 estop), [31] generation of the running config (0 = factory defaults)
+pub const OUT_LEN: usize = 32;
 
 fn publish(
     row: &Row,
@@ -149,30 +158,88 @@ pub extern "C" fn sdv_set_vcu_stall(on: i32) {
 }
 
 /// Advance `n` 10 ms ticks; the last row is readable via `sdv_out_ptr`.
+///
+/// While a config trial runs (`sdv_trial_start`) every tick is judged; if the new config makes the system Degraded
+/// or EStop, the update is abandoned and the previous config is booted before the next tick.
 #[no_mangle]
 pub extern "C" fn sdv_step(n: i32) {
-    let last = with_sim(|s| {
-        let mut last = None;
-        for _ in 0..n.max(0) {
-            last = Some(s.step_10ms());
+    let mut last: Option<Row> = None;
+    for _ in 0..n.max(0) {
+        let (row, driver_estop) = with_sim(|s| {
+            let row = s.step_10ms();
+            (row, s.estop_requested())
+        });
+        let event = TRIAL
+            .lock()
+            .unwrap()
+            .tick(10, row.safety.system_state, driver_estop);
+        match event {
+            TrialEvent::None => {}
+            TrialEvent::Passed => {
+                log_event(row.state.t, "trial_passed", String::new());
+            }
+            TrialEvent::Failed(reason) => abandon_failed_update(reason, row.state.t),
         }
-        last.map(|row| {
-            let fs = [Node::Engine, Node::Brake, Node::Steering].map(|n| s.ecu_failsafe(n));
-            let f = |b: bool| b as u8 as f32;
-            let faults = [
-                f(s.is_stalled(Component::Engine)),
-                f(s.is_stalled(Component::Brake)),
-                f(s.is_stalled(Component::Steering)),
-                f(s.is_stalled(Component::VehicleDynamics)),
-                f(s.vcu_stalled()),
-                f(s.bus_is_down()),
-            ];
-            (row, s.swc_status(), fs, faults)
-        })
-    });
-    if let Some((row, status, fs, faults)) = last {
-        publish(&row, &status, &fs, &faults);
+        last = Some(row);
     }
+    let Some(row) = last else { return };
+    let (status, fs, faults) = with_sim(|s| {
+        let fs = [Node::Engine, Node::Brake, Node::Steering].map(|n| s.ecu_failsafe(n));
+        let f = |b: bool| b as u8 as f32;
+        let faults = [
+            f(s.is_stalled(Component::Engine)),
+            f(s.is_stalled(Component::Brake)),
+            f(s.is_stalled(Component::Steering)),
+            f(s.is_stalled(Component::VehicleDynamics)),
+            f(s.vcu_stalled()),
+            f(s.bus_is_down()),
+        ];
+        (s.swc_status(), fs, faults)
+    });
+    publish(&row, &status, &fs, &faults);
+    publish_trial();
+}
+
+/// Put the trial verdict and the config generation into the tail of the output buffer.
+fn publish_trial() {
+    let seq = with_nvm(|n| n.active_seq());
+    let state = TRIAL.lock().unwrap().state();
+    let mut o = OUT.lock().unwrap();
+    o[28] = state.code() as f32;
+    o[29] = match state {
+        TrialState::Running { remaining_ms, .. } => remaining_ms as f32,
+        _ => 0.0,
+    };
+    o[30] = match state {
+        TrialState::RolledBack(reason) => reason.code() as f32,
+        _ => 0.0,
+    };
+    o[31] = seq as f32;
+}
+
+fn log_event(t_s: f32, event: &'static str, detail: String) {
+    let seq = with_nvm(|n| n.active_seq());
+    CONFIG_LOG.lock().unwrap().push(t_s, event, seq, detail);
+}
+
+/// The trial failed: give up on the new config, boot the previous one, and say so in the log.
+fn abandon_failed_update(reason: FailReason, t_s: f32) {
+    log_event(t_s, "trial_failed", reason.name().to_string());
+    let went_back_to_defaults = with_nvm(|n| {
+        let had_backup = n.load().slots[Slot::Backup as usize] != SlotStatus::Empty;
+        n.abandon_update().ok();
+        !had_backup
+    });
+    boot_from_nvm();
+    log_event(
+        0.0,
+        "rolled_back",
+        if went_back_to_defaults {
+            "factory defaults".to_string()
+        } else {
+            "previous config".to_string()
+        },
+    );
 }
 
 #[no_mangle]
@@ -234,13 +301,26 @@ pub extern "C" fn sdv_buf_len() -> i32 {
 /// Returns the source: 0 active, 1 backup, 2 defaults.
 #[no_mangle]
 pub extern "C" fn sdv_boot() -> i32 {
+    let source = boot_from_nvm();
+    // a plain boot has no trial: the host asks for one afterwards with `sdv_trial_start`
+    TRIAL.lock().unwrap().cancel();
+    source
+}
+
+/// Load the config from the NVM, restart the sim with it and log the boot. Returns the source code of `sdv_boot`.
+fn boot_from_nvm() -> i32 {
     let loaded = with_nvm(|n| n.load());
+    let seq = with_nvm(|n| n.active_seq());
     with_sim(|s| s.set_config(loaded.config));
-    match loaded.source {
-        Source::Active => 0,
-        Source::Backup => 1,
-        Source::Defaults => 2,
-    }
+    let (code, name) = match loaded.source {
+        Source::Active => (0, "active"),
+        Source::Backup => (1, "backup"),
+        Source::Defaults => (2, "defaults"),
+    };
+    let mut log = CONFIG_LOG.lock().unwrap();
+    log.next_boot();
+    log.push(0.0, "boot", seq, name);
+    code
 }
 
 /// Put the JSON of the running config into the buffer.
@@ -306,7 +386,16 @@ pub extern "C" fn sdv_nvm_commit(ptr: *const u8, n: i32) -> i32 {
         return 2;
     };
     match with_nvm(|nvm| nvm.commit(json)) {
-        Ok(_) => 0,
+        Ok(seq) => {
+            let t_s = with_sim(|s| s.state().t);
+            CONFIG_LOG.lock().unwrap().push(
+                t_s,
+                "commit",
+                seq,
+                "stored; takes effect at the next boot",
+            );
+            0
+        }
         Err(nvm::NvmError::Invalid(errors)) => {
             let text = errors
                 .iter()
@@ -324,9 +413,58 @@ pub extern "C" fn sdv_nvm_commit(ptr: *const u8, n: i32) -> i32 {
 #[no_mangle]
 pub extern "C" fn sdv_nvm_rollback() -> i32 {
     match with_nvm(|nvm| nvm.rollback()) {
-        Ok(_) => 0,
+        Ok(seq) => {
+            let t_s = with_sim(|s| s.state().t);
+            CONFIG_LOG.lock().unwrap().push(
+                t_s,
+                "rollback",
+                seq,
+                "manual; takes effect at the next boot",
+            );
+            0
+        }
         Err(_) => 1,
     }
+}
+
+/// Trial window limits [ms]: the Watchdog runs every 100 ms, so a shorter window cannot judge anything.
+const TRIAL_MIN_MS: i32 = 100;
+const TRIAL_MAX_MS: i32 = 60_000;
+
+/// Put the config that was just booted on probation for `window_ms` of simulated time (ADR-0003 §5). If the system
+/// goes Degraded or EStop in that time (an E-Stop the driver asked for does not count), `sdv_step` abandons the update
+/// by itself: the NVM goes back to the previous config (or the factory defaults when there was none) and the sim
+/// reboots with it. The verdict is in the output buffer (see `OUT_LEN`) and the config log.
+/// 0 ok, 1 the window is outside 100..=60000 ms (nothing changes). A boot (`sdv_boot`) ends any trial.
+#[no_mangle]
+pub extern "C" fn sdv_trial_start(window_ms: i32) -> i32 {
+    if !(TRIAL_MIN_MS..=TRIAL_MAX_MS).contains(&window_ms) {
+        return 1;
+    }
+    TRIAL.lock().unwrap().start(window_ms as u32);
+    let t_s = with_sim(|s| s.state().t);
+    log_event(t_s, "trial_started", format!("{window_ms} ms"));
+    0
+}
+
+/// End a running trial without a verdict (the config stays).
+#[no_mangle]
+pub extern "C" fn sdv_trial_cancel() {
+    let was_running = matches!(TRIAL.lock().unwrap().state(), TrialState::Running { .. });
+    TRIAL.lock().unwrap().cancel();
+    if was_running {
+        let t_s = with_sim(|s| s.state().t);
+        log_event(t_s, "trial_cancelled", String::new());
+    }
+}
+
+/// Put the log of the config lifecycle (boots, commits, trials and their verdicts) into the buffer as a JSON array:
+/// `{boot, t_s, event, seq, detail}`. `t_s` is simulated time since that boot; `seq` is the generation of the
+/// Active config (0 = the factory defaults).
+#[no_mangle]
+pub extern "C" fn sdv_config_log_json() {
+    let json = CONFIG_LOG.lock().unwrap().to_json();
+    set_buf(json.into_bytes());
 }
 
 /// Slot status: -1 empty, -2 corrupt, otherwise the sequence number. `slot`: 0 active, 1 backup.

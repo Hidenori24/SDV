@@ -1,0 +1,61 @@
+{
+  "name": "config_trial_passes_a_healthy_update",
+  "description": "問題のない Config(最大加速 3.0)は、試験適用の 1 秒を何事もなく過ごして合格し、そのまま残る(世代は 1 のまま)",
+  "seconds": 3,
+  "trial_ms": 1000,
+  "config": {
+    "vehicle_spec": {
+      "max_accel_mps2": 3.0
+    }
+  },
+  "scenario": {
+    "name": "healthy update",
+    "steps": [
+      {
+        "until_s": 60,
+        "throttle": 0.5
+      }
+    ]
+  },
+  "expect": [
+    {
+      "kind": "at",
+      "t": 0.5,
+      "signal": "trial_state",
+      "op": "==",
+      "value": 1
+    },
+    {
+      "kind": "first",
+      "between": [
+        0.9,
+        1.1
+      ],
+      "signal": "trial_state",
+      "op": "==",
+      "value": 2
+    },
+    {
+      "kind": "at",
+      "t": 3.0,
+      "signal": "trial_state",
+      "op": "==",
+      "value": 2
+    },
+    {
+      "kind": "at",
+      "t": 3.0,
+      "signal": "config_seq",
+      "op": "==",
+      "value": 1
+    },
+    {
+      "kind": "always",
+      "from": 0,
+      "to": 3.0,
+      "signal": "state",
+      "op": "==",
+      "value": 0
+    }
+  ]
+}
