@@ -70,3 +70,4 @@ cargo check --no-default-features            # コア（no_std、allocator な�
 
 - `tests/update_flow.rs`: 署名 → 検証 → 書き込み → trial → commit / rollback の流れ（メモリ上の fake）
 - `tests/linux_backend.rs`: Linux の backend とランチャー（ファイル、権限、シンボリックリンク、ロック、子プロセスの起動、health check）
+- aarch64（Pi 5 の実ターゲット）でのビルドとテストは CI の `aarch64` ジョブが行います（手元で同じことをする手順は [CONTRIBUTING.md](../../CONTRIBUTING.md) の末尾）。x86-64 では通るのに aarch64 でだけ失敗する不具合が、これで見つかったことがあります（[#174](https://github.com/Hidenori24/SDV/issues/174)。`O_NOFOLLOW` の値が x86-64 のもので固定されていた）
