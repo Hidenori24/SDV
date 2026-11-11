@@ -68,7 +68,7 @@ flowchart TB
 `web/` に、Rust を WebAssembly にしたシミュレータがあります。サーバー不要で、アクセル・ブレーキ・ステアリング操作、ECU 構成図からの故障注入（SWC 停止・バス遅延/欠損/断・VCU 停止）、Config/NVM の編集・ロールバック、シナリオ（JSON）の再生ができます。
 
 - GitHub Pages で公開（`.github/workflows/pages.yml`）。公開 URL は Settings → Pages で確認（`https://<ユーザー名>.github.io/SDV/` の想定）。初回のみ Source を **GitHub Actions** に設定
-- Pagesには仮想Steering ECUの定数・ロジック更新、A/B slot、試験起動とrollbackを操作する [FOTAデモ](web/fota-demo.html) と、Pi 5/Linuxの [FOTA実装・手順](web/fota.html) もあります。デモはブラウザ内だけで動作します。
+- Pagesには同じコースを更新前に走り、停車中にFOTAしてから再走行する [FOTAデモ](web/fota-demo.html) と、Pi 5/Linuxの [FOTA実装・手順](web/fota.html) もあります。デモはブラウザ内だけで動作します。
 - ローカルで試す手順は [web/README.md](web/README.md)
 
 ## リポジトリ構成
