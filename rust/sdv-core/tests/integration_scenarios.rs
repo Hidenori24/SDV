@@ -8,7 +8,7 @@ use serde_json::Value;
 use std::path::PathBuf;
 
 /// Layout of the output buffer; must equal `SIGNALS` in `tests/integration/lib.mjs` (checked below).
-const SIGNALS: [&str; 28] = [
+const SIGNALS: [&str; 32] = [
     "t",
     "x",
     "y",
@@ -37,6 +37,10 @@ const SIGNALS: [&str; 28] = [
     "stalled_plant",
     "stalled_vcu",
     "bus_down",
+    "trial_state",
+    "trial_remaining_ms",
+    "trial_reason",
+    "config_seq",
 ];
 const EPS: f64 = 1e-4;
 const HALF_TICK: f64 = 0.005;
@@ -60,7 +64,12 @@ fn buf() -> String {
     .to_string()
 }
 
-fn run(scenario: &Value, seconds: f64, config: Option<&Value>) -> Vec<Vec<f64>> {
+fn run(
+    scenario: &Value,
+    seconds: f64,
+    config: Option<&Value>,
+    trial_ms: Option<i32>,
+) -> Vec<Vec<f64>> {
     sdv_nvm_erase(0);
     sdv_nvm_erase(1);
     if let Some(c) = config {
@@ -72,6 +81,9 @@ fn run(scenario: &Value, seconds: f64, config: Option<&Value>) -> Vec<Vec<f64>> 
     assert_eq!(r, 0, "scenario rejected: {}", buf());
     sdv_use_scenario(1);
     sdv_reset();
+    if let Some(ms) = trial_ms {
+        assert_eq!(sdv_trial_start(ms), 0, "trial window {ms} ms refused");
+    }
     (0..(seconds * 100.0).round() as usize)
         .map(|_| {
             sdv_step(1);
@@ -207,6 +219,7 @@ fn scenario_cases_meet_their_expectations() {
             &case["scenario"],
             case["seconds"].as_f64().unwrap(),
             case.get("config"),
+            case.get("trial_ms").map(|v| v.as_i64().unwrap() as i32),
         );
         for failure in evaluate(&rows, case["expect"].as_array().unwrap()) {
             all.push(format!("{}: {failure}", case["name"].as_str().unwrap()));

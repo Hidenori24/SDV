@@ -1,0 +1,66 @@
+{
+  "name": "config_trial_ignores_the_drivers_estop",
+  "description": "試験適用中に運転者が E-Stop を押して離しても、Config のせいではないので不合格にならない(解除直後の Safety の古い状態も 1 周期は許す)",
+  "seconds": 3,
+  "trial_ms": 1500,
+  "config": {
+    "vehicle_spec": {
+      "max_accel_mps2": 3.0
+    }
+  },
+  "scenario": {
+    "name": "driver estop during a trial",
+    "steps": [
+      {
+        "until_s": 60,
+        "throttle": 0.5
+      }
+    ],
+    "events": [
+      {
+        "at_s": 0.2,
+        "action": "estop"
+      },
+      {
+        "at_s": 0.7,
+        "action": "estop_release"
+      }
+    ]
+  },
+  "expect": [
+    {
+      "kind": "first",
+      "between": [
+        0.2,
+        0.5
+      ],
+      "signal": "state",
+      "op": "==",
+      "value": 2
+    },
+    {
+      "kind": "first",
+      "between": [
+        1.4,
+        1.6
+      ],
+      "signal": "trial_state",
+      "op": "==",
+      "value": 2
+    },
+    {
+      "kind": "at",
+      "t": 3.0,
+      "signal": "trial_state",
+      "op": "==",
+      "value": 2
+    },
+    {
+      "kind": "at",
+      "t": 3.0,
+      "signal": "config_seq",
+      "op": "==",
+      "value": 1
+    }
+  ]
+}

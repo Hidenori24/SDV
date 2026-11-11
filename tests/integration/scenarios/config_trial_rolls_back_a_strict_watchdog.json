@@ -1,0 +1,90 @@
+{
+  "name": "config_trial_rolls_back_a_strict_watchdog",
+  "description": "厳しすぎる Watchdog(200 ms)の Config を試験適用すると、0.5 秒のバス断を故障と誤検出して Degraded/EStop になり、試験適用が不合格となって自動で既定値に戻る(初回の更新なので戻り先は既定値)。戻ったあとは同じバス断でも異常にならない。再起動するので時刻は 0 からやり直し",
+  "seconds": 10,
+  "trial_ms": 5000,
+  "config": {
+    "tuning": {
+      "safety": {
+        "heartbeat_timeout_ms": 200
+      }
+    }
+  },
+  "scenario": {
+    "name": "strict watchdog under a bus outage",
+    "steps": [
+      {
+        "until_s": 60,
+        "throttle": 0.5
+      }
+    ],
+    "events": [
+      {
+        "at_s": 1.0,
+        "action": "bus_down"
+      },
+      {
+        "at_s": 1.5,
+        "action": "bus_up"
+      }
+    ]
+  },
+  "expect": [
+    {
+      "kind": "at",
+      "t": 0.5,
+      "signal": "trial_state",
+      "op": "==",
+      "value": 1
+    },
+    {
+      "kind": "at",
+      "t": 0.5,
+      "signal": "config_seq",
+      "op": "==",
+      "value": 1
+    },
+    {
+      "kind": "first",
+      "between": [
+        1.0,
+        2.0
+      ],
+      "signal": "trial_state",
+      "op": "==",
+      "value": 3
+    },
+    {
+      "kind": "first",
+      "between": [
+        1.0,
+        2.0
+      ],
+      "signal": "trial_reason",
+      "op": ">=",
+      "value": 1
+    },
+    {
+      "kind": "at",
+      "t": 8.0,
+      "signal": "trial_state",
+      "op": "==",
+      "value": 3
+    },
+    {
+      "kind": "at",
+      "t": 8.0,
+      "signal": "config_seq",
+      "op": "==",
+      "value": 0
+    },
+    {
+      "kind": "always",
+      "from": 3.0,
+      "to": 8.0,
+      "signal": "state",
+      "op": "==",
+      "value": 0
+    }
+  ]
+}

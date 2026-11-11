@@ -50,7 +50,7 @@ for (const [file, events] of GOLDEN) {
 const dir = join(here, "scenarios");
 for (const file of readdirSync(dir).filter((f) => f.endsWith(".json")).sort()) {
   const c = JSON.parse(readFileSync(join(dir, file), "utf8"));
-  const rows = run(c.scenario, c.seconds, c.config);
+  const rows = run(c.scenario, c.seconds, c.config, c.trial_ms);
   report(`scenario ${c.name} (${c.expect.length} checks)`, evaluate(rows, c.expect));
 }
 
