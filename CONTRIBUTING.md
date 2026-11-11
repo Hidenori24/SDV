@@ -25,8 +25,6 @@
 | Rust: sdv-sec | `cd rust/sdv-sec && cargo test --features sign && ./tests/c_smoke.sh` |
 | 結合テスト（ビルド済み WASM） | `cargo build --release --target wasm32-unknown-unknown --manifest-path rust/sdv-core/Cargo.toml && node tests/integration/run_wasm.mjs`（[tests/integration/README.md](tests/integration/README.md)） |
 
-Rust のテストは**非 root で**実行する（`sdv-fota` の 1 件が root だと失敗する: [#165](https://github.com/Hidenori24/SDV/issues/165)）。
-
 C のコードを追加する場合も同じ流れです。`CMakeLists.txt` に `C` 言語を有効化し、テスト実行ファイルを `add_test` で登録すれば CI の `ctest` に自動で含まれます。
 
 ### C++ の出力を変えたとき
