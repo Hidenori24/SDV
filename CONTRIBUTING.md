@@ -19,8 +19,11 @@
 | 対象 | コマンド |
 |---|---|
 | C++（Catch2 / ctest） | `cmake -S . -B build && cmake --build build -j && ctest --test-dir build --output-on-failure` |
-| Rust | `cd rust/sdv-core && cargo test` |
-| C++ ⇔ Rust ログ照合 | Rustの `cargo test` に含まれる（`tests/golden_cpp.rs`） |
+| Rust: sdv-core | `cd rust/sdv-core && cargo test`（C++ の基準ログとの全行照合を含む）、`cargo test --features fota-simulator` |
+| Rust: sdv-fota | `cargo test --manifest-path rust/sdv-fota/Cargo.toml`（`--features host-signing`、`cargo check --no-default-features`、`rust/sdv-fota/tests/c_smoke.sh` も CI で実行） |
+| Rust: sdv-picarx | `cargo test --manifest-path rust/sdv-picarx/Cargo.toml` |
+| Rust: sdv-sec | `cd rust/sdv-sec && cargo test --features sign && ./tests/c_smoke.sh` |
+| 結合テスト（ビルド済み WASM） | `cargo build --release --target wasm32-unknown-unknown --manifest-path rust/sdv-core/Cargo.toml && node tests/integration/run_wasm.mjs`（[tests/integration/README.md](tests/integration/README.md)） |
 
 C のコードを追加する場合も同じ流れです。`CMakeLists.txt` に `C` 言語を有効化し、テスト実行ファイルを `add_test` で登録すれば CI の `ctest` に自動で含まれます。
 
@@ -41,8 +44,12 @@ cp logs/latest.csv rust/sdv-core/tests/golden/cpp_latest.csv
 `.github/workflows/ci.yml`（PRと `main` への push で実行）:
 
 - `cpp-tests`: ビルドと `ctest`
-- `rust-tests`: `cargo test` と WASM ビルド
-- `golden-log`: C++ログがコミット済みの基準ログと一致すること
+- `rust-tests`: `sdv-core` の `cargo test`（`fota-simulator` を含む）、`sdv-fota`、`sdv-picarx`、ホスト用署名ツール、no_std チェック、Classic 向け C ABI のスモークテスト、WASM ビルド
+- `sec-tests`: `sdv-sec` の既知の値・フレーム MAC・ヘッダ一致、no_std の WASM ビルド、C ABI スモークテスト
+- `integration`: ビルド済みの `sdv_core.wasm` を Node で動かす結合テスト（C++ の基準ログの全行再現 + シナリオ + 期待値）
+- `golden-log`: C++ ログがコミット済みの基準ログと一致すること
 - `ci-ok`: 上記すべての集約結果
+
+新しい crate や CI ジョブを足したら、この一覧と上のテスト表、`README.md` も同じ PR で更新する。
 
 **PRのマージ条件**: `ci-ok` が成功していること（ブランチ保護の必須ステータスチェックに `ci-ok` を指定する）。

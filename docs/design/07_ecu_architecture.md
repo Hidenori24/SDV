@@ -223,4 +223,4 @@ Platform adapterがRobot HATへ指令を送り、利用可能なセンサ値を�
 
 当面のFOTA単位はRustプロセス全体とし、仮想ECUタスクごとの個別イメージ更新は行わない。
 プロセス内でECUの責務を分けることと、ECUごとの独立した更新ライフサイクルは別の段階である。
-`VehicleRuntime` は追加済みだが、Pi 5用の実行バイナリ、Robot HAT adapter、実車確認は未実装。
+`VehicleRuntime`、Pi 5 用の実行バイナリ（`sdv-picarx`）、Robot HAT adapter は実装済み。**実機（Pi 5 + PiCar-X）での動作確認と較正は未実施**（[Issue #160](https://github.com/Hidenori24/SDV/issues/160)）。
