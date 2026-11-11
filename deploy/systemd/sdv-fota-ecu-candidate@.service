@@ -3,6 +3,8 @@ Description=SDV shadow trial candidate worker (%i)
 Requires=sdv-fota-launcher.service
 After=sdv-fota-launcher.service
 PartOf=sdv-fota-launcher.service
+Requires=var-lib-sdv\x2dfota.mount
+After=var-lib-sdv\x2dfota.mount
 RequiresMountsFor=/var/lib/sdv-fota
 
 [Service]

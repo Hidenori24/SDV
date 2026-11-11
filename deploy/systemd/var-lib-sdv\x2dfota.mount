@@ -1,0 +1,12 @@
+[Unit]
+Description=SDV FOTA data volume
+Before=sdv-fota-launcher.service sdv-fota-ecu@engine.service sdv-fota-ecu@brake.service sdv-fota-ecu@steering.service sdv-fota-ecu-candidate@engine.service sdv-fota-ecu-candidate@brake.service sdv-fota-ecu-candidate@steering.service
+
+[Mount]
+What=/dev/disk/by-label/SDV_FOTA
+Where=/var/lib/sdv-fota
+Type=ext4
+Options=defaults,noatime,nodev,nosuid
+
+[Install]
+WantedBy=local-fs.target

@@ -8,7 +8,7 @@ use sdv_fota::{
 };
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -32,6 +32,7 @@ fn run(args: Vec<OsString>) -> Result<(), String> {
         Some("install-url") => install_url(command_args),
         Some("record-active-integrity") => record_active_integrity(command_args),
         Some("rollback-trial") => rollback_trial(command_args),
+        Some("commit-candidate") => commit_candidate(command_args),
         Some("promote-candidate") => promote_candidate(command_args),
         Some("revert-candidate") => revert_candidate(command_args),
         Some("verify-candidate") => verify_candidate(command_args),
@@ -41,12 +42,25 @@ fn run(args: Vec<OsString>) -> Result<(), String> {
     }
 }
 
+fn linux_error_detail(error: &sdv_fota::linux::Error) -> String {
+    match error {
+        sdv_fota::linux::Error::InsufficientStorage {
+            required_bytes,
+            available_bytes,
+        } => format!("SDV data volume needs {required_bytes} free bytes but has {available_bytes}"),
+        sdv_fota::linux::Error::StorageVolumeNotMounted => {
+            "dedicated SDV FOTA filesystem is not mounted at /var/lib/sdv-fota".into()
+        }
+        error => format!("{error:?}"),
+    }
+}
+
 fn status(args: &[OsString]) -> Result<(), String> {
     let mut options = parse_named_options(args, &["--state-root", "--target"])?;
     let state_root = selected_state_root(&mut options)?;
     let state = FileBootControl::new(&state_root)
         .state()
-        .map_err(|error| format!("cannot read boot metadata: {error:?}"))?;
+        .map_err(|error| format!("cannot read boot metadata: {}", linux_error_detail(&error)))?;
     let storage = FileSlotStorage::new(&state_root);
     println!("active_slot: {}", slot_name(state.active));
     println!("active_version: {}", state.active_version);
@@ -87,7 +101,7 @@ fn verify_images(args: &[OsString]) -> Result<(), String> {
     let state_root = selected_state_root(&mut options)?;
     let state = FileBootControl::new(&state_root)
         .state()
-        .map_err(|error| format!("cannot read boot metadata: {error:?}"))?;
+        .map_err(|error| format!("cannot read boot metadata: {}", linux_error_detail(&error)))?;
     let storage = FileSlotStorage::new(&state_root);
     let active_integrity = image_integrity_status(&storage, state.active);
     println!("active_image_integrity: {active_integrity}");
@@ -156,6 +170,97 @@ fn rollback_trial(args: &[OsString]) -> Result<(), String> {
     Ok(())
 }
 
+fn commit_candidate(args: &[OsString]) -> Result<(), String> {
+    let mut options = parse_named_options(
+        args,
+        &[
+            "--state-root",
+            "--control-socket",
+            "--target",
+            "--stability-ms",
+        ],
+    )?;
+    let base_root = PathBuf::from(required_option(&mut options, "--state-root")?);
+    let control_socket = PathBuf::from(required_option(&mut options, "--control-socket")?);
+    let target = parse_target(&required_option(&mut options, "--target")?)?;
+    if target == Ecu::Vehicle {
+        return Err("candidate commit requires an ECU target".into());
+    }
+    let stability_ms = required_positive_stability_ms(&mut options)?;
+    let state_root = state_root_for_target(base_root, target);
+
+    // Keep installers from replacing the pending slot during the held verification window.
+    let mut storage = FileSlotStorage::new(&state_root);
+    storage.lock_updates().map_err(|error| {
+        format!(
+            "cannot lock candidate image for commit: {}",
+            linux_error_detail(&error)
+        )
+    })?;
+    let boot = FileBootControl::new(&state_root);
+    let initial_state = boot.state().map_err(|error| {
+        format!(
+            "cannot read candidate trial metadata: {}",
+            linux_error_detail(&error)
+        )
+    })?;
+    let trial = initial_state
+        .trial
+        .ok_or_else(|| "there is no pending ECU trial to commit".to_owned())?;
+    if trial.slot == initial_state.active {
+        return Err("pending ECU trial points at the active slot".into());
+    }
+    storage
+        .verify_executable_image(trial.slot)
+        .map_err(|error| {
+            format!(
+                "candidate image failed integrity verification: {}",
+                linux_error_detail(&error)
+            )
+        })?;
+
+    verify_candidate_stability(&control_socket, target, stability_ms)?;
+
+    // A manual rollback may race the verification request. Re-read the trial and only commit the
+    // exact image that was running as the verified candidate.
+    let verified_state = boot.state().map_err(|error| {
+        format!(
+            "cannot re-read candidate trial metadata: {}",
+            linux_error_detail(&error)
+        )
+    })?;
+    let verified_trial = verified_state
+        .trial
+        .ok_or_else(|| "candidate trial was cleared during verification".to_owned())?;
+    if !same_trial_image(verified_trial, trial) {
+        return Err("candidate trial changed during verification".into());
+    }
+    storage
+        .verify_executable_image(trial.slot)
+        .map_err(|error| {
+            format!(
+                "candidate image failed integrity verification: {}",
+                linux_error_detail(&error)
+            )
+        })?;
+    boot.commit_trial_if_matches(trial)
+        .map_err(|error| match error {
+            sdv_fota::linux::Error::NoTrialPending => {
+                "candidate trial was cleared before commit".into()
+            }
+            sdv_fota::linux::Error::TrialChanged => "candidate trial changed before commit".into(),
+            error => format!(
+                "cannot commit verified candidate: {}",
+                linux_error_detail(&error)
+            ),
+        })?;
+    println!(
+        "committed the verified {} candidate; output remains held until the launcher is restarted",
+        target_name(target)
+    );
+    Ok(())
+}
+
 fn promote_candidate(args: &[OsString]) -> Result<(), String> {
     let mut options = parse_named_options(args, &["--control-socket", "--target"])?;
     let control_socket = PathBuf::from(required_option(&mut options, "--control-socket")?);
@@ -196,7 +301,17 @@ fn verify_candidate(args: &[OsString]) -> Result<(), String> {
     if target == Ecu::Vehicle {
         return Err("candidate verification requires an ECU target".into());
     }
-    let stability = required_option(&mut options, "--stability-ms")?;
+    let stability_ms = required_positive_stability_ms(&mut options)?;
+    verify_candidate_stability(&control_socket, target, stability_ms)?;
+    println!(
+        "candidate route for {} passed its held-cycle verification window; output remains held",
+        target_name(target)
+    );
+    Ok(())
+}
+
+fn required_positive_stability_ms(options: &mut BTreeMap<String, OsString>) -> Result<u64, String> {
+    let stability = required_option(options, "--stability-ms")?;
     let stability_ms = stability
         .to_str()
         .ok_or_else(|| "candidate stability window must be a positive integer".to_owned())?
@@ -205,6 +320,14 @@ fn verify_candidate(args: &[OsString]) -> Result<(), String> {
     if stability_ms == 0 {
         return Err("candidate stability window must be greater than zero".into());
     }
+    Ok(stability_ms)
+}
+
+fn verify_candidate_stability(
+    control_socket: &Path,
+    target: Ecu,
+    stability_ms: u64,
+) -> Result<(), String> {
     request_ecu_candidate_verification(&control_socket, target)
         .map_err(|error| format!("candidate verification failed: {error:?}"))?;
     let window = Duration::from_millis(stability_ms);
@@ -220,11 +343,13 @@ fn verify_candidate(args: &[OsString]) -> Result<(), String> {
         request_ecu_candidate_verification(&control_socket, target)
             .map_err(|error| format!("candidate verification failed: {error:?}"))?;
     }
-    println!(
-        "candidate route for {} passed its held-cycle verification window; output remains held",
-        target_name(target)
-    );
     Ok(())
+}
+
+fn same_trial_image(left: sdv_fota::TrialImage, right: sdv_fota::TrialImage) -> bool {
+    left.slot == right.slot
+        && left.version == right.version
+        && left.security_version == right.security_version
 }
 
 fn initialize(args: &[OsString]) -> Result<(), String> {
@@ -245,12 +370,20 @@ fn initialize(args: &[OsString]) -> Result<(), String> {
     let active_version = required_str(&active_version, "active version")?;
     let security_version = required_number(&mut options, "--security-version", "security version")?;
     let storage = FileSlotStorage::new(&root);
-    storage
-        .validate_executable_image(slot)
-        .map_err(|error| format!("initial target image is not bootable: {error:?}"))?;
+    storage.validate_executable_image(slot).map_err(|error| {
+        format!(
+            "initial target image is not bootable: {}",
+            linux_error_detail(&error)
+        )
+    })?;
     FileBootControl::new(root)
         .initialize_with_image(&storage, slot, active_version, security_version)
-        .map_err(|error| format!("boot metadata initialization failed: {error:?}"))
+        .map_err(|error| {
+            format!(
+                "boot metadata initialization failed: {}",
+                linux_error_detail(&error)
+            )
+        })
 }
 
 fn install(args: &[OsString]) -> Result<(), String> {
@@ -359,7 +492,7 @@ fn install_source<P: PackageSource<Error = sdv_fota::linux::Error>>(
     let boot_control = FileBootControl::new(&state_root);
     let state = boot_control
         .state()
-        .map_err(|error| format!("cannot read boot metadata: {error:?}"))?;
+        .map_err(|error| format!("cannot read boot metadata: {}", linux_error_detail(&error)))?;
     let context = ValidationContext {
         target_ecu,
         current_version: &state.active_version,
@@ -380,7 +513,16 @@ fn install_source<P: PackageSource<Error = sdv_fota::linux::Error>>(
             &validation_keys,
             &context,
         )
-        .map_err(|error| format!("package installation failed: {error:?}"))?;
+        .map_err(|error| match error {
+            sdv_fota::StreamInstallError::Storage(error)
+            | sdv_fota::StreamInstallError::BootControl(error) => {
+                format!(
+                    "package installation failed: {}",
+                    linux_error_detail(&error)
+                )
+            }
+            error => format!("package installation failed: {error:?}"),
+        })?;
     println!("staged trial image in slot {}", slot_name(slot));
     Ok(())
 }
@@ -528,7 +670,7 @@ fn trial_outcome_name(outcome: sdv_fota::TrialOutcome) -> &'static str {
 }
 
 fn usage() -> String {
-    "usage:\n  sdv-fota init --state-root <dir> [--target <vehicle|engine|brake|steering>] --active-slot <a|b> --active-version <version> --security-version <n>\n  sdv-fota record-active-integrity --state-root <dir> [--target <vehicle|engine|brake|steering>] --slot <a|b>\n  sdv-fota rollback-trial --state-root <dir> [--target <vehicle|engine|brake|steering>]\n  sdv-fota promote-candidate --control-socket <path> --target <engine|brake|steering>\n  sdv-fota revert-candidate --control-socket <path> --target <engine|brake|steering>\n  sdv-fota verify-candidate --control-socket <path> --target <engine|brake|steering> --stability-ms <n>\n  sdv-fota install --state-root <dir> --package <file> --target <vehicle|engine|brake|steering> --config-schema <n> --signal-if-version <n> [--trial-boots <n>]\n  sdv-fota install-url --state-root <dir> --url <https-url> --target <vehicle|engine|brake|steering> --config-schema <n> --signal-if-version <n> [--trial-boots <n>] [--client-cert <file> --client-key <file>]\n  sdv-fota status --state-root <dir> [--target <vehicle|engine|brake|steering>]\n  sdv-fota verify-images --state-root <dir> [--target <vehicle|engine|brake|steering>]".into()
+    "usage:\n  sdv-fota init --state-root <dir> [--target <vehicle|engine|brake|steering>] --active-slot <a|b> --active-version <version> --security-version <n>\n  sdv-fota record-active-integrity --state-root <dir> [--target <vehicle|engine|brake|steering>] --slot <a|b>\n  sdv-fota rollback-trial --state-root <dir> [--target <vehicle|engine|brake|steering>]\n  sdv-fota commit-candidate --state-root <dir> --control-socket <path> --target <engine|brake|steering> --stability-ms <n>\n  sdv-fota promote-candidate --control-socket <path> --target <engine|brake|steering>\n  sdv-fota revert-candidate --control-socket <path> --target <engine|brake|steering>\n  sdv-fota verify-candidate --control-socket <path> --target <engine|brake|steering> --stability-ms <n>\n  sdv-fota install --state-root <dir> --package <file> --target <vehicle|engine|brake|steering> --config-schema <n> --signal-if-version <n> [--trial-boots <n>]\n  sdv-fota install-url --state-root <dir> --url <https-url> --target <vehicle|engine|brake|steering> --config-schema <n> --signal-if-version <n> [--trial-boots <n>] [--client-cert <file> --client-key <file>]\n  sdv-fota status --state-root <dir> [--target <vehicle|engine|brake|steering>]\n  sdv-fota verify-images --state-root <dir> [--target <vehicle|engine|brake|steering>]".into()
 }
 
 #[cfg(test)]
@@ -651,5 +793,40 @@ mod tests {
             "candidate stability window must be greater than zero"
         );
         assert!(usage().contains("sdv-fota verify-candidate"));
+    }
+
+    #[test]
+    fn candidate_commit_requires_an_ecu_and_positive_window() {
+        let vehicle_error = run(vec![
+            "commit-candidate".into(),
+            "--state-root".into(),
+            "/var/lib/sdv-fota".into(),
+            "--control-socket".into(),
+            "/run/sdv-fota/control.sock".into(),
+            "--target".into(),
+            "vehicle".into(),
+            "--stability-ms".into(),
+            "2000".into(),
+        ])
+        .unwrap_err();
+        assert_eq!(vehicle_error, "candidate commit requires an ECU target");
+
+        let zero_window_error = run(vec![
+            "commit-candidate".into(),
+            "--state-root".into(),
+            "/var/lib/sdv-fota".into(),
+            "--control-socket".into(),
+            "/run/sdv-fota/control.sock".into(),
+            "--target".into(),
+            "engine".into(),
+            "--stability-ms".into(),
+            "0".into(),
+        ])
+        .unwrap_err();
+        assert_eq!(
+            zero_window_error,
+            "candidate stability window must be greater than zero"
+        );
+        assert!(usage().contains("sdv-fota commit-candidate"));
     }
 }

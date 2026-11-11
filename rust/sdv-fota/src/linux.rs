@@ -11,10 +11,12 @@ use super::{
 };
 use crate::package::decode_sha256;
 use serde::Serialize;
+use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::net::Shutdown;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
@@ -27,6 +29,8 @@ use std::time::{Duration, Instant};
 const RECORD_MAGIC: &[u8; 4] = b"SDVB";
 const RECORD_HEADER_BYTES: usize = 16;
 const MAX_BOOT_RECORD_BYTES: usize = 4096;
+const DEFAULT_FOTA_DATA_ROOT: &str = "/var/lib/sdv-fota";
+const FOTA_METADATA_RESERVE_BYTES: u64 = 1024 * 1024;
 const IMAGE_FILE: &str = "sdv-image.bin";
 const IMAGE_DIGEST_FILE: &str = "sdv-image.sha256";
 const IMAGE_DIGEST_HEX_BYTES: usize = 64;
@@ -68,10 +72,16 @@ pub enum Error {
     AlreadyInitialized,
     TrialAlreadyPending,
     NoTrialPending,
+    TrialChanged,
     ImageWriteInProgress,
     InvalidImageWrite,
+    InsufficientStorage {
+        required_bytes: u64,
+        available_bytes: u64,
+    },
     InvalidRecord,
     InvalidBootImage,
+    StorageVolumeNotMounted,
     TrialImageExited,
     TrialHealthTimeout,
     TrailingPackageData,
@@ -349,6 +359,18 @@ impl FileSlotStorage {
         }
     }
 
+    /// Hold the per-target image update lock while an operator verifies and commits a candidate.
+    ///
+    /// The guard is retained by this storage value and released when it is dropped. This prevents
+    /// a concurrent installer from replacing the pending image during the verification window.
+    pub fn lock_updates(&mut self) -> Result<(), Error> {
+        if self.update_lock.is_some() {
+            return Err(Error::UpdateInProgress);
+        }
+        self.update_lock = Some(acquire_update_lock(update_lock_root(&self.root))?);
+        Ok(())
+    }
+
     pub fn image_path(&self, slot: Slot) -> PathBuf {
         self.root
             .join("slots")
@@ -407,10 +429,12 @@ impl ImageStorage for FileSlotStorage {
         }
         ensure_secure_directory(&self.root, true)?;
         let new_lock = if self.update_lock.is_none() {
-            Some(acquire_update_lock(&self.root)?)
+            Some(acquire_update_lock(update_lock_root(&self.root))?)
         } else {
             None
         };
+        let available_bytes = filesystem_available_bytes(&self.root)?;
+        validate_image_capacity(u64::from(image_size), available_bytes)?;
         let slot = active.other();
         let directory = self.root.join("slots").join(slot_name(slot));
         ensure_secure_directory(&self.root.join("slots"), true)?;
@@ -532,6 +556,47 @@ fn acquire_update_lock(root: &Path) -> Result<File, Error> {
             Err(Error::Io(error))
         }
     }
+}
+
+fn update_lock_root(state_root: &Path) -> &Path {
+    let volume_root = Path::new(DEFAULT_FOTA_DATA_ROOT);
+    if state_root.starts_with(volume_root) {
+        volume_root
+    } else {
+        state_root
+    }
+}
+
+fn filesystem_available_bytes(path: &Path) -> Result<u64, Error> {
+    let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| Error::InvalidRecord)?;
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::zeroed();
+    // SAFETY: `path` is a valid NUL-terminated path and `stats` points to writable storage.
+    if unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) } != 0 {
+        return Err(Error::Io(io::Error::last_os_error()));
+    }
+    // SAFETY: statvfs returned success and initialized the structure.
+    let stats = unsafe { stats.assume_init() };
+    let block_size = if stats.f_frsize == 0 {
+        stats.f_bsize as u64
+    } else {
+        stats.f_frsize as u64
+    };
+    (stats.f_bavail as u64)
+        .checked_mul(block_size)
+        .ok_or(Error::InvalidRecord)
+}
+
+fn validate_image_capacity(image_bytes: u64, available_bytes: u64) -> Result<(), Error> {
+    let required_bytes = image_bytes
+        .checked_add(FOTA_METADATA_RESERVE_BYTES)
+        .ok_or(Error::InvalidImageWrite)?;
+    if available_bytes < required_bytes {
+        return Err(Error::InsufficientStorage {
+            required_bytes,
+            available_bytes,
+        });
+    }
+    Ok(())
 }
 
 fn discard_temp_file(path: &Path) {
@@ -1492,6 +1557,30 @@ impl FileBootControl {
         Self { root: root.into() }
     }
 
+    /// Commit the same trial image captured before candidate verification.
+    ///
+    /// The boot-record lock protects this comparison and transition as one operation. Boot-attempt
+    /// counters may change while the candidate is running, so image identity uses the slot,
+    /// version, and security version rather than `boots_left`.
+    pub fn commit_trial_if_matches(&self, expected: TrialImage) -> Result<(), Error> {
+        self.commit_trial_inner(Some(expected))
+    }
+
+    fn commit_trial_inner(&self, expected: Option<TrialImage>) -> Result<(), Error> {
+        let _lock = BootRecordLock::acquire(&self.root)?;
+        let (sequence, mut state) = self.load()?;
+        let trial = state.trial.ok_or(Error::NoTrialPending)?;
+        if expected.is_some_and(|expected| !same_trial_image(trial, expected)) {
+            return Err(Error::TrialChanged);
+        }
+        state.trial = None;
+        state.active = trial.slot;
+        state.active_version = trial.version;
+        state.highest_security_version = state.highest_security_version.max(trial.security_version);
+        state.last_trial = Some(LastTrialResult::from_trial(trial, TrialOutcome::Committed));
+        self.save(sequence.checked_add(1).ok_or(Error::InvalidRecord)?, &state)
+    }
+
     /// Record the slot installed during provisioning. Refuses to overwrite existing state.
     pub fn initialize(
         &self,
@@ -1653,14 +1742,7 @@ impl BootControl for FileBootControl {
     }
 
     fn commit_trial(&mut self) -> Result<(), Self::Error> {
-        let _lock = BootRecordLock::acquire(&self.root)?;
-        let (sequence, mut state) = self.load()?;
-        let trial = state.trial.take().ok_or(Error::NoTrialPending)?;
-        state.active = trial.slot;
-        state.active_version = trial.version;
-        state.highest_security_version = state.highest_security_version.max(trial.security_version);
-        state.last_trial = Some(LastTrialResult::from_trial(trial, TrialOutcome::Committed));
-        self.save(sequence.checked_add(1).ok_or(Error::InvalidRecord)?, &state)
+        self.commit_trial_inner(None)
     }
 
     fn rollback_trial(&mut self) -> Result<(), Self::Error> {
@@ -1670,6 +1752,12 @@ impl BootControl for FileBootControl {
         state.last_trial = Some(LastTrialResult::from_trial(trial, TrialOutcome::RolledBack));
         self.save(sequence.checked_add(1).ok_or(Error::InvalidRecord)?, &state)
     }
+}
+
+fn same_trial_image(current: TrialImage, expected: TrialImage) -> bool {
+    current.slot == expected.slot
+        && current.version == expected.version
+        && current.security_version == expected.security_version
 }
 
 fn encode_record(sequence: u64, state: &impl Serialize) -> Result<Vec<u8>, Error> {
@@ -1722,6 +1810,9 @@ fn read_record(path: &Path) -> Option<(u64, BootState)> {
 }
 
 fn ensure_secure_directory(path: &Path, create: bool) -> Result<(), Error> {
+    if path.starts_with(Path::new(DEFAULT_FOTA_DATA_ROOT)) {
+        ensure_dedicated_mount(Path::new(DEFAULT_FOTA_DATA_ROOT))?;
+    }
     if create {
         fs::create_dir_all(path)?;
     }
@@ -1731,6 +1822,23 @@ fn ensure_secure_directory(path: &Path, create: bool) -> Result<(), Error> {
         || metadata.permissions().mode() & UNSAFE_WRITE_BITS != 0
     {
         return Err(Error::UnsafeStatePath);
+    }
+    Ok(())
+}
+
+fn ensure_dedicated_mount(path: &Path) -> Result<(), Error> {
+    let volume = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(Error::StorageVolumeNotMounted);
+        }
+        Err(error) => return Err(Error::Io(error)),
+    };
+    let parent_path = path.parent().ok_or(Error::UnsafeStatePath)?;
+    let parent = fs::symlink_metadata(parent_path)?;
+    if !volume.file_type().is_dir() || !parent.file_type().is_dir() || volume.dev() == parent.dev()
+    {
+        return Err(Error::StorageVolumeNotMounted);
     }
     Ok(())
 }
@@ -1904,6 +2012,63 @@ mod output_hold_fd_tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_PATH: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn image_capacity_preflight_includes_metadata_reserve() {
+        let image_bytes = 8 * 1024 * 1024;
+        let required_bytes = image_bytes + super::FOTA_METADATA_RESERVE_BYTES;
+
+        assert!(super::validate_image_capacity(image_bytes, required_bytes).is_ok());
+        assert!(matches!(
+            super::validate_image_capacity(image_bytes, required_bytes - 1),
+            Err(super::Error::InsufficientStorage {
+                required_bytes: required,
+                available_bytes: available,
+            }) if required == required_bytes && available == required_bytes - 1
+        ));
+    }
+
+    #[test]
+    fn default_vehicle_and_ecu_targets_share_one_update_lock_root() {
+        let volume = Path::new(super::DEFAULT_FOTA_DATA_ROOT);
+        assert_eq!(super::update_lock_root(&volume.join("ecus/engine")), volume);
+        assert_eq!(super::update_lock_root(volume), volume);
+        assert_eq!(
+            super::update_lock_root(Path::new("/tmp/fota-test/ecus/engine")),
+            Path::new("/tmp/fota-test/ecus/engine")
+        );
+    }
+
+    #[test]
+    fn dedicated_data_volume_check_rejects_an_os_filesystem_directory() {
+        let path = std::env::temp_dir().join(format!(
+            "sdv-fota-volume-check-{}-{}",
+            std::process::id(),
+            NEXT_PATH.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&path).unwrap();
+
+        assert!(matches!(
+            super::ensure_dedicated_mount(&path),
+            Err(super::Error::StorageVolumeNotMounted)
+        ));
+
+        fs::remove_dir(path).unwrap();
+    }
+
+    #[test]
+    fn missing_data_volume_is_reported_as_not_mounted() {
+        let path = std::env::temp_dir().join(format!(
+            "sdv-fota-volume-missing-{}-{}",
+            std::process::id(),
+            NEXT_PATH.fetch_add(1, Ordering::Relaxed)
+        ));
+
+        assert!(matches!(
+            super::ensure_dedicated_mount(&path),
+            Err(super::Error::StorageVolumeNotMounted)
+        ));
+    }
 
     #[test]
     fn root_hold_listener_is_inherited_by_exec_without_clobbering_command_pipe() {

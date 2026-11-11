@@ -188,15 +188,29 @@ centered steering on every cycle. Candidate failures do not release the hold; no
 in this slice. The coordinator still fails closed if an active worker is missing or returns an
 invalid response.
 
+For Pi deployment, mount a dedicated ext4 partition labeled `SDV_FOTA` at `/var/lib/sdv-fota` using
+`deploy/systemd/var-lib-sdv\x2dfota.mount`. The launcher and ECU worker services require this mount;
+the Linux FOTA backend also rejects the default state root when it is only a directory on the OS
+filesystem. Confirm the source with `findmnt --mountpoint /var/lib/sdv-fota` before running manual
+FOTA commands.
+The vehicle image and every virtual ECU share this volume but keep separate A/B roots. Provision
+space for both retained slots of each configured target, one additional maximum-sized image, and
+filesystem overhead. The production backend serializes staging and candidate verification with a
+volume-wide update lock. Before creating a staging file, it checks that free space covers the
+incoming image plus a 1 MiB metadata reserve.
+
 Install and enable the worker units after initializing an active image in each ECU state root and
 installing the target-aware FOTA launcher configuration:
 
 ```sh
+sudo install -m 0644 'deploy/systemd/var-lib-sdv\x2dfota.mount' /etc/systemd/system/
 sudo install -m 0644 deploy/systemd/sdv-fota-ecu@.service /etc/systemd/system/
 sudo install -m 0644 deploy/systemd/sdv-fota-ecu-candidate@.service /etc/systemd/system/
 sudo install -m 0644 deploy/systemd/sdv-fota-workers.target /etc/systemd/system/
 sudo install -m 0644 deploy/systemd/sdv-fota-launcher.service /etc/systemd/system/
 sudo systemctl daemon-reload
+sudo systemctl enable --now 'var-lib-sdv\x2dfota.mount'
+findmnt --mountpoint /var/lib/sdv-fota
 sudo systemctl stop sdv-fota-workers.target
 sudo systemctl restart sdv-fota-launcher.service
 sudo systemctl enable --now sdv-fota-workers.target
@@ -255,6 +269,22 @@ Reversion does not stop the candidate service or change trial metadata; a revert
 be promoted again in the same host process. `Ready`, promotion, and reversion are protocol and route
 evidence only; they do not establish application behavior or vehicle health.
 
+To commit a promoted candidate, use `commit-candidate`. It repeats the held stability window,
+checks the pending image digest before and after verification, prevents concurrent image installs,
+and commits only the same trial image that was verified:
+
+```sh
+sudo sdv-fota commit-candidate --state-root /var/lib/sdv-fota \
+  --control-socket /run/sdv-fota/control.sock --target engine --stability-ms 2000
+```
+
+The commit does not release the running host's hold. Keep the vehicle secured, then restart the
+launcher to run the committed image through the active worker service:
+
+```sh
+sudo systemctl restart sdv-fota-launcher.service
+```
+
 If promotion fails, zero output remains held. If the route switched before the failure, request
 `revert-candidate` and wait for its active-cycle acknowledgement before assuming the active worker is
 selected. If the host cannot complete reversion, keep the vehicle secured; restarting the host with
@@ -294,7 +324,9 @@ metadata, or selecting candidate outputs. While it is still shadowing, stop
 rollback; otherwise a shadow process may continue after metadata changes. Output hold is sticky in the host process. Route promotion is
 available through `sdv-fota promote-candidate`; root-only `sdv-fota revert-candidate` can return to
 the active worker while keeping the hold latched. Trial-metadata rollback is still a separate
-administrative operation. Application/vehicle health evidence, trial commit, and hold release remain
+administrative operation. `sdv-fota commit-candidate` commits a trial only after a held candidate
+stability window and image-integrity recheck; the hold is released only when the launcher restarts.
+Application/vehicle health evidence and automatic rollback after candidate failure remain
 unimplemented.
 
 `config/pi5.disabled.example.json` is a commissioning template. Its zero motor duty and zero
