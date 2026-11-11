@@ -15,7 +15,10 @@
 
 ブラウザで動くシミュレータ（GUI）は `web/` にあり、GitHub Pages で公開されます（下記）。
 
-82 秒の紹介動画: [docs/media/sdv-intro.mp4](docs/media/sdv-intro.mp4)（構成・ECU 分割・安全・再現性・FOTA・今後の構想。作り方は [tools/video/README.md](tools/video/README.md)）
+説明動画（作り方は [tools/video/README.md](tools/video/README.md)）:
+
+- [docs/media/sdv-intro.mp4](docs/media/sdv-intro.mp4)（82 秒）: 紹介。構成、ECU 分割、安全、再現性、Config / FOTA、今後
+- [docs/media/sdv-sim-vs-real.mp4](docs/media/sdv-sim-vs-real.mp4)（85 秒）: シミュレータと実機。Platform の差し替え、両者の違い、実機の FOTA（**実機側は未確認で、設計上の想定**）
 
 ## 目的
 
@@ -86,7 +89,7 @@ web/        ブラウザ GUI（シミュレータ、FOTA デモ、FOTA 実装・
 deploy/     Pi 5 向けの systemd ユニット（FOTA ランチャー、ECU ワーカー、SDV データボリューム）
 docs/       設計文書（design/）と設計判断（adr/）
 tasks/      実装タスクの記録（SWC ごと）
-tools/      図の生成・可視化・紹介動画の生成などの補助スクリプト
+tools/      図の生成・可視化・説明動画の生成などの補助スクリプト
 ```
 
 ## ドキュメント
@@ -111,7 +114,7 @@ tools/      図の生成・可視化・紹介動画の生成などの補助ス�
 - [docs/design/fota_classic_architecture.md](docs/design/fota_classic_architecture.md) : AUTOSAR Classic を基準にした ECU / FOTA の責務境界案
 - [tests/integration/README.md](tests/integration/README.md) : 結合テスト（シナリオ + 期待値。ビルド済みの WASM を Node で実行）
 - [web/README.md](web/README.md) : ブラウザ GUI の使い方
-- [tools/video/README.md](tools/video/README.md) : 紹介動画の作り方と、動画内の数字の出どころ
+- [tools/video/README.md](tools/video/README.md) : 説明動画（紹介 / シミュレータと実機）の作り方と、動画内の数字・記述の出どころ
 - [CONTRIBUTING.md](CONTRIBUTING.md) : TDD の進め方、テスト、CI
 
 進捗を追うときは、まず [docs/design/00_overview.md](docs/design/00_overview.md) を見て、詳細な完成条件は [docs/design/06_roadmap_dod.md](docs/design/06_roadmap_dod.md) を参照。

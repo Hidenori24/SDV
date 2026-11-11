@@ -67,6 +67,5 @@ logs/
 tools/video/node_modules/
 tools/video/out/
 tools/video/golden.js
-tools/video/audio.wav
-tools/video/list.txt
+tools/video/audio_*.wav
 tools/video/still_*.jpg

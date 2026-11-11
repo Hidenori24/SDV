@@ -1,19 +1,20 @@
 // 紹介動画のフレームを撮る。
-//   node capture.mjs stills 4.5,24,33        … 指定した秒の静止画（still_<秒>.jpg）
-//   node capture.mjs scene <名前> <開始秒> <終了秒> … out/<名前>.mp4（30 fps）
+//   node capture.mjs <ページ> stills 4.5,24,33        … 指定した秒の静止画（still_<ページ>_<秒>.jpg）
+//   node capture.mjs <ページ> scene <名前> <開始秒> <終了秒> … out/<名前>.mp4（30 fps）
+// <ページ> は intro か sim-real。?gw=1280 のような指定は VIDEO_QUERY で渡す
 // 前提: http://localhost:8123/ で tools/video/ を配信していること（render.sh が起動する）
 import {chromium} from 'playwright';
 import {spawn} from 'node:child_process';
 import fs from 'node:fs';
 
-const [mode, ...rest] = process.argv.slice(2);
+const [pageName, mode, ...rest] = process.argv.slice(2);
 const browser = await chromium.launch({
   executablePath: process.env.CHROME_PATH || undefined,
   args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist', '--no-sandbox'],
 });
 const page = await browser.newPage({viewport: {width: 1920, height: 1080}});
 page.on('pageerror', e => console.error('PAGEERR', e.message));
-await page.goto(process.env.VIDEO_URL || 'http://localhost:8123/index.html');
+await page.goto(`${process.env.VIDEO_BASE || 'http://localhost:8123'}/${pageName}.html?${process.env.VIDEO_QUERY || ''}`);
 await page.waitForFunction('window.READY===true', null, {timeout: 120000});
 
 // 3D（WebGL）と HUD（2D）を 1 枚に重ねて JPEG にする
@@ -29,8 +30,9 @@ const grab = async t => Buffer.from((await page.evaluate(t => {
 
 if (mode === 'stills') {
   for (const t of rest[0].split(',')) {
-    fs.writeFileSync(`still_${t}.jpg`, await grab(+t));
-    console.log('still', t);
+    const t0 = Date.now();
+    fs.writeFileSync(`still_${pageName}_${t}.jpg`, await grab(+t));
+    console.log('still', t, Date.now() - t0, 'ms');
   }
 } else if (mode === 'scene') {
   const [name, s, e] = rest;
@@ -50,7 +52,7 @@ if (mode === 'stills') {
   if (code === 0) { fs.renameSync(tmp, `out/${name}.mp4`); console.log('OK', name); }
   else { console.error('ffmpeg failed', code); process.exitCode = 1; }
 } else {
-  console.error('usage: node capture.mjs stills <t1,t2,...> | scene <name> <start> <end>');
+  console.error('usage: node capture.mjs <intro|sim-real> stills <t1,t2,...> | scene <name> <start> <end>');
   process.exitCode = 2;
 }
 await browser.close();

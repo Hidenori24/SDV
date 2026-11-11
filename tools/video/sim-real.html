@@ -1,0 +1,351 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<!-- 「シミュレータと実機」（85 秒）。同じ SWC・RTE・仮想バスを、Platform だけ差し替えて動かす様子を図にする。
+     実機（PiCar-X + Raspberry Pi 5）側は未確認で、README と設計文書にある想定を描いている。
+     window.renderAt(t) が時刻 t の 1 フレームを描く -->
+<style>
+html,body{margin:0;background:#000;overflow:hidden}
+#gl,#hud{position:absolute;left:0;top:0;width:1920px;height:1080px}
+</style>
+<script type="importmap">{"imports":{"three":"./node_modules/three/build/three.module.js","three/addons/":"./node_modules/three/examples/jsm/"}}</script>
+<script src="golden.js"></script>
+<script src="hud.js"></script>
+</head><body>
+<canvas id="gl"></canvas><canvas id="hud" width="1920" height="1080"></canvas>
+<script type="module">
+import * as THREE from 'three';
+import {RoundedBoxGeometry} from 'three/addons/geometries/RoundedBoxGeometry.js';
+import {EffectComposer} from 'three/addons/postprocessing/EffectComposer.js';
+import {RenderPass} from 'three/addons/postprocessing/RenderPass.js';
+import {UnrealBloomPass} from 'three/addons/postprocessing/UnrealBloomPass.js';
+import {OutputPass} from 'three/addons/postprocessing/OutputPass.js';
+import {SMAAPass} from 'three/addons/postprocessing/SMAAPass.js';
+
+const Q=new URLSearchParams(location.search);
+const GW=+(Q.get('gw')||1440),GH=GW*9/16;
+
+/* ---------- 時間割 ---------- */
+const SC=[
+ {id:'title',s:0, e:7, label:'OVERVIEW'},
+ {id:'stack',s:7, e:19,label:'COMMON / PLATFORM'},
+ {id:'sim',  s:19,e:31,label:'SIMULATOR'},
+ {id:'real', s:31,e:45,label:'TARGET'},
+ {id:'table',s:45,e:57,label:'DIFFERENCES'},
+ {id:'fota', s:57,e:71,label:'FOTA'},
+ {id:'check',s:71,e:80,label:'CHECKLIST'},
+ {id:'end',  s:80,e:85,label:''},
+];
+const DURATION=85;window.DURATION=DURATION;
+const scn=id=>SC.find(x=>x.id===id);
+
+/* ---------- 基準ログ（10 秒のデモシナリオ）: シミュレータ側と実機側を同じ入力で動かす ---------- */
+const demo=GOLDEN.demo;                       // 行: t,x,y,yaw,v,throttle,brake,steer,state,estop（20 ms ごと）
+const DT=0.02;
+const dist=[0],steerLag=[0];                  // 走行距離と、一次遅れ（0.15 s）をかけた舵角
+for(let i=1;i<demo.length;i++){dist.push(dist[i-1]+demo[i][4]*DT);steerLag.push(steerLag[i-1]+(demo[i][7]*0.40-steerLag[i-1])*DT/0.15)}
+const logT=t=>Math.min(10,(t*0.85)%11);       // 10 秒を繰り返し再生（最後に少し止まる）
+const idxAt=lt=>clamp(Math.round(lt/DT)-1,0,demo.length-1);
+let bx0=1e9,bx1=-1e9,by0=1e9,by1=-1e9;for(const r of demo){bx0=Math.min(bx0,r[1]);bx1=Math.max(bx1,r[1]);by0=Math.min(by0,r[2]);by1=Math.max(by1,r[2])}
+const TS=4.2/Math.max(bx1-bx0,by1-by0),tcx=(bx0+bx1)/2,tcy=(by0+by1)/2;
+const tableXZ=r=>[(r[1]-tcx)*TS,-(r[2]-tcy)*TS];
+
+/* ---------- 3D ---------- */
+const renderer=new THREE.WebGLRenderer({canvas:document.getElementById('gl'),antialias:false,preserveDrawingBuffer:true});
+renderer.setPixelRatio(1);renderer.setSize(GW,GH,false);
+renderer.toneMapping=THREE.ACESFilmicToneMapping;renderer.toneMappingExposure=1.1;
+renderer.shadowMap.enabled=true;renderer.shadowMap.type=THREE.PCFShadowMap;
+const scene=new THREE.Scene();scene.background=new THREE.Color(0x070a10);scene.fog=new THREE.FogExp2(0x070a10,0.022);
+const camera=new THREE.PerspectiveCamera(36,W/H,0.1,300);
+scene.add(new THREE.HemisphereLight(0x8fa4c8,0x0c0c10,0.75));
+const key=new THREE.DirectionalLight(0xffffff,1.7);key.position.set(7,14,9);key.castShadow=true;key.shadow.mapSize.set(2048,2048);
+Object.assign(key.shadow.camera,{left:-15,right:15,top:10,bottom:-10,near:1,far:50});key.shadow.bias=-0.0005;key.shadow.normalBias=0.02;scene.add(key);
+const lSim=new THREE.PointLight(0x35e6ff,70,16,1.8);lSim.position.set(-8,4.2,2.5);scene.add(lSim);
+const lReal=new THREE.PointLight(0xffb45a,80,16,1.8);lReal.position.set(8,4.2,3);scene.add(lReal);
+
+const std=(color,o={})=>new THREE.MeshStandardMaterial({color,roughness:o.r??0.55,metalness:o.m??0.1,emissive:o.e??0x000000,emissiveIntensity:o.ei??1,transparent:o.t??false,opacity:o.o??1});
+const rbox=(w,h,d,mat,r=0.06)=>{const m=new THREE.Mesh(new RoundedBoxGeometry(w,h,d,3,r),mat);m.castShadow=m.receiveShadow=true;return m};
+const at=(m,x,y,z)=>{m.position.set(x,y,z);return m};
+
+const floor=new THREE.Mesh(new THREE.PlaneGeometry(120,120),std(0x0d1118,{r:0.75}));floor.rotation.x=-Math.PI/2;floor.receiveShadow=true;scene.add(floor);
+const fgrid=new THREE.GridHelper(60,60,0x24405a,0x18283a);fgrid.position.y=0.01;fgrid.material.transparent=true;fgrid.material.opacity=0.5;scene.add(fgrid);
+
+/* 中央: ソフトウェアの積み重ね */
+const stack=new THREE.Group();scene.add(stack);
+const SWC=[['DriverInput',0x35e6ff],['Safety',0xff5a5a],['Engine',0x6dffb0],['Brake',0xffc04d],['Steering',0xc79bff]];
+const swcM=[];SWC.forEach(([n,c],i)=>{const m=std(c,{e:c,ei:0.35,r:0.4});swcM.push(m);stack.add(at(rbox(0.82,0.82,0.82,m,0.1),-2.2+i*1.1,3.85,0))});
+const rteM=std(0x6dffb0,{e:0x6dffb0,ei:0.35,t:true,o:0.72}),busM=std(0x35e6ff,{e:0x35e6ff,ei:0.5,t:true,o:0.72}),runM=std(0xdfe8f0,{r:0.35,e:0xffffff,ei:0.05});
+const rte=at(rbox(5.6,0.24,2.2,rteM),0,3.05,0),bus=at(rbox(5.6,0.14,2.2,busM,0.05),0,2.55,0),run=at(rbox(5.6,0.34,2.2,runM),0,2.0,0);
+const pSimM=std(0x35e6ff,{e:0x35e6ff,ei:0.3,r:0.4}),pRealM=std(0xffb45a,{e:0xffb45a,ei:0.3,r:0.4});
+const pSim=at(rbox(2.65,0.62,2.2,pSimM),-1.475,1.3,0),pReal=at(rbox(2.65,0.62,2.2,pRealM),1.475,1.3,0);
+stack.add(rte,bus,run,pSim,pReal,at(rbox(6.2,0.9,2.9,std(0x161c26,{r:0.6}),0.08),0,0.45,0));
+// SWC と RTE をつなぐ細い柱
+for(let i=0;i<5;i++){const c=new THREE.Mesh(new THREE.CylinderGeometry(0.035,0.035,0.3,8),std(0x9fb4c4));stack.add(at(c,-2.2+i*1.1,3.3,0))}
+
+/* 配線（Platform → シミュレータ / 実機）と、流れるパルス */
+function pipe(pts,color){const curve=new THREE.CatmullRomCurve3(pts.map(p=>new THREE.Vector3(...p)));
+ const m=new THREE.Mesh(new THREE.TubeGeometry(curve,48,0.045,8),std(color,{e:color,ei:0.6,t:true,o:0.6}));scene.add(m);
+ const pulses=[];for(let i=0;i<4;i++){const s=new THREE.Mesh(new THREE.SphereGeometry(0.1,12,10),new THREE.MeshBasicMaterial({color:new THREE.Color(color).multiplyScalar(2.5)}));scene.add(s);pulses.push(s)}
+ return {curve,pulses}}
+const pipeSim=pipe([[-2.8,1.3,0.6],[-3.8,1.3,0.9],[-4.6,1.25,0.6],[-5.25,1.2,0.3]],0x35e6ff);
+const pipeReal=pipe([[2.8,1.3,0.6],[3.9,1.3,0.9],[4.9,1.3,0.6],[5.6,1.35,0.3],[6.9,1.75,0.25]],0xffb45a);
+
+/* 左: シミュレータ（Plant = VehicleDynamics）。台の上で 2D の車が基準ログどおりに走る */
+const sim=new THREE.Group();sim.position.set(-8,0,0);scene.add(sim);
+sim.add(at(rbox(5.6,0.3,5.6,std(0x101a26,{r:0.35,m:0.3}),0.08),0,0.95,0),at(rbox(4.2,0.8,4.2,std(0x141a24,{r:0.6}),0.08),0,0.4,0));
+const tg=new THREE.GridHelper(5,10,0x35e6ff,0x35e6ff);tg.position.y=1.105;tg.material.transparent=true;tg.material.opacity=0.28;tg.material.blending=THREE.AdditiveBlending;tg.material.depthWrite=false;sim.add(tg);
+const pathGeo=new THREE.BufferGeometry();{const p=[];for(const r of demo){const [x,z]=tableXZ(r);p.push(x,1.115,z)}pathGeo.setAttribute('position',new THREE.Float32BufferAttribute(p,3))}
+const pathAll=new THREE.Line(pathGeo,new THREE.LineBasicMaterial({color:0x35e6ff,transparent:true,opacity:0.22}));sim.add(pathAll);
+const pathNow=new THREE.Line(pathGeo.clone(),new THREE.LineBasicMaterial({color:new THREE.Color(0x35e6ff).multiplyScalar(2)}));sim.add(pathNow);
+const simCar=new THREE.Group();sim.add(simCar);
+simCar.add(at(rbox(0.62,0.14,0.34,new THREE.MeshBasicMaterial({color:new THREE.Color(0xeafcff).multiplyScalar(0.95)}),0.05),0,0,0));
+{const nose=new THREE.Mesh(new THREE.ConeGeometry(0.13,0.24,3),new THREE.MeshBasicMaterial({color:new THREE.Color(0x35e6ff).multiplyScalar(1.3)}));nose.rotation.z=-Math.PI/2;nose.position.x=0.42;simCar.add(nose)}
+
+/* 右: 実機（小型の RC カー + Raspberry Pi。台に載せてタイヤを浮かせた状態）*/
+const real=new THREE.Group();real.position.set(8,0,0);scene.add(real);
+real.add(at(rbox(6.2,0.25,4.8,std(0x4a3a2e,{r:0.8}),0.06),0,0.875,0));
+for(const [x,z] of [[-2.8,-2.1],[2.8,-2.1],[-2.8,2.1],[2.8,2.1]])real.add(at(rbox(0.22,0.76,0.22,std(0x2a2420,{r:0.8}),0.03),x,0.38,z));
+const rc=new THREE.Group();rc.position.set(-0.3,1.0,0.1);rc.rotation.y=-0.75;real.add(rc);
+rc.add(at(rbox(0.8,0.5,1.25,std(0x2b313b,{r:0.7}),0.05),0,0.25,0));                         // 台（タイヤを浮かせる）
+rc.add(at(rbox(1.3,0.07,2.5,std(0x15181c,{r:0.4,m:0.6}),0.03),0,0.56,0));                   // シャーシ
+const rcWheels=[];const tireM=std(0x0c0c0d,{r:0.9}),hubM=std(0xd8dde3,{r:0.35,m:0.5}),markM=std(0xffb45a,{e:0xffb45a,ei:0.6});
+for(const [x,z,front] of [[-0.86,-0.85,1],[0.86,-0.85,1],[-0.86,0.85,0],[0.86,0.85,0]]){
+ const w=new THREE.Group(),spin=new THREE.Group();w.add(spin);
+ const tire=new THREE.Mesh(new THREE.TorusGeometry(0.235,0.095,18,44),tireM);tire.rotation.y=Math.PI/2;tire.scale.z=1.2;tire.castShadow=true;spin.add(tire);
+ const hub=new THREE.Mesh(new THREE.CylinderGeometry(0.16,0.16,0.2,28),hubM);hub.rotation.z=Math.PI/2;spin.add(hub);
+ for(let k=0;k<3;k++){const sp=new THREE.Mesh(new THREE.BoxGeometry(0.215,0.3,0.05),k?hubM:markM);sp.rotation.x=k*Math.PI/3;spin.add(sp)}
+ w.position.set(x,0.56,z);w.userData={spin,front};rc.add(w);rcWheels.push(w)}
+for(const x of [-0.5,0.5]){const m=new THREE.Mesh(new THREE.CylinderGeometry(0.11,0.11,0.42,16),std(0xc9a53c,{r:0.5}));m.rotation.z=Math.PI/2;rc.add(at(m,x,0.5,0.85))}  // 後輪モータ
+rc.add(at(rbox(0.3,0.2,0.4,std(0x2f5fb0,{r:0.5}),0.03),0,0.47,-0.85));                    // 操舵サーボ
+rc.add(at(rbox(0.66,0.2,0.5,std(0x23262b,{r:0.6}),0.03),0,0.7,-0.5));                     // 電池
+const piY=0.84;
+for(const [x,z] of [[-0.4,0.0],[0.4,0.0],[-0.4,0.56],[0.4,0.56]]){const c=new THREE.Mesh(new THREE.CylinderGeometry(0.03,0.03,0.42,8),std(0xc8b060,{m:0.8,r:0.3}));rc.add(at(c,x,piY-0.03,z))}
+const piBoard=at(rbox(0.94,0.04,0.66,std(0x1f7a3a,{r:0.5}),0.02),0,piY,0.28);rc.add(piBoard);     // Raspberry Pi
+rc.add(at(rbox(0.2,0.04,0.2,std(0x101214,{r:0.3,m:0.6}),0.01),-0.1,piY+0.04,0.25),at(rbox(0.18,0.14,0.2,std(0xbfc6cc,{m:0.9,r:0.3}),0.01),0.3,piY+0.09,0.5),at(rbox(0.18,0.14,0.2,std(0xbfc6cc,{m:0.9,r:0.3}),0.01),0.08,piY+0.09,0.5));
+rc.add(at(rbox(0.8,0.1,0.06,std(0x0c0d0e),0.01),0,piY+0.09,0.0));                          // ピンヘッダ
+rc.add(at(rbox(0.94,0.04,0.66,std(0x1b2a55,{r:0.5}),0.02),0,piY+0.16,0.28));               // 拡張基板（Robot HAT）
+const led=at(new THREE.Mesh(new THREE.SphereGeometry(0.035,10,8),new THREE.MeshBasicMaterial({color:0x6dffb0})),0.36,piY+0.2,0.52);rc.add(led);
+{const mast=new THREE.Mesh(new THREE.CylinderGeometry(0.035,0.035,0.5,10),std(0x1a1c20,{m:0.6}));rc.add(at(mast,0,0.84,-1.05));
+ rc.add(at(rbox(0.36,0.24,0.2,std(0x1a1c20,{r:0.5}),0.03),0,1.16,-1.05));
+ const lens=new THREE.Mesh(new THREE.CylinderGeometry(0.07,0.07,0.06,20),std(0x0a1630,{r:0.1,m:0.8,e:0x2040a0,ei:0.4}));lens.rotation.x=Math.PI/2;rc.add(at(lens,0,1.16,-1.17))}
+
+/* FOTA: A/B スロット、署名検証の輪、届くパッケージ（FOTA のシーンでだけ見せる） */
+const fota=new THREE.Group();real.add(fota);
+const slotAM=std(0x16222c,{e:0x6dffb0,ei:0.5,r:0.4,t:true}),slotBM=std(0x16222c,{e:0x35e6ff,ei:0.0,r:0.4,t:true});
+const SA=[1.25,1.22,1.55],SB=[2.05,1.22,1.55];
+const slotA=at(rbox(0.62,0.42,0.56,slotAM,0.05),...SA),slotB=at(rbox(0.62,0.42,0.56,slotBM,0.05),...SB);fota.add(slotA,slotB);
+const ringM=new THREE.MeshBasicMaterial({color:0x35e6ff,transparent:true,opacity:0});
+const ring=at(new THREE.Mesh(new THREE.TorusGeometry(0.4,0.028,10,48),ringM),2.05,2.35,1.55);fota.add(ring);
+const pkgM=std(0xeaf2f8,{e:0xffffff,ei:0.4,r:0.3,t:true});const pkg=rbox(0.3,0.3,0.3,pkgM,0.04);fota.add(pkg);
+const runLineM=new THREE.LineBasicMaterial({color:0x6dffb0,transparent:true,opacity:0});
+const runLineGeo=new THREE.BufferGeometry();runLineGeo.setAttribute('position',new THREE.Float32BufferAttribute(new Float32Array(6),3));
+const runLine=new THREE.Line(runLineGeo,runLineM);fota.add(runLine);
+const PIW=new THREE.Vector3();
+
+const composer=new EffectComposer(renderer);composer.setSize(GW,GH);
+composer.addPass(new RenderPass(scene,camera));
+composer.addPass(new UnrealBloomPass(new THREE.Vector2(GW,GH),0.42,0.5,0.92));
+composer.addPass(new OutputPass());
+if(Q.get('smaa')!=='0')composer.addPass(new SMAAPass(GW,GH));
+
+/* カメラ: [t, 位置xyz, 注視点xyz, 画面の横ずらし(px)] */
+const CK=[
+ [0,   0,6.6,23,      0,2.2,0,     0],
+ [7,   1.2,5.4,18,    0,2.3,0,     0],
+ [10.5,4.6,4.6,13.2,  0,2.5,0,     -430],
+ [18.5,-3.2,4.4,13.4, -0.4,2.4,0,  -430],
+ [22,  -9.4,7.2,9.6,  -8,1.0,0.2,  -400],
+ [30.5,-11.6,6.2,8.4, -8,1.0,0.2,  -400],
+ [34.5,11.6,3.0,6.0,  7.8,1.45,0,  -400],
+ [44,  5.6,2.7,6.4,   7.8,1.45,0,  -400],
+ [48,  0,11,18,       0,1.0,0,     0],
+ [56,  2.4,10,17,     0,1.0,0,     0],
+ [60.5,12.4,4.0,7.6,  8.9,1.5,0.7, -400],
+ [70,  9.6,3.6,8.6,   8.9,1.5,0.7, -400],
+ [74,  4.4,2.7,6.2,   7.8,1.4,0,   -400],
+ [80,  5.6,3.0,7.4,   7.8,1.4,0,   -300],
+ [85,  0,6.8,21,      0,2.0,0,     0],
+];
+const V3=new THREE.Vector3();
+function proj(obj,dy=0){obj.getWorldPosition(V3);V3.y+=dy;V3.project(camera);return [(V3.x*0.5+0.5)*W,(-V3.y*0.5+0.5)*H]}
+
+/* FOTA の進み具合: 0 受信待ち → 1 受信 → 2 署名検証 → 3 書き込み → 4 trial 起動 → 5 health check → 6 commit */
+const F=scn('fota');
+const fotaPhase=t=>clamp((t-F.s-2.0)/9.0)*6;
+
+function update3D(t){
+ const lt=logT(t),i=idxAt(lt),r=demo[i];
+ // シミュレータ側
+ const [sx,sz]=tableXZ(r);simCar.position.set(sx,1.2,sz);simCar.rotation.y=r[3];pathNow.geometry.setDrawRange(0,i+1);
+ // 実機側（同じ入力。後輪は車速ぶん回り、前輪は舵角ぶん切れる）
+ rcWheels.forEach(w=>{w.userData.spin.rotation.x=-dist[i]*7;if(w.userData.front)w.rotation.y=steerLag[i]});
+ led.visible=(Math.floor(t*4)%2)===0;
+ // 中央の積み重ね: stack のシーンで順に強調
+ const B=scn('stack');const hl=k=>(t>B.s&&t<B.e)?0.5*Math.max(0,Math.sin(clamp((t-B.s-1.2-k*1.5)/1.5)*Math.PI)):0;
+ swcM.forEach(m=>m.emissiveIntensity=0.35+hl(0)*1.2);rteM.emissiveIntensity=0.35+hl(1)*1.6;busM.emissiveIntensity=0.5+hl(2)*1.6;runM.emissiveIntensity=0.05+hl(3)*0.9;
+ pSimM.emissiveIntensity=0.3+hl(4.4)*1.8;pRealM.emissiveIntensity=0.3+hl(5.4)*1.8;
+ // パルス
+ pipeSim.pulses.forEach((s,k)=>{const u=((t*0.45+k/4)%1);const d=k%2?1-u:u;s.position.copy(pipeSim.curve.getPoint(d))});
+ pipeReal.pulses.forEach((s,k)=>{const u=((t*0.45+k/4)%1);s.position.copy(pipeReal.curve.getPoint(u))});
+ // FOTA
+ const fa=A(t,F.s-1.0,1.2)*(1-A(t,F.e-0.4,0.8));fota.visible=fa>0.01;
+ const ph=fotaPhase(t);
+ slotAM.opacity=slotBM.opacity=fa;pkgM.opacity=fa*(ph<3.6?1:0);
+ const start=new THREE.Vector3(6.5,6.5,-3),gate=new THREE.Vector3(2.05,2.35,1.55),dst=new THREE.Vector3(...SB);
+ if(ph<1)pkg.position.copy(start).lerp(gate,ss(ph));
+ else if(ph<2)pkg.position.copy(gate);
+ else pkg.position.copy(gate).lerp(dst,ss(ph-2));
+ pkg.rotation.set(t*0.8,t*1.1,0);pkg.visible=ph<3;
+ ringM.opacity=fa*clamp(Math.min(ph-0.6,3-ph)*2);ringM.color.set(ph>=1.8?0x6dffb0:0x35e6ff);ring.rotation.set(Math.PI/2,0,t*1.5);ring.scale.setScalar(1+0.08*Math.sin(t*6));
+ const colB=ph<3?0x35e6ff:(ph<6?0xffc04d:0x6dffb0);slotBM.emissive.set(colB);slotBM.emissiveIntensity=ph<2.5?0.0:(ph<3?0.3:0.6+(ph<6?0.25*Math.sin(t*8):0));
+ slotAM.emissive.set(0x6dffb0);slotAM.emissiveIntensity=ph<6?0.5:0.1;
+ // 起動中のスロット → Pi への線
+ piBoard.getWorldPosition(PIW);real.worldToLocal(PIW);
+ const src=ph<3?SA:SB;const pa=runLineGeo.attributes.position;pa.setXYZ(0,src[0],src[1]+0.21,src[2]);pa.setXYZ(1,PIW.x,PIW.y+0.25,PIW.z);pa.needsUpdate=true;
+ runLineM.opacity=fa*0.9;runLineM.color.set(ph<3?0x6dffb0:(ph<6?0xffc04d:0x6dffb0));
+ const c=splineMono(CK,t);camera.position.set(c[0],c[1],c[2]);camera.lookAt(c[3],c[4],c[5]);
+ if(Math.abs(c[6])>1)camera.setViewOffset(W,H,-c[6],0,W,H);else camera.clearViewOffset();
+ camera.updateProjectionMatrix();camera.updateMatrixWorld();scene.updateMatrixWorld(true);
+ composer.render();
+ return {lt,r,ph};
+}
+
+/* ---------- HUD ---------- */
+initHud(document.getElementById('hud'));
+const sceneA=(sc,t)=>Math.min(A(t,sc.s+0.1,0.7),1-A(t,sc.e-0.6,0.6));
+const X=1000,PW=830;
+const NOTE='実機は未確認。設計文書にある想定';
+
+// 入力の表示（シミュレータ側と実機側で同じ値を出す）
+function inputStrip(S,x,y,c){
+ panel(x,y,PW,88,{c,bar:88});txt('入力（同じシナリオ）',x+24,y+36,20,c,{w:700});txt('t = '+S.lt.toFixed(2)+' s',x+24,y+68,20,WH,{mono:true});
+ [['throttle',S.r[5]],['brake',S.r[6]],['steer',S.r[7]]].forEach(([n,v],i)=>{const bx=x+250+i*190;txt(n,bx,y+36,19,DIM,{mono:true});
+  g.fillStyle='rgba(147,174,189,0.22)';g.fillRect(bx,y+52,150,10);g.fillStyle=c;if(n==='steer')g.fillRect(bx+75,y+52,75*v,10);else g.fillRect(bx,y+52,150*v,10);
+  if(n==='steer'){g.fillStyle=WH;g.fillRect(bx+74,y+48,2,18)}})}
+
+function sTitle(t,a){withA(a,()=>{
+ const lg=g.createLinearGradient(0,560,0,1080);lg.addColorStop(0,'rgba(4,6,12,0)');lg.addColorStop(0.35,'rgba(4,6,12,0.82)');lg.addColorStop(1,'rgba(4,6,12,0.9)');g.fillStyle=lg;g.fillRect(0,560,W,520);
+ slide(A(t,1.2,0.9),-40,()=>txt('シミュレータと実機',106,800,104,WH,{w:900}));
+ slide(A(t,2.0,0.9),-40,()=>{g.fillStyle=CY;g.fillRect(110,832,80,4);txt('同じ SWC・RTE・仮想バスを、Platform だけ差し替えて動かす',110,902,40,WH)});
+ slide(A(t,3.0,0.9),-40,()=>txt('実機（PiCar-X + Raspberry Pi 5）での動作は未確認。README と設計文書にある想定を図にしたもの',110,962,25,AM));
+ withA(A(t,3.6,0.8),()=>{tag('シミュレータ',proj(sim,2.2),CY,0,-60,{mono:false,size:26});tag('共通のソフト（sdv-core）',proj(rte,1.9),WH,0,-60,{mono:false,size:26});tag('実機',proj(real,2.6),AM,0,-60,{mono:false,size:26})});
+})}
+
+function sStack(t,a){const s0=scn('stack').s;withA(a,()=>{
+ heading('01  COMMON / PLATFORM','共通部分と、差し替える部分',A(t,s0+0.4));
+ const rows=[
+  ['SWC',CY,'DriverInput / Safety / Engine / Brake / Steering'],
+  ['RTE',GR,'ECU ごとに 1 つ。SWC は渡された RTE だけを読み書きする'],
+  ['仮想バス',CY,'信号契約（フレーム）はシミュレーションと実機で共通'],
+  ['VehicleRuntime',WH,'VCU / Engine / Brake / Steering を 10 ms 周期の仮想 ECU タスクとして実行']];
+ rows.forEach((r,i)=>slide(A(t,s0+1.2+i*1.5,0.7),40,()=>{const y=286+i*108;panel(X,y,PW,94,{c:r[1],bar:94});txt(r[0],X+26,y+40,25,r[1],{w:700});txt(r[2],X+26,y+76,21,WH)}));
+ slide(A(t,s0+7.6,0.7),40,()=>{txt('Platform（ここだけ差し替える）',X,756,24,DIM,{w:700});
+  panel(X,776,405,150,{c:CY,bar:150});txt('シミュレータ',X+24,818,25,CY,{w:700});txt('platform_sim.rs',X+24,856,21,WH,{mono:true});txt('VehicleDynamics（Plant）をつなぐ',X+24,896,20,WH);});
+ slide(A(t,s0+8.8,0.7),40,()=>{panel(X+425,776,405,150,{c:AM,bar:150});txt('実機',X+449,818,25,AM,{w:700});txt('sdv-picarx',X+449,856,21,WH,{mono:true});txt('Robot HAT を I2C / GPIO で制御',X+449,896,20,WH);});
+ slide(A(t,s0+9.8,0.7),40,()=>txt('上位の SWC・RTE・バスは書き換えない',X,986,26,WH));
+ withA(A(t,s0+2.0,0.8)*(1-A(t,scn('stack').e-1.2,0.5)),()=>{
+  tag('SWC',proj(stack.children[0],0),CY,-46,-70);tag('RTE',proj(rte),GR,-190,-30);tag('仮想バス',proj(bus),CY,-190,10,{mono:false});tag('VehicleRuntime',proj(run),WH,-190,50);
+  if(t>s0+7.6){tag('platform_sim.rs',proj(pSim),CY,-120,120);tag('sdv-picarx',proj(pReal),AM,60,150)}});
+})}
+
+function sSim(t,a,S){const s0=scn('sim').s;withA(a,()=>{
+ heading('02  SIMULATOR','シミュレータでの動き',A(t,s0+0.4));
+ const rows=[
+  ['入力','シナリオ JSON、または GUI のスライダーとキー'],
+  ['車両状態','VehicleDynamics（Plant）が計算して返す'],
+  ['時間','シミュレーション時間。10 ms 固定ステップ'],
+  ['再現性','同じ Config とシナリオなら、同じログになる'],
+  ['故障注入','SWC 停止、バスの遅延・欠損・断、VCU 停止']];
+ rows.forEach((r,i)=>slide(A(t,s0+1.2+i*1.1,0.7),40,()=>kv(r[0],r[1],X,286+i*92,PW,CY,{kw:180,vs:23})));
+ slide(A(t,s0+7.0,0.7),40,()=>inputStrip(S,X,760,CY));
+ slide(A(t,s0+8.0,0.7),40,()=>txt('Rust を WebAssembly にして、ブラウザ上で動かす',X,900,25,WH));
+ withA(A(t,s0+2.5,0.8),()=>{tag('Plant（VehicleDynamics）',proj(simCar),CY,60,-110,{mono:false});txt('x = '+S.r[1].toFixed(2)+'  y = '+S.r[2].toFixed(2)+'  v = '+S.r[4].toFixed(2)+' m/s',120,960,24,CY,{mono:true})});
+})}
+
+function sReal(t,a,S){const s0=scn('real').s;withA(a,()=>{
+ heading('03  TARGET','実機での動き（想定）',A(t,s0+0.4),X,150,AM);
+ const rows=[
+  ['入力','Unix データグラムで受信。連番と単調時計の時刻つき'],
+  ['駆動','要求加速度を前進パワーに換算（開ループ。速度は推定しない）'],
+  ['操舵','舵角指令をサーボの PWM に換算（Robot HAT、I2C）'],
+  ['ブレーキ / E-Stop','駆動モータを止める。減速度は保証しない'],
+  ['異常時','入力の欠落・古い入力・I/O エラー・周期超過でモータ停止を要求'],
+  ['物理','摩擦や走行抵抗は、Config ではなく実環境が決める']];
+ rows.forEach((r,i)=>slide(A(t,s0+1.2+i*1.2,0.7),40,()=>kv(r[0],r[1],X,286+i*86,PW,AM,{kw:214,vs:20,ks:22,h:74})));
+ slide(A(t,s0+9.0,0.7),40,()=>inputStrip(S,X,812,AM));
+ slide(A(t,s0+10.0,0.7),40,()=>txt(NOTE+'。図ではタイヤを浮かせた状態',X,946,23,AM));
+ withA(A(t,s0+2.5,0.8),()=>{tag('後輪モータ（PWM）',proj(rcWheels[3]),AM,60,90,{mono:false});tag('操舵サーボ',proj(rcWheels[0]),AM,-50,-120,{mono:false});tag('Raspberry Pi 5 + Robot HAT',proj(piBoard,0.3),WH,-40,-130,{mono:false})});
+})}
+
+function sTable(t,a){const s0=scn('table').s;withA(a,()=>{
+ g.fillStyle='rgba(4,6,12,0.72)';g.fillRect(0,0,W,H);
+ heading('04  DIFFERENCES','シミュレータと実機の違い',A(t,s0+0.4),120,150);
+ const x0=120,w0=1680,c1=x0+30,c2=x0+420,c3=x0+1040,y0=286,rh=96;
+ slide(A(t,s0+0.9,0.6),30,()=>{txt('シミュレータ',c2,y0+34,25,CY,{w:700});txt('実機（想定）',c3,y0+34,25,AM,{w:700});line(x0,y0+52,x0+w0,y0+52,DIM,1.5)});
+ const rows=[
+  ['車両状態の出どころ','Plant モデルが計算','センサ・推定プロセスから受け取る'],
+  ['速度の制御','モデル上で加減速','開ループ（速度センサなし）'],
+  ['ブレーキ','減速度モデル','駆動モータの停止のみ'],
+  ['物理（摩擦・抵抗）','Config の physics','実環境'],
+  ['時間','シミュレーション時間（決定的）','単調時計に基づく 10 ms 周期'],
+  ['止める仕組み','Watchdog と受信側フェイルセーフ','左に加えて、モータ停止要求と物理キルスイッチ']];
+ rows.forEach((r,i)=>slide(A(t,s0+1.6+i*1.1,0.6),30,()=>{const y=y0+70+i*rh;g.fillStyle=i%2?'rgba(20,30,44,0.55)':'rgba(12,20,32,0.55)';g.fillRect(x0,y,w0,rh-10);
+  txt(r[0],c1,y+54,25,WH,{w:700});txt(r[1],c2,y+54,25,WH);txt(r[2],c3,y+54,25,WH);g.fillStyle=CY;g.fillRect(c2-22,y+16,3,rh-42);g.fillStyle=AM;g.fillRect(c3-22,y+16,3,rh-42)}));
+ slide(A(t,s0+8.6,0.6),30,()=>txt('SWC・RTE・バスのフレーム・フェイルセーフの判定は、どちらも同じコード',x0,y0+70+6*rh+50,27,WH));
+})}
+
+function sFota(t,a,S){const s0=F.s;const ph=S.ph;withA(a,()=>{
+ heading('05  FOTA','実機の FOTA（Pi 5 / Linux）',A(t,s0+0.4));
+ const steps=[
+  '署名済みパッケージ（SDVF）を HTTPS で受信',
+  'Ed25519 署名を検証（root 管理の信頼鍵のみ）',
+  '待機側のスロットへ書き込み、読み戻して照合',
+  'trial 起動（非特権ユーザーで実行）',
+  'health check',
+  '合格なら commit。不合格や起動失敗なら rollback'];
+ steps.forEach((s,i)=>slide(A(t,s0+0.9+i*0.25,0.6),40,()=>{const y=286+i*74;const done=ph>=i+1,act=ph>=i&&ph<i+1;const c=done?GR:(act?CY:'#52687a');
+  panel(X,y,PW,62,{c,bar:62,sa:act?1:0.5});txt(String(i+1),X+26,y+42,24,c,{mono:true,w:700});txt(s,X+66,y+41,23,done||act?WH:DIM)}));
+ slide(A(t,s0+3.0,0.7),40,()=>{panel(X,744,PW,112,{c:AM,bar:112});txt('更新対象と開始条件',X+26,784,23,AM,{w:700});txt('車両制御アプリ全体（vehicle）を A/B 2 面で更新する',X+26,818,21,WH);txt('開始できるのは、車両が停止していて Safety が正常なとき',X+26,846,21,WH)});
+ slide(A(t,s0+5.0,0.7),40,()=>txt('Linux の統合テストで確認済み。実 Pi 5 では未確認',X,906,24,AM));
+ slide(A(t,s0+6.0,0.7),40,()=>txt('シミュレータ側は、ブラウザ内の FOTA デモで更新前後の軌跡を比べられる',X,948,22,WH));
+ withA(A(t,s0+1.6,0.8),()=>{
+  tag('スロット A: '+(ph<6?'Active（v1）':'Backup（v1）'),proj(slotA,0.2),ph<6?GR:DIM,-30,150,{mono:false});
+  tag('スロット B: '+(ph<2.6?'待機側':(ph<3?'書き込み済み（v2）':(ph<6?'trial 中（v2）':'Active（v2）'))),proj(slotB,0.2),ph<3?CY:(ph<6?AM:GR),-30,215,{mono:false});
+  if(ph>0.6&&ph<3)tag(ph<1.8?'署名を検証中':'署名 OK',proj(ring),ph<1.8?CY:GR,70,-50,{mono:false})});
+})}
+
+function sCheck(t,a){const s0=scn('check').s;withA(a,()=>{
+ heading('06  CHECKLIST','実機で最初に確認すること',A(t,s0+0.4),X,150,AM);
+ const rows=['タイヤを浮かせた状態で試験する','Config で速度上限を低くする','受信途絶のフェイルセーフが、実機でも効くこと','物理キルスイッチで、モータへの電源を切れること','実機の寸法・最大舵角・最高速度を Config に反映する'];
+ rows.forEach((r,i)=>slide(A(t,s0+1.0+i*0.9,0.6),40,()=>{const y=286+i*92;panel(X,y,PW,78,{c:AM,bar:78});g.strokeStyle=AM;g.lineWidth=2.5;g.strokeRect(X+28,y+25,28,28);txt(r,X+80,y+49,24,WH)}));
+ slide(A(t,s0+6.0,0.6),40,()=>txt('出典: docs/notes/hardware_candidates.md',X,790,21,DIM,{mono:true}));
+})}
+
+function sEnd(t,a){withA(a,()=>{
+ g.fillStyle='rgba(4,6,12,0.62)';g.fillRect(0,0,W,H);
+ txt('SDV Playground',W/2,440,104,WH,{w:900,al:'center'});
+ txt('シミュレータで固めたソフトを、Platform の差し替えで実機へ',W/2,524,32,WH,{al:'center'});
+ g.font=`700 32px ${MONO}`;const w=g.measureText('github.com/Hidenori24/SDV').width+72;g.strokeStyle=CY;g.lineWidth=2;g.strokeRect(W/2-w/2,596,w,72);
+ txt('github.com/Hidenori24/SDV',W/2,644,32,CY,{al:'center',mono:true,w:700});
+ txt('rust/sdv-picarx/README.md  /  docs/adr/ADR-0005-fota.md  /  docs/notes/hardware_candidates.md',W/2,730,20,DIM,{al:'center',mono:true});
+})}
+
+// 右の列（説明のパネル）の下地。3D と重なっても読めるようにする
+function rightBackdrop(a){withA(a,()=>{const lg=g.createLinearGradient(820,0,1120,0);lg.addColorStop(0,'rgba(5,8,14,0)');lg.addColorStop(1,'rgba(5,8,14,0.78)');g.fillStyle=lg;g.fillRect(820,0,W-820,H)})}
+function frameHUD(t,S){
+ {const on=['stack','sim','real','fota','check'].map(x=>sceneA(scn(x),t));rightBackdrop(Math.max(...on))}
+ frameChrome(t,{title:'SDV Playground',scenes:SC,duration:DURATION});
+ const a=x=>sceneA(scn(x),t),on=x=>t>scn(x).s-0.2&&t<scn(x).e+0.2;
+ if(on('title'))sTitle(t,a('title'));
+ if(on('stack'))sStack(t,a('stack'));
+ if(on('sim'))sSim(t,a('sim'),S);
+ if(on('real'))sReal(t,a('real'),S);
+ if(on('table'))sTable(t,a('table'));
+ if(on('fota'))sFota(t,a('fota'),S);
+ if(on('check'))sCheck(t,a('check'));
+ if(t>scn('end').s-0.2)sEnd(t,Math.min(A(t,scn('end').s+0.3,0.9),1-A(t,DURATION-0.8,0.8)));
+ frameFade(t,DURATION);
+}
+
+window.renderAt=function(t){const S=update3D(t);g.clearRect(0,0,W,H);g.globalAlpha=1;frameHUD(t,S);return true};
+document.fonts.load(`900 40px ${JP}`).then(()=>{window.renderAt(0);window.READY=true});
+</script></body></html>
