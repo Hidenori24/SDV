@@ -48,9 +48,30 @@ cp logs/latest.csv rust/sdv-core/tests/golden/cpp_latest.csv
 - `lint`: 全 crate の `cargo fmt --check` と `cargo clippy --all-targets`（**clippy のエラーは失敗、警告は当面許容**。`sdv-fota` / `sdv-picarx` には既存の警告が残っている。新しいコードで警告を増やさない。削減は別 PR で進め、いずれ `-D warnings` にする）
 - `sec-tests`: `sdv-sec` の既知の値・フレーム MAC・ヘッダ一致、no_std の WASM ビルド、C ABI スモークテスト
 - `integration`: ビルド済みの `sdv_core.wasm` を Node で動かす結合テスト（C++ の基準ログの全行再現 + シナリオ + 期待値）
+- `aarch64`: Pi 5 の実ターゲット（aarch64-unknown-linux-gnu）でのビルドと、`qemu-user` でのテスト（手元で同じことをする手順は末尾）
 - `golden-log`: C++ ログがコミット済みの基準ログと一致すること
 - `ci-ok`: 上記すべての集約結果
 
 新しい crate や CI ジョブを足したら、この一覧と上のテスト表、`README.md` も同じ PR で更新する。
 
 **PRのマージ条件**: `ci-ok` が成功していること（ブランチ保護の必須ステータスチェックに `ci-ok` を指定する）。
+
+## Pi 5（aarch64）向けのビルドとテスト
+
+CI の `aarch64` ジョブと同じことを手元でやる手順（Linux / Ubuntu）。x86-64 では通るのに aarch64 でだけ失敗するコード（`O_NOFOLLOW` のようなアーキテクチャ依存の値）を見つけるため。
+
+```bash
+rustup target add aarch64-unknown-linux-gnu
+sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross qemu-user-binfmt
+# テストが起動する子プロセスも動かすため、binfmt_misc に aarch64 を登録する
+sudo mount -t binfmt_misc none /proc/sys/fs/binfmt_misc 2>/dev/null || true
+sudo /usr/lib/systemd/systemd-binfmt /usr/lib/binfmt.d/qemu-aarch64.conf
+export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc QEMU_LD_PREFIX=/usr/aarch64-linux-gnu
+cargo build --release --target aarch64-unknown-linux-gnu --manifest-path rust/sdv-picarx/Cargo.toml
+cargo test  --target aarch64-unknown-linux-gnu --manifest-path rust/sdv-fota/Cargo.toml
+```
+
+エミュレーションでは時間依存のテストが不安定になる。CI の `aarch64` ジョブは次のようにしている（実機のテストの代わりにはならない）。
+- `sdv-sec` / `sdv-core`: 全テストを実行
+- `sdv-fota`: 全テストを実行。時間依存のテストが稀に揺らぐので最大 3 回試す（決定的な失敗は毎回落ちるので見逃さない）
+- `sdv-picarx`: `--lib --bins` を実行。プロセスを起動して 10 ms の周期の期限を見る結合テストは、コンパイルだけ（x86-64 の `rust-tests` では実行される）

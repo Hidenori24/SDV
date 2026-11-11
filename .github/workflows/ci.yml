@@ -121,6 +121,61 @@ jobs:
       - name: Scenario + expectation tests on the built .wasm (Node, no browser)
         run: node tests/integration/run_wasm.mjs
 
+  aarch64:
+    name: aarch64
+    runs-on: ubuntu-24.04
+    env:
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+      QEMU_LD_PREFIX: /usr/aarch64-linux-gnu
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+      - name: Install the aarch64 cross toolchain and qemu-user
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross qemu-user-binfmt
+          # Register aarch64 with binfmt_misc so that the processes the tests spawn (workers, launchers) run too.
+          mountpoint -q /proc/sys/fs/binfmt_misc || sudo mount -t binfmt_misc none /proc/sys/fs/binfmt_misc
+          sudo /usr/lib/systemd/systemd-binfmt /usr/lib/binfmt.d/qemu-aarch64.conf
+          test -e /proc/sys/fs/binfmt_misc/qemu-aarch64
+      - name: Build for Pi 5 (aarch64-unknown-linux-gnu)
+        run: |
+          for crate in sdv-sec sdv-core sdv-fota sdv-picarx; do
+            cargo build --release --target aarch64-unknown-linux-gnu --manifest-path rust/$crate/Cargo.toml
+          done
+      - name: Test under qemu-user (sdv-sec, sdv-core)
+        run: |
+          for crate in sdv-sec sdv-core; do
+            cargo test --target aarch64-unknown-linux-gnu --manifest-path rust/$crate/Cargo.toml
+          done
+      - name: Test sdv-fota under qemu-user
+        # Timing under emulation can flake one test now and then. A deterministic failure (an architecture-dependent
+        # value such as O_NOFOLLOW, see #174) fails every attempt, so a few attempts keep the signal and drop the noise.
+        run: |
+          for attempt in 1 2 3; do
+            if cargo test --target aarch64-unknown-linux-gnu --manifest-path rust/sdv-fota/Cargo.toml; then exit 0; fi
+            echo "::warning::sdv-fota tests failed on attempt $attempt under emulation"
+          done
+          exit 1
+      - name: Build and run the unit tests of sdv-picarx under qemu-user
+        # The integration tests spawn worker processes and assert 10 ms cycle deadlines, which emulation does not meet
+        # reliably: they are only compiled here (type and ABI errors still show) and run natively in rust-tests.
+        run: |
+          cargo test --target aarch64-unknown-linux-gnu --manifest-path rust/sdv-picarx/Cargo.toml --lib --bins
+          cargo test --target aarch64-unknown-linux-gnu --manifest-path rust/sdv-picarx/Cargo.toml --tests --no-run
+      - name: Keep the aarch64 binaries
+        uses: actions/upload-artifact@v7
+        with:
+          name: sdv-aarch64-binaries
+          path: |
+            rust/sdv-fota/target/aarch64-unknown-linux-gnu/release/sdv-fota
+            rust/sdv-fota/target/aarch64-unknown-linux-gnu/release/sdv-fota-launcher
+            rust/sdv-picarx/target/aarch64-unknown-linux-gnu/release/sdv-picarx
+            rust/sdv-picarx/target/aarch64-unknown-linux-gnu/release/sdv-picarx-ecu-worker
+            rust/sdv-picarx/target/aarch64-unknown-linux-gnu/release/sdv-picarx-health
+
   golden-log:
     name: golden-log
     needs: cpp-tests
@@ -147,7 +202,7 @@ jobs:
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [cpp-tests, rust-tests, lint, sec-tests, integration, golden-log]
+    needs: [cpp-tests, rust-tests, lint, sec-tests, integration, aarch64, golden-log]
     runs-on: ubuntu-24.04
     steps:
       - name: All required jobs succeeded
