@@ -2,6 +2,8 @@
 Description=SDV A/B application slot launcher
 After=local-fs.target
 RequiresMountsFor=/var/lib/sdv-fota
+Requires=var-lib-sdv\x2dfota.mount
+After=var-lib-sdv\x2dfota.mount
 
 [Service]
 Type=simple
