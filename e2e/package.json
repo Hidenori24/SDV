@@ -1,0 +1,12 @@
+{
+  "name": "sdv-e2e",
+  "private": true,
+  "type": "module",
+  "description": "Browser end-to-end tests for web/ (a handful of smoke tests; the logic is covered by tests/integration)",
+  "scripts": {
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "playwright-core": "1.56.1"
+  }
+}

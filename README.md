@@ -107,6 +107,7 @@ tools/      図の生成・可視化などの補助スクリプト
 - [rust/sdv-fota/README.md](rust/sdv-fota/README.md) : FOTA（署名済みパッケージの検証、A/B 更新、trial / commit / rollback、Pi 5 の導入・起動、Classic 向け C ABI）
 - [rust/sdv-picarx/README.md](rust/sdv-picarx/README.md) : PiCar-X プラットフォーム（Robot HAT・車両ホスト・仮想 ECU ワーカー）
 - [docs/design/fota_classic_architecture.md](docs/design/fota_classic_architecture.md) : AUTOSAR Classic を基準にした ECU / FOTA の責務境界案
+- [e2e/README.md](e2e/README.md) : GUI のブラウザ E2E テスト（少数のスモークテスト）
 - [tests/integration/README.md](tests/integration/README.md) : 結合テスト（シナリオ + 期待値。ビルド済みの WASM を Node で実行）
 - [web/README.md](web/README.md) : ブラウザ GUI の使い方
 - [CONTRIBUTING.md](CONTRIBUTING.md) : TDD の進め方、テスト、CI
