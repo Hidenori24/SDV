@@ -19,10 +19,22 @@ fn all_alive_is_normal() {
 #[test]
 fn one_dead_swc_is_degraded_for_each_swc() {
     let cases = [
-        HeartbeatStatus { engine_ok: false, ..all_ok() },
-        HeartbeatStatus { brake_ok: false, ..all_ok() },
-        HeartbeatStatus { steering_ok: false, ..all_ok() },
-        HeartbeatStatus { vehicledynamics_ok: false, ..all_ok() },
+        HeartbeatStatus {
+            engine_ok: false,
+            ..all_ok()
+        },
+        HeartbeatStatus {
+            brake_ok: false,
+            ..all_ok()
+        },
+        HeartbeatStatus {
+            steering_ok: false,
+            ..all_ok()
+        },
+        HeartbeatStatus {
+            vehicledynamics_ok: false,
+            ..all_ok()
+        },
     ];
     for hb in cases {
         assert_eq!(count_failed(&hb), 1);
@@ -32,7 +44,11 @@ fn one_dead_swc_is_degraded_for_each_swc() {
 
 #[test]
 fn two_or_more_dead_swcs_is_estop() {
-    let mut hb = HeartbeatStatus { engine_ok: false, brake_ok: false, ..all_ok() };
+    let mut hb = HeartbeatStatus {
+        engine_ok: false,
+        brake_ok: false,
+        ..all_ok()
+    };
     assert_eq!(compute_safety_state(&hb), SafetyState::EStop);
     hb.steering_ok = false;
     hb.vehicledynamics_ok = false;
@@ -77,7 +93,9 @@ fn counter_advancing_again_clears_failure() {
 
 #[test]
 fn custom_timeout_is_honored() {
-    let p = SafetyParams { heartbeat_timeout_ms: 300 };
+    let p = SafetyParams {
+        heartbeat_timeout_ms: 300,
+    };
     let mut m = HeartbeatMonitor::default();
     update_heartbeat(&mut m, 1, 100, &p);
     assert!(update_heartbeat(&mut m, 1, 100, &p));
@@ -96,7 +114,11 @@ struct Rig {
 }
 impl Rig {
     fn new() -> Self {
-        Self { sup: SafetySupervisor::new(), alive: [0; 4], estop_req: false }
+        Self {
+            sup: SafetySupervisor::new(),
+            alive: [0; 4],
+            estop_req: false,
+        }
     }
     /// One 100 ms cycle; each running SWC reports alive 10 times (10 ms tasks).
     fn cycle(&mut self, run: [bool; 4]) -> (bool, SafetyState) {
@@ -127,21 +149,33 @@ fn healthy_system_stays_normal() {
 fn one_silent_swc_degrades_after_timeout_not_before() {
     let mut r = Rig::new();
     r.cycles(5, ALL);
-    assert_eq!(r.cycles(10, [false, true, true, true]).1, SafetyState::Normal);
-    assert_eq!(r.cycle([false, true, true, true]), (false, SafetyState::Degraded));
+    assert_eq!(
+        r.cycles(10, [false, true, true, true]).1,
+        SafetyState::Normal
+    );
+    assert_eq!(
+        r.cycle([false, true, true, true]),
+        (false, SafetyState::Degraded)
+    );
 }
 
 #[test]
 fn degraded_recovers_when_swc_returns() {
     let mut r = Rig::new();
-    assert_eq!(r.cycles(15, [true, false, true, true]).1, SafetyState::Degraded);
+    assert_eq!(
+        r.cycles(15, [true, false, true, true]).1,
+        SafetyState::Degraded
+    );
     assert_eq!(r.cycle(ALL).1, SafetyState::Normal);
 }
 
 #[test]
 fn two_silent_swcs_estop_with_flag() {
     let mut r = Rig::new();
-    assert_eq!(r.cycles(12, [false, false, true, true]), (true, SafetyState::EStop));
+    assert_eq!(
+        r.cycles(12, [false, false, true, true]),
+        (true, SafetyState::EStop)
+    );
 }
 
 #[test]

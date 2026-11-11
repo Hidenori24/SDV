@@ -4,11 +4,11 @@
 
 use crate::bus::{Bus, Frame, Node};
 use crate::config::Config;
-use crate::scenario::{Action, Event, Scenario, Target};
 use crate::failsafe::{self, FailsafeParams, FailsafeStatus};
 use crate::model::*;
 use crate::rte::Rte;
 use crate::safety::SwcStatus;
+use crate::scenario::{Action, Event, Scenario, Target};
 use crate::swc::*;
 
 pub use crate::rte::{ActuatorCmd, DriverInput, Safety, SystemState};
@@ -28,11 +28,21 @@ impl Row {
     pub fn to_csv(&self) -> String {
         format!(
             "{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.6},{:.3},{:.3},{:.6},{:.3},{:.6},{:.3},{},{}",
-            self.state.t, self.input.throttle, self.input.brake, self.input.steer,
-            self.cmd.drive_accel_cmd, self.cmd.brake_decel_cmd, self.cmd.steer_angle_cmd,
-            self.state.x, self.state.y, self.state.yaw, self.state.v,
-            self.state.yaw_rate, self.state.wheel_omega,
-            self.safety.estop as u8, self.safety.system_state as u8,
+            self.state.t,
+            self.input.throttle,
+            self.input.brake,
+            self.input.steer,
+            self.cmd.drive_accel_cmd,
+            self.cmd.brake_decel_cmd,
+            self.cmd.steer_angle_cmd,
+            self.state.x,
+            self.state.y,
+            self.state.yaw,
+            self.state.v,
+            self.state.yaw_rate,
+            self.state.wheel_omega,
+            self.safety.estop as u8,
+            self.safety.system_state as u8,
         )
     }
 }
@@ -60,7 +70,12 @@ struct Ecu<S> {
 
 impl<S> Ecu<S> {
     fn with_swc(swc: S) -> Self {
-        Self { rte: Rte::default(), swc, alive: 0, stalled: false }
+        Self {
+            rte: Rte::default(),
+            swc,
+            alive: 0,
+            stalled: false,
+        }
     }
 }
 
@@ -100,7 +115,11 @@ impl Sim {
     /// Boot with a given (already validated) config.
     pub fn with_config(config: Config) -> Self {
         Self {
-            vcu: Vcu { rte: Rte::default(), safety_swc: SafetySwc::new(config.safety_params()), stalled: false },
+            vcu: Vcu {
+                rte: Rte::default(),
+                safety_swc: SafetySwc::new(config.safety_params()),
+                stalled: false,
+            },
             engine: Ecu::with_swc(EngineSwc::new(config.engine_params())),
             brake: Ecu::with_swc(BrakeSwc::new(config.brake_params())),
             steering: Ecu::with_swc(SteeringSwc::new(config.steering_params())),
@@ -116,7 +135,9 @@ impl Sim {
         }
     }
 
-    pub fn config(&self) -> &Config { &self.config }
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
 
     /// Install a new config and restart (a config update takes effect on reboot, like on a real ECU).
     /// The demo-scenario flag is kept; injected faults are cleared.
@@ -135,7 +156,9 @@ impl Sim {
         self.next_event = 0;
     }
 
-    pub fn scenario(&self) -> &Scenario { &self.scenario }
+    pub fn scenario(&self) -> &Scenario {
+        &self.scenario
+    }
 
     fn apply_event(&mut self, ev: Event) {
         let comp = |t: Option<Target>| match t {
@@ -161,14 +184,26 @@ impl Sim {
     }
 
     // ---- signal access (the GUI / tests see the system through these) ----
-    pub fn input(&self) -> DriverInput { self.vcu.rte.input }
+    pub fn input(&self) -> DriverInput {
+        self.vcu.rte.input
+    }
     /// The driver's request lives on the VCU; it reaches the ECUs through the bus.
-    pub fn input_mut(&mut self) -> &mut DriverInput { &mut self.vcu.rte.input }
+    pub fn input_mut(&mut self) -> &mut DriverInput {
+        &mut self.vcu.rte.input
+    }
     /// Actuator commands as received by the plant.
-    pub fn cmd(&self) -> ActuatorCmd { self.plant.rte.cmd }
-    pub fn state(&self) -> VehicleState { self.plant.rte.state }
-    pub fn safety(&self) -> Safety { self.vcu.rte.safety }
-    pub fn set_use_scenario(&mut self, on: bool) { self.use_scenario = on; }
+    pub fn cmd(&self) -> ActuatorCmd {
+        self.plant.rte.cmd
+    }
+    pub fn state(&self) -> VehicleState {
+        self.plant.rte.state
+    }
+    pub fn safety(&self) -> Safety {
+        self.vcu.rte.safety
+    }
+    pub fn set_use_scenario(&mut self, on: bool) {
+        self.use_scenario = on;
+    }
 
     /// RTE of a node (for inspection).
     pub fn rte(&self, node: Node) -> &Rte {
@@ -211,8 +246,12 @@ impl Sim {
         }
     }
 
-    pub fn vcu_stalled(&self) -> bool { self.vcu.stalled }
-    pub fn bus_is_down(&self) -> bool { self.bus.is_down() }
+    pub fn vcu_stalled(&self) -> bool {
+        self.vcu.stalled
+    }
+    pub fn bus_is_down(&self) -> bool {
+        self.bus.is_down()
+    }
 
     /// Stall the VCU (DriverInput + Safety): it neither runs nor sends frames.
     pub fn set_vcu_stall(&mut self, stalled: bool) {
@@ -220,14 +259,22 @@ impl Sim {
     }
 
     /// Vehicle-bus faults (they do not affect the direct ECU -> plant links).
-    pub fn set_bus_delay_ticks(&mut self, ticks: u64) { self.bus.set_delay_ticks(ticks); }
-    pub fn set_bus_loss_permille(&mut self, permille: u32) { self.bus.set_loss_permille(permille); }
-    pub fn set_bus_down(&mut self, down: bool) { self.bus.set_down(down); }
+    pub fn set_bus_delay_ticks(&mut self, ticks: u64) {
+        self.bus.set_delay_ticks(ticks);
+    }
+    pub fn set_bus_loss_permille(&mut self, permille: u32) {
+        self.bus.set_loss_permille(permille);
+    }
+    pub fn set_bus_down(&mut self, down: bool) {
+        self.bus.set_down(down);
+    }
 
     /// Receiving-side fail-safe state of an ECU (always clear for the VCU and the plant).
     pub fn ecu_failsafe(&self, node: Node) -> FailsafeStatus {
         match node {
-            Node::Engine | Node::Brake | Node::Steering => failsafe::status(self.rte(node), &self.failsafe),
+            Node::Engine | Node::Brake | Node::Steering => {
+                failsafe::status(self.rte(node), &self.failsafe)
+            }
             Node::Vcu | Node::Plant => FailsafeStatus::default(),
         }
     }
@@ -265,7 +312,9 @@ impl Sim {
 
         // Scenario events fire when the simulated time (the plant's clock) reaches them.
         if self.use_scenario {
-            while self.next_event < self.events.len() && self.plant.rte.state.t >= self.events[self.next_event].at_s {
+            while self.next_event < self.events.len()
+                && self.plant.rte.state.t >= self.events[self.next_event].at_s
+            {
                 let ev = self.events[self.next_event];
                 self.next_event += 1;
                 self.apply_event(ev);
@@ -273,7 +322,11 @@ impl Sim {
         }
 
         // Phase 0: VCU transmits (Safety every 10 ms, DriverInput every 20 ms)
-        for ecu_rte in [&mut self.engine.rte, &mut self.brake.rte, &mut self.steering.rte] {
+        for ecu_rte in [
+            &mut self.engine.rte,
+            &mut self.brake.rte,
+            &mut self.steering.rte,
+        ] {
             ecu_rte.rx_age.driver = ecu_rte.rx_age.driver.saturating_add(1);
             ecu_rte.rx_age.safety = ecu_rte.rx_age.safety.saturating_add(1);
         }
@@ -290,22 +343,43 @@ impl Sim {
             failsafe::apply(&mut self.engine.rte, &self.failsafe);
             self.engine.swc.main_10ms(&mut self.engine.rte);
             self.engine.alive += 1;
-            self.bus.send(i, Frame::CmdDrive(self.engine.rte.cmd.drive_accel_cmd));
-            self.bus.send(i, Frame::Alive { index: Component::Engine as usize, counter: self.engine.alive });
+            self.bus
+                .send(i, Frame::CmdDrive(self.engine.rte.cmd.drive_accel_cmd));
+            self.bus.send(
+                i,
+                Frame::Alive {
+                    index: Component::Engine as usize,
+                    counter: self.engine.alive,
+                },
+            );
         }
         if !self.brake.stalled {
             failsafe::apply(&mut self.brake.rte, &self.failsafe);
             self.brake.swc.main_10ms(&mut self.brake.rte);
             self.brake.alive += 1;
-            self.bus.send(i, Frame::CmdBrake(self.brake.rte.cmd.brake_decel_cmd));
-            self.bus.send(i, Frame::Alive { index: Component::Brake as usize, counter: self.brake.alive });
+            self.bus
+                .send(i, Frame::CmdBrake(self.brake.rte.cmd.brake_decel_cmd));
+            self.bus.send(
+                i,
+                Frame::Alive {
+                    index: Component::Brake as usize,
+                    counter: self.brake.alive,
+                },
+            );
         }
         if !self.steering.stalled {
             failsafe::apply(&mut self.steering.rte, &self.failsafe);
             self.steering.swc.main_10ms(&mut self.steering.rte, dt);
             self.steering.alive += 1;
-            self.bus.send(i, Frame::CmdSteer(self.steering.rte.cmd.steer_angle_cmd));
-            self.bus.send(i, Frame::Alive { index: Component::Steering as usize, counter: self.steering.alive });
+            self.bus
+                .send(i, Frame::CmdSteer(self.steering.rte.cmd.steer_angle_cmd));
+            self.bus.send(
+                i,
+                Frame::Alive {
+                    index: Component::Steering as usize,
+                    counter: self.steering.alive,
+                },
+            );
         }
         self.deliver();
 
@@ -314,7 +388,13 @@ impl Sim {
             self.plant.swc.step_10ms(&mut self.plant.rte, dt);
             self.plant.alive += 1;
             self.bus.send(i, Frame::VehicleState(self.plant.rte.state));
-            self.bus.send(i, Frame::Alive { index: Component::VehicleDynamics as usize, counter: self.plant.alive });
+            self.bus.send(
+                i,
+                Frame::Alive {
+                    index: Component::VehicleDynamics as usize,
+                    counter: self.plant.alive,
+                },
+            );
         }
 
         let row = Row {
@@ -331,7 +411,9 @@ impl Sim {
                 DriverInputSwc::main_20ms_scenario(&mut self.vcu.rte, &self.scenario);
             }
             if i.is_multiple_of(10) {
-                self.vcu.safety_swc.main_100ms(&mut self.vcu.rte, DT_100MS_MS);
+                self.vcu
+                    .safety_swc
+                    .main_100ms(&mut self.vcu.rte, DT_100MS_MS);
             }
         }
         self.tick += 1;

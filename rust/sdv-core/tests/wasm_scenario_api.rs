@@ -26,12 +26,23 @@ fn scenario_and_state_flags_through_the_c_api() {
     sdv_demo_scenario_json();
     assert!(buf().contains("\"until_s\": 2.0") && buf().contains("\"name\": \"demo\""));
     sdv_scenario_json();
-    assert!(buf().contains("\"name\": \"demo\""), "the running scenario is the demo by default");
+    assert!(
+        buf().contains("\"name\": \"demo\""),
+        "the running scenario is the demo by default"
+    );
 
     // invalid scenario: rejected with every problem, the running scenario is unchanged
-    assert_eq!(set_scenario(r#"{"steps":[{"until_s":1.0,"throttle":9.0}],"events":[{"at_s":1.0,"action":"stall"}]}"#), 1);
+    assert_eq!(
+        set_scenario(
+            r#"{"steps":[{"until_s":1.0,"throttle":9.0}],"events":[{"at_s":1.0,"action":"stall"}]}"#
+        ),
+        1
+    );
     let e = buf();
-    assert!(e.contains("steps[0].throttle") && e.contains("events[0].target"), "{e}");
+    assert!(
+        e.contains("steps[0].throttle") && e.contains("events[0].target"),
+        "{e}"
+    );
     sdv_scenario_json();
     assert!(buf().contains("\"name\": \"demo\""));
 
@@ -56,7 +67,10 @@ fn scenario_and_state_flags_through_the_c_api() {
     assert!(o[7] > 0.5, "scenario throttle");
     sdv_step(100);
     let o = out();
-    assert_eq!(o[24], 1.0, "steering stalled (flags: engine, brake, steering, plant, vcu, bus)");
+    assert_eq!(
+        o[24], 1.0,
+        "steering stalled (flags: engine, brake, steering, plant, vcu, bus)"
+    );
     assert_eq!(&o[22..24], &[0.0, 0.0]);
     sdv_step(100);
     assert_eq!(out()[27], 1.0, "bus down");

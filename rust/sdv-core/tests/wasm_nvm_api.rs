@@ -45,11 +45,22 @@ fn config_and_nvm_through_the_c_api() {
     // derived values of the running config
     sdv_derived_json();
     let d = buf();
-    assert!(d.contains("min_turn_radius_m") && d.contains("max_lateral_accel_mps2") && d.contains("turn_curve"), "{d}");
+    assert!(
+        d.contains("min_turn_radius_m")
+            && d.contains("max_lateral_accel_mps2")
+            && d.contains("turn_curve"),
+        "{d}"
+    );
 
     // steering that takes effect at a given speed (host-side input shaping)
-    assert!((sdv_max_steer_at_speed(0.0) - 0.40).abs() < 1e-6, "standstill: the mechanical limit");
-    assert!((sdv_max_steer_at_speed(1.0) - 0.40).abs() < 1e-6, "below the critical speed (1.67 m/s)");
+    assert!(
+        (sdv_max_steer_at_speed(0.0) - 0.40).abs() < 1e-6,
+        "standstill: the mechanical limit"
+    );
+    assert!(
+        (sdv_max_steer_at_speed(1.0) - 0.40).abs() < 1e-6,
+        "below the critical speed (1.67 m/s)"
+    );
     let at3 = sdv_max_steer_at_speed(3.0);
     assert!(at3 > 0.0 && at3 < 0.15, "grip-limited at 3 m/s, got {at3}");
 
@@ -72,17 +83,31 @@ fn config_and_nvm_through_the_c_api() {
     assert!(fast > slow * 1.8, "slow {slow} fast {fast}");
 
     // an invalid config is rejected, the errors are readable, nothing changes
-    assert_eq!(commit(r#"{"engine":{"max_accel_mps2":99},"safety":{"heartbeat_timeout_ms":1}}"#), 1);
+    assert_eq!(
+        commit(r#"{"engine":{"max_accel_mps2":99},"safety":{"heartbeat_timeout_ms":1}}"#),
+        1
+    );
     let e = buf();
-    assert!(e.contains("vehicle_spec.max_accel_mps2") && e.contains("tuning.safety.heartbeat_timeout_ms"), "{e}");
+    assert!(
+        e.contains("vehicle_spec.max_accel_mps2")
+            && e.contains("tuning.safety.heartbeat_timeout_ms"),
+        "{e}"
+    );
     assert_eq!(sdv_nvm_slot_status(0), 1);
 
     // second commit, then rollback
     assert_eq!(commit(r#"{"engine":{"max_accel_mps2":1.0}}"#), 0);
-    assert_eq!(sdv_nvm_slot_status(1), 1, "previous config is in the backup");
+    assert_eq!(
+        sdv_nvm_slot_status(1),
+        1,
+        "previous config is in the backup"
+    );
     assert_eq!(sdv_nvm_rollback(), 0);
     assert_eq!(sdv_boot(), 0);
-    assert!((speed_after_half_second() - fast).abs() < 1e-4, "rolled back to the 4.0 config");
+    assert!(
+        (speed_after_half_second() - fast).abs() < 1e-4,
+        "rolled back to the 4.0 config"
+    );
     assert_eq!(sdv_nvm_rollback(), 1, "no backup left");
 
     // persistence hooks: read a slot, wipe the device, restore the bytes

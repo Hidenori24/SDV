@@ -19,9 +19,15 @@ fn each_ecu_has_its_own_rte() {
     let brake = sim.rte(Node::Brake);
     assert_eq!(engine.input.throttle, 0.5);
     assert_eq!(engine.cmd.drive_accel_cmd, 1.0);
-    assert_eq!(engine.cmd.brake_decel_cmd, 0.0, "Engine ECU does not run Brake");
+    assert_eq!(
+        engine.cmd.brake_decel_cmd, 0.0,
+        "Engine ECU does not run Brake"
+    );
     assert_eq!(brake.cmd.brake_decel_cmd, 1.0);
-    assert_eq!(brake.cmd.drive_accel_cmd, 0.0, "Brake ECU does not run Engine");
+    assert_eq!(
+        brake.cmd.drive_accel_cmd, 0.0,
+        "Brake ECU does not run Engine"
+    );
 }
 
 #[test]
@@ -50,8 +56,16 @@ fn stalled_ecu_stops_sending_frames_and_plant_keeps_stale_command() {
     for _ in 0..50 {
         sim.step_10ms();
     }
-    assert_eq!(sim.rte(Node::Engine).cmd.drive_accel_cmd, 2.0, "stalled ECU does not update");
-    assert_eq!(sim.rte(Node::Plant).cmd.drive_accel_cmd, 2.0, "stale command stays on the plant");
+    assert_eq!(
+        sim.rte(Node::Engine).cmd.drive_accel_cmd,
+        2.0,
+        "stalled ECU does not update"
+    );
+    assert_eq!(
+        sim.rte(Node::Plant).cmd.drive_accel_cmd,
+        2.0,
+        "stale command stays on the plant"
+    );
 }
 
 #[test]

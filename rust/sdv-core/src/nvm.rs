@@ -60,7 +60,9 @@ impl NvmStorage for MemStorage {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SlotStatus {
     Empty,
-    Valid { seq: u32 },
+    Valid {
+        seq: u32,
+    },
     /// Wrong magic / length / CRC, or the content is not a valid config.
     Corrupt,
 }
@@ -95,7 +97,11 @@ pub fn crc32(data: &[u8]) -> u32 {
     for &b in data {
         crc ^= b as u32;
         for _ in 0..8 {
-            crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0xEDB8_8320
+            } else {
+                crc >> 1
+            };
         }
     }
     !crc
@@ -135,7 +141,11 @@ fn decode(bytes: &[u8]) -> Option<Record> {
     }
     let json = std::str::from_utf8(&bytes[HEADER..HEADER + len]).ok()?;
     let config = config::parse(json).ok()?;
-    Some(Record { seq, config, raw: bytes.to_vec() })
+    Some(Record {
+        seq,
+        config,
+        raw: bytes.to_vec(),
+    })
 }
 
 pub struct Nvm<S: NvmStorage> {
@@ -172,9 +182,21 @@ impl<S: NvmStorage> Nvm<S> {
         let (sb, rb) = self.record(Slot::Backup);
         let slots = [sa, sb];
         match (ra, rb) {
-            (Some(a), _) => Loaded { config: a.config, source: Source::Active, slots },
-            (None, Some(b)) => Loaded { config: b.config, source: Source::Backup, slots },
-            (None, None) => Loaded { config: Config::default(), source: Source::Defaults, slots },
+            (Some(a), _) => Loaded {
+                config: a.config,
+                source: Source::Active,
+                slots,
+            },
+            (None, Some(b)) => Loaded {
+                config: b.config,
+                source: Source::Backup,
+                slots,
+            },
+            (None, None) => Loaded {
+                config: Config::default(),
+                source: Source::Defaults,
+                slots,
+            },
         }
     }
 
@@ -188,7 +210,8 @@ impl<S: NvmStorage> Nvm<S> {
         if let Some(a) = ra {
             self.storage.write(Slot::Backup, a.raw);
         }
-        self.storage.write(Slot::Active, encode(seq, &config::to_json(&cfg)));
+        self.storage
+            .write(Slot::Active, encode(seq, &config::to_json(&cfg)));
         Ok(seq)
     }
 
@@ -197,8 +220,15 @@ impl<S: NvmStorage> Nvm<S> {
         let (_, ra) = self.record(Slot::Active);
         let (_, rb) = self.record(Slot::Backup);
         let b = rb.ok_or(NvmError::NoBackup)?;
-        let seq = ra.iter().map(|r| r.seq).chain(std::iter::once(b.seq)).max().unwrap_or(0) + 1;
-        self.storage.write(Slot::Active, encode(seq, &config::to_json(&b.config)));
+        let seq = ra
+            .iter()
+            .map(|r| r.seq)
+            .chain(std::iter::once(b.seq))
+            .max()
+            .unwrap_or(0)
+            + 1;
+        self.storage
+            .write(Slot::Active, encode(seq, &config::to_json(&b.config)));
         self.storage.erase(Slot::Backup);
         Ok(seq)
     }

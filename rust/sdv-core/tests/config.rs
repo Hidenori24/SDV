@@ -29,7 +29,12 @@ fn empty_object_gives_the_defaults() {
 fn json_round_trip_keeps_every_value_and_writes_schema_2() {
     let c = Config::default();
     let json = config::to_json(&c);
-    assert!(json.contains("\"schema\": 2") && json.contains("vehicle_spec") && json.contains("physics") && json.contains("tuning"));
+    assert!(
+        json.contains("\"schema\": 2")
+            && json.contains("vehicle_spec")
+            && json.contains("physics")
+            && json.contains("tuning")
+    );
     assert_eq!(config::parse(&json).unwrap(), c);
 }
 
@@ -37,7 +42,10 @@ fn json_round_trip_keeps_every_value_and_writes_schema_2() {
 fn missing_fields_fall_back_to_defaults() {
     let c = config::parse(r#"{"vehicle_spec":{"max_accel_mps2":4.0}}"#).unwrap();
     assert_eq!(c.vehicle_spec.max_accel_mps2, 4.0);
-    assert_eq!(c.vehicle_spec.wheelbase_m, Config::default().vehicle_spec.wheelbase_m);
+    assert_eq!(
+        c.vehicle_spec.wheelbase_m,
+        Config::default().vehicle_spec.wheelbase_m
+    );
     assert_eq!(c.physics, Config::default().physics);
     assert_eq!(c.tuning, Config::default().tuning);
 }
@@ -75,10 +83,17 @@ fn every_range_violation_is_reported_with_its_v2_path() {
     }"#;
     let p = paths(json);
     for want in [
-        "vehicle_spec.max_accel_mps2", "vehicle_spec.max_steer_angle_rad", "vehicle_spec.steer_time_constant_s",
-        "vehicle_spec.wheel_radius_m", "vehicle_spec.top_speed_mps",
-        "physics.gravity_mps2", "physics.tire_friction_mu", "physics.drag_coeff",
-        "tuning.safety.heartbeat_timeout_ms", "tuning.failsafe.driver_timeout_ms", "tuning.failsafe.safety_timeout_ms",
+        "vehicle_spec.max_accel_mps2",
+        "vehicle_spec.max_steer_angle_rad",
+        "vehicle_spec.steer_time_constant_s",
+        "vehicle_spec.wheel_radius_m",
+        "vehicle_spec.top_speed_mps",
+        "physics.gravity_mps2",
+        "physics.tire_friction_mu",
+        "physics.drag_coeff",
+        "tuning.safety.heartbeat_timeout_ms",
+        "tuning.failsafe.driver_timeout_ms",
+        "tuning.failsafe.safety_timeout_ms",
     ] {
         assert!(p.contains(&want.to_string()), "missing {want} in {p:?}");
     }
@@ -86,7 +101,8 @@ fn every_range_violation_is_reported_with_its_v2_path() {
 
 #[test]
 fn estop_decel_must_not_be_weaker_than_normal_braking() {
-    let p = paths(r#"{"vehicle_spec":{"max_decel_mps2":6.0},"tuning":{"estop_max_decel_mps2":4.0}}"#);
+    let p =
+        paths(r#"{"vehicle_spec":{"max_decel_mps2":6.0},"tuning":{"estop_max_decel_mps2":4.0}}"#);
     assert_eq!(p, vec!["tuning.estop_max_decel_mps2"]);
 }
 
@@ -116,9 +132,15 @@ fn range_boundaries_are_accepted() {
 fn failsafe_milliseconds_become_ticks() {
     let f = Config::default().failsafe_params();
     assert_eq!((f.driver_timeout_ticks, f.safety_timeout_ticks), (20, 10));
-    let c = config::parse(r#"{"tuning":{"failsafe":{"driver_timeout_ms":55,"safety_timeout_ms":35}}}"#).unwrap();
+    let c =
+        config::parse(r#"{"tuning":{"failsafe":{"driver_timeout_ms":55,"safety_timeout_ms":35}}}"#)
+            .unwrap();
     let f = c.failsafe_params();
-    assert_eq!((f.driver_timeout_ticks, f.safety_timeout_ticks), (6, 4), "rounded up to whole ticks");
+    assert_eq!(
+        (f.driver_timeout_ticks, f.safety_timeout_ticks),
+        (6, 4),
+        "rounded up to whole ticks"
+    );
 }
 
 // ---- schema 1 is converted automatically ----
@@ -138,15 +160,35 @@ fn schema_1_documents_are_converted_to_schema_2() {
     let c = config::parse(v1).unwrap();
     assert_eq!(c.schema, 2);
     let (s, p, t) = (&c.vehicle_spec, &c.physics, &c.tuning);
-    assert_eq!((s.max_accel_mps2, s.max_decel_mps2, t.estop_max_decel_mps2), (3.0, 5.0, 7.0));
-    assert_eq!((s.max_steer_angle_rad, s.steer_time_constant_s), (0.35, 0.2));
-    assert_eq!((s.wheel_radius_m, s.wheelbase_m, s.top_speed_mps, s.estop_decel_mps2), (0.04, 0.25, 4.0, 8.0));
+    assert_eq!(
+        (s.max_accel_mps2, s.max_decel_mps2, t.estop_max_decel_mps2),
+        (3.0, 5.0, 7.0)
+    );
+    assert_eq!(
+        (s.max_steer_angle_rad, s.steer_time_constant_s),
+        (0.35, 0.2)
+    );
+    assert_eq!(
+        (
+            s.wheel_radius_m,
+            s.wheelbase_m,
+            s.top_speed_mps,
+            s.estop_decel_mps2
+        ),
+        (0.04, 0.25, 4.0, 8.0)
+    );
     assert_eq!(p.drag_coeff, 0.3);
     assert_eq!(t.safety.heartbeat_timeout_ms, 1500);
-    assert_eq!((t.failsafe.driver_timeout_ms, t.failsafe.safety_timeout_ms), (300, 150));
+    assert_eq!(
+        (t.failsafe.driver_timeout_ms, t.failsafe.safety_timeout_ms),
+        (300, 150)
+    );
     // new schema 2 fields take their defaults
     assert_eq!(p.gravity_mps2, Config::default().physics.gravity_mps2);
-    assert_eq!(p.tire_friction_mu, Config::default().physics.tire_friction_mu);
+    assert_eq!(
+        p.tire_friction_mu,
+        Config::default().physics.tire_friction_mu
+    );
 }
 
 #[test]
@@ -166,7 +208,10 @@ fn schema_1_is_still_validated_and_unknown_keys_are_still_rejected() {
     assert!(!errs(r#"{"schema":1,"engnie":{}}"#).is_empty());
     assert!(!errs(r#"{"engine":{"max_acel_mps2":1.0}}"#).is_empty());
     // range errors are reported with the schema 2 path of the converted value
-    assert_eq!(paths(r#"{"engine":{"max_accel_mps2":99.0}}"#), vec!["vehicle_spec.max_accel_mps2"]);
+    assert_eq!(
+        paths(r#"{"engine":{"max_accel_mps2":99.0}}"#),
+        vec!["vehicle_spec.max_accel_mps2"]
+    );
     assert_eq!(
         paths(r#"{"brake":{"max_decel_mps2":6.0,"estop_max_decel_mps2":4.0}}"#),
         vec!["tuning.estop_max_decel_mps2"]
@@ -176,7 +221,9 @@ fn schema_1_is_still_validated_and_unknown_keys_are_still_rejected() {
 #[test]
 fn mixing_schema_1_keys_with_schema_2_keys_is_rejected() {
     assert!(!errs(r#"{"schema":2,"engine":{"max_accel_mps2":3.0}}"#).is_empty());
-    assert!(!errs(r#"{"engine":{"max_accel_mps2":3.0},"physics":{"tire_friction_mu":0.5}}"#).is_empty());
+    assert!(
+        !errs(r#"{"engine":{"max_accel_mps2":3.0},"physics":{"tire_friction_mu":0.5}}"#).is_empty()
+    );
 }
 
 // ---- derived values ----
@@ -186,15 +233,22 @@ fn derived_values_follow_from_spec_and_physics() {
     let d = Config::default().derived();
     assert!((d.min_turn_radius_m - 0.20 / 0.40f32.tan()).abs() < 1e-5);
     assert!((d.max_lateral_accel_mps2 - 0.6 * 9.81).abs() < 1e-5);
-    assert!((d.critical_speed_mps - (d.max_lateral_accel_mps2 * d.min_turn_radius_m).sqrt()).abs() < 1e-5);
+    assert!(
+        (d.critical_speed_mps - (d.max_lateral_accel_mps2 * d.min_turn_radius_m).sqrt()).abs()
+            < 1e-5
+    );
 }
 
 #[test]
 fn derived_values_change_with_the_car_and_the_surface() {
     let base = Config::default().derived();
-    let long = config::parse(r#"{"vehicle_spec":{"wheelbase_m":0.40}}"#).unwrap().derived();
+    let long = config::parse(r#"{"vehicle_spec":{"wheelbase_m":0.40}}"#)
+        .unwrap()
+        .derived();
     assert!((long.min_turn_radius_m - 2.0 * base.min_turn_radius_m).abs() < 1e-5);
-    let grippy = config::parse(r#"{"physics":{"tire_friction_mu":1.2}}"#).unwrap().derived();
+    let grippy = config::parse(r#"{"physics":{"tire_friction_mu":1.2}}"#)
+        .unwrap()
+        .derived();
     assert!((grippy.max_lateral_accel_mps2 - 2.0 * base.max_lateral_accel_mps2).abs() < 1e-4);
 }
 
@@ -246,7 +300,9 @@ fn full_lock_yaw_rate(cfg: &Config, throttle: f32, ticks: usize) -> f32 {
 fn steering_spec_changes_the_turn_rate() {
     // slow (below the critical speed) so the grip limit does not interfere
     let normal = config::parse(r#"{"vehicle_spec":{"top_speed_mps":1.0}}"#).unwrap();
-    let small = config::parse(r#"{"vehicle_spec":{"top_speed_mps":1.0,"max_steer_angle_rad":0.1}}"#).unwrap();
+    let small =
+        config::parse(r#"{"vehicle_spec":{"top_speed_mps":1.0,"max_steer_angle_rad":0.1}}"#)
+            .unwrap();
     assert!(full_lock_yaw_rate(&normal, 1.0, 800) > full_lock_yaw_rate(&small, 1.0, 800) * 3.0);
 }
 
@@ -265,7 +321,10 @@ fn tyre_friction_limits_the_turn_at_speed() {
 fn low_speed_turning_is_not_affected_by_the_friction() {
     // slow: stays below the critical speed (1.67 m/s) the whole time
     let slow = config::parse(r#"{"vehicle_spec":{"top_speed_mps":1.0}}"#).unwrap();
-    let slippery = config::parse(r#"{"vehicle_spec":{"top_speed_mps":1.0},"physics":{"tire_friction_mu":0.3}}"#).unwrap();
+    let slippery = config::parse(
+        r#"{"vehicle_spec":{"top_speed_mps":1.0},"physics":{"tire_friction_mu":0.3}}"#,
+    )
+    .unwrap();
     let a = full_lock_yaw_rate(&slow, 1.0, 800);
     assert!((a - full_lock_yaw_rate(&slippery, 1.0, 800)).abs() < 1e-5);
     assert!((a - (1.0 / 0.20) * 0.40f32.tan()).abs() < 0.05);
@@ -274,7 +333,8 @@ fn low_speed_turning_is_not_affected_by_the_friction() {
 #[test]
 fn the_physical_turn_radius_follows_the_wheelbase() {
     // a longer car turns wider at the same speed and steering
-    let long = config::parse(r#"{"vehicle_spec":{"wheelbase_m":0.40,"top_speed_mps":1.0}}"#).unwrap();
+    let long =
+        config::parse(r#"{"vehicle_spec":{"wheelbase_m":0.40,"top_speed_mps":1.0}}"#).unwrap();
     let short = config::parse(r#"{"vehicle_spec":{"top_speed_mps":1.0}}"#).unwrap();
     assert!(full_lock_yaw_rate(&short, 1.0, 800) > full_lock_yaw_rate(&long, 1.0, 800) * 1.8);
 }
@@ -332,5 +392,9 @@ fn set_config_restarts_the_sim_and_keeps_the_scenario_flag() {
     }
     assert!(s.input().throttle > 0.0, "scenario still active");
     s.reset();
-    assert_eq!(s.config().vehicle_spec.max_accel_mps2, 4.0, "reset keeps the config");
+    assert_eq!(
+        s.config().vehicle_spec.max_accel_mps2,
+        4.0,
+        "reset keeps the config"
+    );
 }

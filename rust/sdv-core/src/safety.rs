@@ -19,11 +19,19 @@ pub struct SafetySupervisor {
 
 impl SafetySupervisor {
     pub fn new() -> Self {
-        Self { params: SafetyParams::default(), monitors: [HeartbeatMonitor::default(); 4], latched_estop: false }
+        Self {
+            params: SafetyParams::default(),
+            monitors: [HeartbeatMonitor::default(); 4],
+            latched_estop: false,
+        }
     }
 
     pub fn with_params(params: SafetyParams) -> Self {
-        Self { params, monitors: [HeartbeatMonitor::default(); 4], latched_estop: false }
+        Self {
+            params,
+            monitors: [HeartbeatMonitor::default(); 4],
+            latched_estop: false,
+        }
     }
 
     pub fn reset(&mut self) {
@@ -32,9 +40,15 @@ impl SafetySupervisor {
 
     /// Per-SWC liveness as of the last `main_100ms` call: [engine, brake, steering, vehicledynamics].
     pub fn status(&self) -> [SwcStatus; 4] {
-        let mut out = [SwcStatus { alive: true, silent_ms: 0 }; 4];
+        let mut out = [SwcStatus {
+            alive: true,
+            silent_ms: 0,
+        }; 4];
         for (o, m) in out.iter_mut().zip(&self.monitors) {
-            *o = SwcStatus { alive: m.silent_ms <= self.params.heartbeat_timeout_ms, silent_ms: m.silent_ms };
+            *o = SwcStatus {
+                alive: m.silent_ms <= self.params.heartbeat_timeout_ms,
+                silent_ms: m.silent_ms,
+            };
         }
         out
     }
@@ -42,7 +56,12 @@ impl SafetySupervisor {
     /// One 100 ms cycle. `alive` = alive counters of [engine, brake, steering, vehicledynamics];
     /// `estop_request` is the external request (UI / hardware).
     /// Returns the new `(estop, system_state)`.
-    pub fn main_100ms(&mut self, alive: [u64; 4], dt_ms: u32, estop_request: bool) -> (bool, SafetyState) {
+    pub fn main_100ms(
+        &mut self,
+        alive: [u64; 4],
+        dt_ms: u32,
+        estop_request: bool,
+    ) -> (bool, SafetyState) {
         let p = self.params;
         let mut ok = [true; 4];
         for (i, m) in self.monitors.iter_mut().enumerate() {

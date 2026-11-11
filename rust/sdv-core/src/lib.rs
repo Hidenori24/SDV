@@ -13,8 +13,8 @@ pub mod platform_sim;
 pub mod rte;
 pub mod runtime;
 pub mod runtime_host;
-pub mod scenario;
 pub mod safety;
+pub mod scenario;
 pub mod sim;
 pub mod swc;
 
@@ -40,7 +40,11 @@ fn set_buf(bytes: Vec<u8>) {
 }
 
 fn slot_of(i: i32) -> Slot {
-    if i == 0 { Slot::Active } else { Slot::Backup }
+    if i == 0 {
+        Slot::Active
+    } else {
+        Slot::Backup
+    }
 }
 
 fn with_sim<R>(f: impl FnOnce(&mut Sim) -> R) -> R {
@@ -56,14 +60,29 @@ fn with_sim<R>(f: impl FnOnce(&mut Sim) -> R) -> R {
 ///  injected faults: stalled[engine, brake, steering, plant, vcu], bus_down]  (1.0 = active)
 pub const OUT_LEN: usize = 28;
 
-fn publish(row: &Row, status: &[safety::SwcStatus; 4], failsafe: &[failsafe::FailsafeStatus; 3], faults: &[f32; 6]) {
+fn publish(
+    row: &Row,
+    status: &[safety::SwcStatus; 4],
+    failsafe: &[failsafe::FailsafeStatus; 3],
+    faults: &[f32; 6],
+) {
     let mut o = OUT.lock().unwrap();
     o[..15].copy_from_slice(&[
-        row.state.t, row.state.x, row.state.y, row.state.yaw, row.state.v,
-        row.state.yaw_rate, row.state.wheel_omega,
-        row.input.throttle, row.input.brake, row.input.steer,
-        row.cmd.drive_accel_cmd, row.cmd.brake_decel_cmd, row.cmd.steer_angle_cmd,
-        row.safety.estop as u8 as f32, row.safety.system_state as u8 as f32,
+        row.state.t,
+        row.state.x,
+        row.state.y,
+        row.state.yaw,
+        row.state.v,
+        row.state.yaw_rate,
+        row.state.wheel_omega,
+        row.input.throttle,
+        row.input.brake,
+        row.input.steer,
+        row.cmd.drive_accel_cmd,
+        row.cmd.brake_decel_cmd,
+        row.cmd.steer_angle_cmd,
+        row.safety.estop as u8 as f32,
+        row.safety.system_state as u8 as f32,
     ]);
     for (i, st) in status.iter().enumerate() {
         o[15 + i] = st.silent_ms as f32;
@@ -260,7 +279,14 @@ pub extern "C" fn sdv_derived_json_for(ptr: *const u8, n: i32) -> i32 {
             0
         }
         Err(errors) => {
-            set_buf(errors.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n").into_bytes());
+            set_buf(
+                errors
+                    .iter()
+                    .map(|e| e.to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    .into_bytes(),
+            );
             1
         }
     }
@@ -282,7 +308,11 @@ pub extern "C" fn sdv_nvm_commit(ptr: *const u8, n: i32) -> i32 {
     match with_nvm(|nvm| nvm.commit(json)) {
         Ok(_) => 0,
         Err(nvm::NvmError::Invalid(errors)) => {
-            let text = errors.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n");
+            let text = errors
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
             set_buf(text.into_bytes());
             1
         }
@@ -365,7 +395,11 @@ pub extern "C" fn sdv_set_scenario(ptr: *const u8, n: i32) -> i32 {
             0
         }
         Err(errors) => {
-            let text = errors.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n");
+            let text = errors
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
             set_buf(text.into_bytes());
             1
         }

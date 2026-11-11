@@ -33,10 +33,7 @@ impl Clock for SystemClock {
 
 #[derive(Debug)]
 pub enum RunError<E> {
-    Cycle {
-        source: E,
-        stop_error: Option<E>,
-    },
+    Cycle { source: E, stop_error: Option<E> },
     DeadlineMissed { stop_error: Option<E> },
     ClockOverflow { stop_error: Option<E> },
     Stop(E),

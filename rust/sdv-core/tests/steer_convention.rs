@@ -17,8 +17,17 @@ fn drive(steer: f32) -> Sim {
 #[test]
 fn positive_steer_turns_left() {
     let s = drive(0.5);
-    assert!(s.state().yaw > 0.0 && s.state().yaw_rate > 0.0, "yaw={} rate={}", s.state().yaw, s.state().yaw_rate);
-    assert!(s.state().y > 0.0, "left turn from heading +x must move toward +y, y={}", s.state().y);
+    assert!(
+        s.state().yaw > 0.0 && s.state().yaw_rate > 0.0,
+        "yaw={} rate={}",
+        s.state().yaw,
+        s.state().yaw_rate
+    );
+    assert!(
+        s.state().y > 0.0,
+        "left turn from heading +x must move toward +y, y={}",
+        s.state().y
+    );
 }
 
 #[test]

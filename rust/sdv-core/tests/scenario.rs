@@ -29,8 +29,16 @@ fn check_against(golden: &str, rows: &[Row]) {
         let gv: Vec<f32> = gl.split(',').map(|s| s.parse().unwrap()).collect();
         let rv: Vec<f32> = r.to_csv().split(',').map(|s| s.parse().unwrap()).collect();
         for (k, (a, b)) in gv.iter().zip(&rv).enumerate() {
-            let tol = match k { 7 | 8 => 3e-3, 9 => 2e-4, _ => 2e-3 };
-            assert!((a - b).abs() <= tol, "row {n} col {k}: cpp={a} rust={b}\n  cpp : {gl}\n  rust: {}", r.to_csv());
+            let tol = match k {
+                7 | 8 => 3e-3,
+                9 => 2e-4,
+                _ => 2e-3,
+            };
+            assert!(
+                (a - b).abs() <= tol,
+                "row {n} col {k}: cpp={a} rust={b}\n  cpp : {gl}\n  rust: {}",
+                r.to_csv()
+            );
         }
     }
 }
@@ -73,38 +81,68 @@ fn unknown_fields_and_bad_json_are_rejected() {
 
 #[test]
 fn ranges_and_ordering_are_validated_with_paths() {
-    let p = errs(r#"{"steps":[{"until_s":2.0,"throttle":1.5},{"until_s":1.0,"steer":-3.0}],"after":{"brake":2.0}}"#);
-    for want in ["steps[0].throttle", "steps[1].until_s", "steps[1].steer", "after.brake"] {
+    let p = errs(
+        r#"{"steps":[{"until_s":2.0,"throttle":1.5},{"until_s":1.0,"steer":-3.0}],"after":{"brake":2.0}}"#,
+    );
+    for want in [
+        "steps[0].throttle",
+        "steps[1].until_s",
+        "steps[1].steer",
+        "after.brake",
+    ] {
         assert!(p.contains(&want.to_string()), "missing {want} in {p:?}");
     }
-    assert_eq!(errs(r#"{"steps":[{"until_s":0.0}]}"#), vec!["steps[0].until_s"]);
+    assert_eq!(
+        errs(r#"{"steps":[{"until_s":0.0}]}"#),
+        vec!["steps[0].until_s"]
+    );
     assert_eq!(errs(r#"{"schema":9}"#), vec!["schema"]);
 }
 
 #[test]
 fn events_need_a_target_exactly_when_the_action_has_one() {
-    assert_eq!(errs(r#"{"events":[{"at_s":1.0,"action":"stall"}]}"#), vec!["events[0].target"]);
-    assert_eq!(errs(r#"{"events":[{"at_s":1.0,"action":"estop","target":"engine"}]}"#), vec!["events[0].target"]);
+    assert_eq!(
+        errs(r#"{"events":[{"at_s":1.0,"action":"stall"}]}"#),
+        vec!["events[0].target"]
+    );
+    assert_eq!(
+        errs(r#"{"events":[{"at_s":1.0,"action":"estop","target":"engine"}]}"#),
+        vec!["events[0].target"]
+    );
     assert!(errs(r#"{"events":[{"at_s":1.0,"action":"stall","target":"engine"},{"at_s":2.0,"action":"bus_down"}]}"#).is_empty());
-    assert_eq!(errs(r#"{"events":[{"at_s":-1.0,"action":"estop"}]}"#), vec!["events[0].at_s"]);
+    assert_eq!(
+        errs(r#"{"events":[{"at_s":-1.0,"action":"estop"}]}"#),
+        vec!["events[0].at_s"]
+    );
 }
 
 #[test]
 fn size_limits_are_enforced() {
-    let steps: Vec<String> = (1..=65).map(|i| format!(r#"{{"until_s":{i}.0}}"#)).collect();
-    assert_eq!(errs(&format!(r#"{{"steps":[{}]}}"#, steps.join(","))), vec!["steps"]);
+    let steps: Vec<String> = (1..=65)
+        .map(|i| format!(r#"{{"until_s":{i}.0}}"#))
+        .collect();
+    assert_eq!(
+        errs(&format!(r#"{{"steps":[{}]}}"#, steps.join(","))),
+        vec!["steps"]
+    );
 }
 
 // ---- running a scenario ----
 
 #[test]
 fn a_custom_scenario_drives_the_inputs() {
-    let rows = run(r#"{"steps":[{"until_s":1.0,"throttle":1.0},{"until_s":2.0,"brake":1.0}]}"#, 300);
+    let rows = run(
+        r#"{"steps":[{"until_s":1.0,"throttle":1.0},{"until_s":2.0,"brake":1.0}]}"#,
+        300,
+    );
     let at = |i: usize| rows[i].input;
     assert_eq!(at(50).throttle, 1.0);
     assert_eq!(at(150).brake, 1.0);
     assert_eq!(at(150).throttle, 0.0);
-    assert!(rows[99].state.v > 1.5, "accelerating during the first second");
+    assert!(
+        rows[99].state.v > 1.5,
+        "accelerating during the first second"
+    );
     assert!(rows[299].state.v < 0.01, "braking afterwards stops the car");
 }
 
@@ -157,7 +195,8 @@ fn bus_and_vcu_events_cause_the_ecu_failsafe() {
 
 #[test]
 fn reset_replays_the_scenario_including_its_events() {
-    let json = r#"{"steps":[{"until_s":10.0,"throttle":0.5}],"events":[{"at_s":1.0,"action":"estop"}]}"#;
+    let json =
+        r#"{"steps":[{"until_s":10.0,"throttle":0.5}],"events":[{"at_s":1.0,"action":"estop"}]}"#;
     let mut sim = Sim::new();
     sim.set_scenario(scenario::parse(json).unwrap());
     sim.set_use_scenario(true);
@@ -184,7 +223,10 @@ fn demo_scenario_json_reproduces_the_cpp_log() {
 #[test]
 fn json_events_reproduce_the_cpp_fault_injection_logs() {
     let cases = [
-        (r#"{"action":"stall","target":"brake","at_s":2.0}"#, include_str!("golden/cpp_stall_brake2.csv")),
+        (
+            r#"{"action":"stall","target":"brake","at_s":2.0}"#,
+            include_str!("golden/cpp_stall_brake2.csv"),
+        ),
         (
             r#"{"action":"stall","target":"steering","at_s":3.0},{"action":"stall","target":"brake","at_s":3.5}"#,
             include_str!("golden/cpp_stall_steering3_brake3.5.csv"),
