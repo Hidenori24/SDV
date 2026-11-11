@@ -67,7 +67,7 @@ sudo chmod 0644 /etc/sdv-fota/trusted-keys</code></pre>
   </section>
   <section class="card">
     <h2>更新と試験起動</h2>
-    <p>リリース環境でパッケージを作成し、Piで署名済みパッケージを導入します。atomic stagingでは現在のactive image、既存のinactive image、新しいstaging imageが一時的に同時に存在します。SDV領域は最大image 3個分とfilesystem overheadを確保してください。更新開始前に空き容量を確認し、imageサイズと1 MiBのmetadata reserveを満たさない場合はstagingを始めません。</p>
+    <p>リリース環境でパッケージを作成し、Piで署名済みパッケージを導入します。vehicle imageと各virtual ECUのA/B slotは同じSDV領域を共有します。全targetのslot imageに加え、最大image 1個分とfilesystem overheadを確保してください。本番backendはvolume単位のupdate lockでstageとcandidate確認を直列化します。更新開始前に空き容量を確認し、incoming imageサイズと1 MiBのmetadata reserveを満たさない場合はstagingを始めません。</p>
 <pre><code>chmod 0600 /secure/release.seed
 sdv-fota-sign --seed /secure/release.seed --key-id release-2026 --target vehicle \
   --version 1.1.0 --security-version 2 --trial-ms 5000 --config-schema 1 \

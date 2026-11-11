@@ -36,11 +36,14 @@ The mount unit expects `/dev/disk/by-label/SDV_FOTA` and mounts it at `/var/lib/
 `nodev,nosuid`; executable application images remain enabled. Confirm that `findmnt` shows the
 intended SD card or SSD partition before running the manual `sdv-fota` commands below.
 
-An update temporarily keeps the current active image, the previous inactive image, and the incoming
-image at once so the inactive slot is replaced atomically. Size the volume for both slots plus a
-third image-sized staging file and filesystem overhead. Before creating the staging file, the Linux
-backend checks that available space covers the incoming image plus a 1 MiB metadata reserve; an
-insufficient-volume error reports the required and available bytes without starting the write.
+The vehicle image and each virtual ECU have separate A/B roots on this shared volume. Atomic
+replacement temporarily keeps each target's active and previous inactive image while writing the
+incoming image. Size the volume for both retained slots of every configured target, one additional
+maximum-sized staging image, and filesystem overhead. The production backend uses a volume-wide
+update lock so only one target can stage or hold a candidate commit lock at a time. Before creating
+the staging file, it checks that available space covers the incoming image plus a 1 MiB metadata
+reserve; an insufficient-volume error reports the required and available bytes without starting the
+write.
 
 ## Build
 

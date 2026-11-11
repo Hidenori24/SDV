@@ -367,7 +367,7 @@ impl FileSlotStorage {
         if self.update_lock.is_some() {
             return Err(Error::UpdateInProgress);
         }
-        self.update_lock = Some(acquire_update_lock(&self.root)?);
+        self.update_lock = Some(acquire_update_lock(update_lock_root(&self.root))?);
         Ok(())
     }
 
@@ -429,7 +429,7 @@ impl ImageStorage for FileSlotStorage {
         }
         ensure_secure_directory(&self.root, true)?;
         let new_lock = if self.update_lock.is_none() {
-            Some(acquire_update_lock(&self.root)?)
+            Some(acquire_update_lock(update_lock_root(&self.root))?)
         } else {
             None
         };
@@ -555,6 +555,15 @@ fn acquire_update_lock(root: &Path) -> Result<File, Error> {
         } else {
             Err(Error::Io(error))
         }
+    }
+}
+
+fn update_lock_root(state_root: &Path) -> &Path {
+    let volume_root = Path::new(DEFAULT_FOTA_DATA_ROOT);
+    if state_root.starts_with(volume_root) {
+        volume_root
+    } else {
+        state_root
     }
 }
 
@@ -2017,6 +2026,17 @@ mod output_hold_fd_tests {
                 available_bytes: available,
             }) if required == required_bytes && available == required_bytes - 1
         ));
+    }
+
+    #[test]
+    fn default_vehicle_and_ecu_targets_share_one_update_lock_root() {
+        let volume = Path::new(super::DEFAULT_FOTA_DATA_ROOT);
+        assert_eq!(super::update_lock_root(&volume.join("ecus/engine")), volume);
+        assert_eq!(super::update_lock_root(volume), volume);
+        assert_eq!(
+            super::update_lock_root(Path::new("/tmp/fota-test/ecus/engine")),
+            Path::new("/tmp/fota-test/ecus/engine")
+        );
     }
 
     #[test]

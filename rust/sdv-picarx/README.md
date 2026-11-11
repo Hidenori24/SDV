@@ -193,9 +193,11 @@ For Pi deployment, mount a dedicated ext4 partition labeled `SDV_FOTA` at `/var/
 the Linux FOTA backend also rejects the default state root when it is only a directory on the OS
 filesystem. Confirm the source with `findmnt --mountpoint /var/lib/sdv-fota` before running manual
 FOTA commands.
-The installer checks that free space covers the incoming image plus a 1 MiB metadata reserve before
-it creates a staging file. Because atomic replacement retains the prior inactive image while it
-writes, provision room for both slots and one additional maximum-sized image.
+The vehicle image and every virtual ECU share this volume but keep separate A/B roots. Provision
+space for both retained slots of each configured target, one additional maximum-sized image, and
+filesystem overhead. The production backend serializes staging and candidate verification with a
+volume-wide update lock. Before creating a staging file, it checks that free space covers the
+incoming image plus a 1 MiB metadata reserve.
 
 Install and enable the worker units after initializing an active image in each ECU state root and
 installing the target-aware FOTA launcher configuration:
