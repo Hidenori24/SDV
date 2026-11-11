@@ -24,4 +24,4 @@ cd web && python3 -m http.server 8000   # http://localhost:8000
 `.github/workflows/pages.yml` が `main` への push で WASM をビルドして公開します。
 初回のみ、リポジトリの Settings → Pages → Build and deployment → Source を **GitHub Actions** にしてください。
 
-トップページの「FOTA（Pi 5/Linux）」から、ホスト側FOTAの開発プレビューと初期セットアップ手順を確認できます。ブラウザシミュレータ内での更新機能ではなく、Pi 5/Linux向けのA/Bアプリ更新フローの説明です。
+トップページから「FOTAデモ」と「FOTA実装・手順」を開けます。FOTAデモでは仮想Steering ECUの定数・ロジック変更、A/B staging、試験起動、commit/rollbackをブラウザ内で体験できます。実Piや実ECUには接続しない説明用シミュレーションです。実装・手順ページにはPi 5/Linux向けのA/Bアプリ更新経路を記載しています。
