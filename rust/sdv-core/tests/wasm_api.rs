@@ -37,7 +37,7 @@ fn c_api_exposes_bus_faults_vcu_stall_and_failsafe_flags() {
     sdv_set_vcu_stall(1);
     sdv_step(500);
     assert_eq!(out()[4], 0.0, "stopped");
-    assert_eq!(out()[19 + 0] as u32 & 2, 2);
+    assert_eq!(out()[19] as u32 & 2, 2);
 
     // reset clears the injected faults
     sdv_reset();

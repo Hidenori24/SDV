@@ -16,7 +16,7 @@ fn set_scenario(json: &str) -> i32 {
     let p = sdv_alloc(b.len() as i32);
     unsafe { std::ptr::copy_nonoverlapping(b.as_ptr(), p, b.len()) };
     let r = sdv_set_scenario(p, b.len() as i32);
-    sdv_free(p, b.len() as i32);
+    unsafe { sdv_free(p, b.len() as i32) };
     r
 }
 
@@ -67,5 +67,5 @@ fn scenario_and_state_flags_through_the_c_api() {
     sdv_reset();
     sdv_step(10);
     assert_eq!(&out()[22..28], &[0.0; 6]);
-    assert_eq!(out()[4] > 0.0, true);
+    assert!(out()[4] > 0.0);
 }

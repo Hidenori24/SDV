@@ -334,7 +334,7 @@ impl VehicleRuntime {
         }
         self.deliver();
 
-        if self.vcu.enabled && tick % 10 == 0 {
+        if self.vcu.enabled && tick.is_multiple_of(10) {
             self.vcu.swc.main_100ms(&mut self.vcu.rte, 100);
         }
 
@@ -503,9 +503,11 @@ mod tests {
                 brake: if cycle % 60 < 30 { 0.0 } else { 0.2 },
                 steer: if cycle % 40 < 20 { 0.1 } else { -0.1 },
             };
-            let mut state = VehicleState::default();
-            state.t = cycle as f32 * ECU_STEP_S;
-            state.v = input.throttle - input.brake;
+            let state = VehicleState {
+                t: cycle as f32 * ECU_STEP_S,
+                v: input.throttle - input.brake,
+                ..Default::default()
+            };
             local.set_estop_request(cycle == 180);
             dispatched.set_estop_request(cycle == 180);
 

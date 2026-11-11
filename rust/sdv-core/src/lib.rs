@@ -182,10 +182,11 @@ pub extern "C" fn sdv_alloc(n: i32) -> *mut u8 {
     p
 }
 
-/// # Safety contract
-/// `ptr` / `n` must be a pair previously returned by / passed to `sdv_alloc`.
+/// # Safety
+/// `ptr` / `n` must be a pair previously returned by / passed to `sdv_alloc` (or `ptr` null), and not freed twice.
+/// The WASM host calls this through the C ABI, where the signature is the same either way.
 #[no_mangle]
-pub extern "C" fn sdv_free(ptr: *mut u8, n: i32) {
+pub unsafe extern "C" fn sdv_free(ptr: *mut u8, n: i32) {
     if !ptr.is_null() && n >= 0 {
         // SAFETY: the pair comes from `sdv_alloc`, which leaked a Vec of exactly this length/capacity.
         unsafe { drop(Vec::from_raw_parts(ptr, n as usize, n as usize)) }

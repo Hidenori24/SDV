@@ -178,7 +178,6 @@ pub fn validate(s: &Scenario) -> Vec<ConfigError> {
             prev = st.until_s;
         }
     }
-    drop(err);
     for (i, st) in s.steps.iter().enumerate() {
         level_errors(&format!("steps[{i}]"), st.throttle, st.brake, st.steer, &mut out);
     }

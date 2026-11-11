@@ -26,7 +26,7 @@ fn with_text<R>(s: &str, f: impl FnOnce(*const u8, i32) -> R) -> R {
     let p = sdv_alloc(s.len() as i32);
     unsafe { std::ptr::copy_nonoverlapping(s.as_ptr(), p, s.len()) };
     let r = f(p, s.len() as i32);
-    sdv_free(p, s.len() as i32);
+    unsafe { sdv_free(p, s.len() as i32) };
     r
 }
 

@@ -327,10 +327,10 @@ impl Sim {
 
         // Phase 3: VCU tasks (see the sensor values and alive counters of this tick)
         if !self.vcu.stalled {
-            if i % 2 == 0 && self.use_scenario {
+            if i.is_multiple_of(2) && self.use_scenario {
                 DriverInputSwc::main_20ms_scenario(&mut self.vcu.rte, &self.scenario);
             }
-            if i % 10 == 0 {
+            if i.is_multiple_of(10) {
                 self.vcu.safety_swc.main_100ms(&mut self.vcu.rte, DT_100MS_MS);
             }
         }
