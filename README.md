@@ -104,6 +104,7 @@ tools/      図の生成・可視化などの補助スクリプト
 - [docs/design/fota-pi5-operations.md](docs/design/fota-pi5-operations.md) : Pi 5 FOTA運用。positional launcherはvehicle root専用、ECU target-aware launchはactive slot専用
 - [rust/README.md](rust/README.md) : Rust 実装の構成・WASM API
 - [rust/sdv-sec/README.md](rust/sdv-sec/README.md) : 通信の基礎ライブラリ（SHA-256・Ed25519 検証・フレーム MAC、C ABI）
+- [rust/sdv-fota/README.md](rust/sdv-fota/README.md) : FOTA（署名済みパッケージの検証、A/B 更新、trial / commit / rollback、Pi 5 の導入・起動、Classic 向け C ABI）
 - [rust/sdv-picarx/README.md](rust/sdv-picarx/README.md) : PiCar-X プラットフォーム（Robot HAT・車両ホスト・仮想 ECU ワーカー）
 - [docs/design/fota_classic_architecture.md](docs/design/fota_classic_architecture.md) : AUTOSAR Classic を基準にした ECU / FOTA の責務境界案
 - [tests/integration/README.md](tests/integration/README.md) : 結合テスト（シナリオ + 期待値。ビルド済みの WASM を Node で実行）
