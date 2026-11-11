@@ -188,15 +188,29 @@ centered steering on every cycle. Candidate failures do not release the hold; no
 in this slice. The coordinator still fails closed if an active worker is missing or returns an
 invalid response.
 
+For Pi deployment, mount a dedicated ext4 partition labeled `SDV_FOTA` at `/var/lib/sdv-fota` using
+`deploy/systemd/var-lib-sdv\x2dfota.mount`. The launcher and ECU worker services require this mount;
+the Linux FOTA backend also rejects the default state root when it is only a directory on the OS
+filesystem. Confirm the source with `findmnt --mountpoint /var/lib/sdv-fota` before running manual
+FOTA commands.
+The vehicle image and every virtual ECU share this volume but keep separate A/B roots. Provision
+space for both retained slots of each configured target, one additional maximum-sized image, and
+filesystem overhead. The production backend serializes staging and candidate verification with a
+volume-wide update lock. Before creating a staging file, it checks that free space covers the
+incoming image plus a 1 MiB metadata reserve.
+
 Install and enable the worker units after initializing an active image in each ECU state root and
 installing the target-aware FOTA launcher configuration:
 
 ```sh
+sudo install -m 0644 'deploy/systemd/var-lib-sdv\x2dfota.mount' /etc/systemd/system/
 sudo install -m 0644 deploy/systemd/sdv-fota-ecu@.service /etc/systemd/system/
 sudo install -m 0644 deploy/systemd/sdv-fota-ecu-candidate@.service /etc/systemd/system/
 sudo install -m 0644 deploy/systemd/sdv-fota-workers.target /etc/systemd/system/
 sudo install -m 0644 deploy/systemd/sdv-fota-launcher.service /etc/systemd/system/
 sudo systemctl daemon-reload
+sudo systemctl enable --now 'var-lib-sdv\x2dfota.mount'
+findmnt --mountpoint /var/lib/sdv-fota
 sudo systemctl stop sdv-fota-workers.target
 sudo systemctl restart sdv-fota-launcher.service
 sudo systemctl enable --now sdv-fota-workers.target

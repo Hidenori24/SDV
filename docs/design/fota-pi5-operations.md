@@ -10,6 +10,41 @@ artifact endpoint but does not replace package signature verification. When mutu
 the client caps redirects at zero so curl cannot forward the device identity to a redirect host; the
 artifact endpoint must return the package directly.
 
+## Allocate the SDV data volume
+
+The default state root is `/var/lib/sdv-fota`. For a Pi deployment, place it on a dedicated ext4
+data partition labeled `SDV_FOTA`; the update tools write only application images and FOTA state
+there, and never repartition or write the Pi OS, EEPROM, boot partition, or raw devices. The Linux
+backend verifies that the default state root is on a separate filesystem before reading or writing
+it. The systemd units also require the corresponding mount unit, so neither direct FOTA commands nor
+the vehicle services fall back to an empty directory on the OS filesystem when the data volume is
+missing. Prepare the partition separately after
+identifying the correct device; formatting a partition erases its contents.
+
+Install and enable the mount unit, then confirm the mounted source before provisioning or installing
+an image:
+
+```sh
+sudo install -d -o root -g root -m 0755 /var/lib/sdv-fota
+sudo install -m 0644 'deploy/systemd/var-lib-sdv\x2dfota.mount' /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now 'var-lib-sdv\x2dfota.mount'
+findmnt --mountpoint /var/lib/sdv-fota
+```
+
+The mount unit expects `/dev/disk/by-label/SDV_FOTA` and mounts it at `/var/lib/sdv-fota` with
+`nodev,nosuid`; executable application images remain enabled. Confirm that `findmnt` shows the
+intended SD card or SSD partition before running the manual `sdv-fota` commands below.
+
+The vehicle image and each virtual ECU have separate A/B roots on this shared volume. Atomic
+replacement temporarily keeps each target's active and previous inactive image while writing the
+incoming image. Size the volume for both retained slots of every configured target, one additional
+maximum-sized staging image, and filesystem overhead. The production backend uses a volume-wide
+update lock so only one target can stage or hold a candidate commit lock at a time. Before creating
+the staging file, it checks that available space covers the incoming image plus a 1 MiB metadata
+reserve; an insufficient-volume error reports the required and available bytes without starting the
+write.
+
 ## Build
 
 On the Pi 5, build the Linux FOTA tools and PiCar-X vehicle image from the repository:
@@ -89,11 +124,13 @@ instead of silently changing modes:
 
 ```sh
 sudo install -o root -g root -m 0644 rust/sdv-picarx/config/pi5.external-workers.disabled.example.json /etc/sdv-picarx/vehicle.json
+sudo install -m 0644 'deploy/systemd/var-lib-sdv\x2dfota.mount' /etc/systemd/system/
 sudo install -m 0644 deploy/systemd/sdv-fota-launcher.service /etc/systemd/system/
 sudo install -m 0644 deploy/systemd/sdv-fota-ecu@.service /etc/systemd/system/
 sudo install -m 0644 deploy/systemd/sdv-fota-ecu-candidate@.service /etc/systemd/system/
 sudo install -m 0644 deploy/systemd/sdv-fota-workers.target /etc/systemd/system/
 sudo systemctl daemon-reload
+sudo systemctl enable --now 'var-lib-sdv\x2dfota.mount'
 sudo systemctl stop sdv-fota-workers.target
 sudo systemctl restart sdv-fota-launcher.service
 sudo systemctl enable --now sdv-fota-workers.target

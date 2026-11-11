@@ -42,12 +42,25 @@ fn run(args: Vec<OsString>) -> Result<(), String> {
     }
 }
 
+fn linux_error_detail(error: &sdv_fota::linux::Error) -> String {
+    match error {
+        sdv_fota::linux::Error::InsufficientStorage {
+            required_bytes,
+            available_bytes,
+        } => format!("SDV data volume needs {required_bytes} free bytes but has {available_bytes}"),
+        sdv_fota::linux::Error::StorageVolumeNotMounted => {
+            "dedicated SDV FOTA filesystem is not mounted at /var/lib/sdv-fota".into()
+        }
+        error => format!("{error:?}"),
+    }
+}
+
 fn status(args: &[OsString]) -> Result<(), String> {
     let mut options = parse_named_options(args, &["--state-root", "--target"])?;
     let state_root = selected_state_root(&mut options)?;
     let state = FileBootControl::new(&state_root)
         .state()
-        .map_err(|error| format!("cannot read boot metadata: {error:?}"))?;
+        .map_err(|error| format!("cannot read boot metadata: {}", linux_error_detail(&error)))?;
     let storage = FileSlotStorage::new(&state_root);
     println!("active_slot: {}", slot_name(state.active));
     println!("active_version: {}", state.active_version);
@@ -88,7 +101,7 @@ fn verify_images(args: &[OsString]) -> Result<(), String> {
     let state_root = selected_state_root(&mut options)?;
     let state = FileBootControl::new(&state_root)
         .state()
-        .map_err(|error| format!("cannot read boot metadata: {error:?}"))?;
+        .map_err(|error| format!("cannot read boot metadata: {}", linux_error_detail(&error)))?;
     let storage = FileSlotStorage::new(&state_root);
     let active_integrity = image_integrity_status(&storage, state.active);
     println!("active_image_integrity: {active_integrity}");
@@ -178,13 +191,19 @@ fn commit_candidate(args: &[OsString]) -> Result<(), String> {
 
     // Keep installers from replacing the pending slot during the held verification window.
     let mut storage = FileSlotStorage::new(&state_root);
-    storage
-        .lock_updates()
-        .map_err(|error| format!("cannot lock candidate image for commit: {error:?}"))?;
+    storage.lock_updates().map_err(|error| {
+        format!(
+            "cannot lock candidate image for commit: {}",
+            linux_error_detail(&error)
+        )
+    })?;
     let boot = FileBootControl::new(&state_root);
-    let initial_state = boot
-        .state()
-        .map_err(|error| format!("cannot read candidate trial metadata: {error:?}"))?;
+    let initial_state = boot.state().map_err(|error| {
+        format!(
+            "cannot read candidate trial metadata: {}",
+            linux_error_detail(&error)
+        )
+    })?;
     let trial = initial_state
         .trial
         .ok_or_else(|| "there is no pending ECU trial to commit".to_owned())?;
@@ -193,15 +212,23 @@ fn commit_candidate(args: &[OsString]) -> Result<(), String> {
     }
     storage
         .verify_executable_image(trial.slot)
-        .map_err(|error| format!("candidate image failed integrity verification: {error:?}"))?;
+        .map_err(|error| {
+            format!(
+                "candidate image failed integrity verification: {}",
+                linux_error_detail(&error)
+            )
+        })?;
 
     verify_candidate_stability(&control_socket, target, stability_ms)?;
 
     // A manual rollback may race the verification request. Re-read the trial and only commit the
     // exact image that was running as the verified candidate.
-    let verified_state = boot
-        .state()
-        .map_err(|error| format!("cannot re-read candidate trial metadata: {error:?}"))?;
+    let verified_state = boot.state().map_err(|error| {
+        format!(
+            "cannot re-read candidate trial metadata: {}",
+            linux_error_detail(&error)
+        )
+    })?;
     let verified_trial = verified_state
         .trial
         .ok_or_else(|| "candidate trial was cleared during verification".to_owned())?;
@@ -210,14 +237,22 @@ fn commit_candidate(args: &[OsString]) -> Result<(), String> {
     }
     storage
         .verify_executable_image(trial.slot)
-        .map_err(|error| format!("candidate image failed integrity verification: {error:?}"))?;
+        .map_err(|error| {
+            format!(
+                "candidate image failed integrity verification: {}",
+                linux_error_detail(&error)
+            )
+        })?;
     boot.commit_trial_if_matches(trial)
         .map_err(|error| match error {
             sdv_fota::linux::Error::NoTrialPending => {
                 "candidate trial was cleared before commit".into()
             }
             sdv_fota::linux::Error::TrialChanged => "candidate trial changed before commit".into(),
-            error => format!("cannot commit verified candidate: {error:?}"),
+            error => format!(
+                "cannot commit verified candidate: {}",
+                linux_error_detail(&error)
+            ),
         })?;
     println!(
         "committed the verified {} candidate; output remains held until the launcher is restarted",
@@ -335,12 +370,20 @@ fn initialize(args: &[OsString]) -> Result<(), String> {
     let active_version = required_str(&active_version, "active version")?;
     let security_version = required_number(&mut options, "--security-version", "security version")?;
     let storage = FileSlotStorage::new(&root);
-    storage
-        .validate_executable_image(slot)
-        .map_err(|error| format!("initial target image is not bootable: {error:?}"))?;
+    storage.validate_executable_image(slot).map_err(|error| {
+        format!(
+            "initial target image is not bootable: {}",
+            linux_error_detail(&error)
+        )
+    })?;
     FileBootControl::new(root)
         .initialize_with_image(&storage, slot, active_version, security_version)
-        .map_err(|error| format!("boot metadata initialization failed: {error:?}"))
+        .map_err(|error| {
+            format!(
+                "boot metadata initialization failed: {}",
+                linux_error_detail(&error)
+            )
+        })
 }
 
 fn install(args: &[OsString]) -> Result<(), String> {
@@ -449,7 +492,7 @@ fn install_source<P: PackageSource<Error = sdv_fota::linux::Error>>(
     let boot_control = FileBootControl::new(&state_root);
     let state = boot_control
         .state()
-        .map_err(|error| format!("cannot read boot metadata: {error:?}"))?;
+        .map_err(|error| format!("cannot read boot metadata: {}", linux_error_detail(&error)))?;
     let context = ValidationContext {
         target_ecu,
         current_version: &state.active_version,
@@ -470,7 +513,16 @@ fn install_source<P: PackageSource<Error = sdv_fota::linux::Error>>(
             &validation_keys,
             &context,
         )
-        .map_err(|error| format!("package installation failed: {error:?}"))?;
+        .map_err(|error| match error {
+            sdv_fota::StreamInstallError::Storage(error)
+            | sdv_fota::StreamInstallError::BootControl(error) => {
+                format!(
+                    "package installation failed: {}",
+                    linux_error_detail(&error)
+                )
+            }
+            error => format!("package installation failed: {error:?}"),
+        })?;
     println!("staged trial image in slot {}", slot_name(slot));
     Ok(())
 }

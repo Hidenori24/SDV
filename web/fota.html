@@ -33,6 +33,11 @@ sudo install -m 0755 rust/sdv-picarx/target/release/sdv-picarx-ecu-worker /usr/b
     <p>署名コマンドは保護されたリリースホストで別にビルドします。</p>
 <pre><code>cargo build --release --manifest-path rust/sdv-fota/Cargo.toml \
   --features host-signing --bin sdv-fota-sign</code></pre>
+    <p>FOTA領域として、SDカードまたはSSD上にext4 partitionを用意し、labelを <code>SDV_FOTA</code> として <code>/var/lib/sdv-fota</code> にmountします。Linux FOTA backendは既定のstate rootがOS filesystem上の単なるdirectoryなら読み書きを拒否し、systemdのFOTA unitもdata volumeがない状態では起動しません。専用partitionの作成・formatは対象デバイスを確認して別途行ってください。mount元は <code>findmnt --mountpoint /var/lib/sdv-fota</code> で確認します。</p>
+<pre><code>sudo install -m 0644 'deploy/systemd/var-lib-sdv\x2dfota.mount' /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now 'var-lib-sdv\x2dfota.mount'
+findmnt --mountpoint /var/lib/sdv-fota</code></pre>
     <p>アプリ実行用の非特権ユーザーを作成します。状態ディレクトリ、スロット、イメージ、boot metadataはroot所有にし、group/otherから書き込めないようにします。ツールはsymlinkの状態パスを拒否し、更新データと起動記録は排他的な一時ファイルからatomic renameで配置します。初期イメージにはPiCar-X用Rustホストを配置し、設定はスロット外に置きます。</p>
 <pre><code>sudo useradd --system --user-group --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin sdv-app
 sudo install -d -o root -g root -m 0755 /var/lib/sdv-fota/slots/a /var/lib/sdv-fota/slots/b
@@ -62,7 +67,7 @@ sudo chmod 0644 /etc/sdv-fota/trusted-keys</code></pre>
   </section>
   <section class="card">
     <h2>更新と試験起動</h2>
-    <p>リリース環境でパッケージを作成し、Piで署名済みパッケージを導入します。</p>
+    <p>リリース環境でパッケージを作成し、Piで署名済みパッケージを導入します。vehicle imageと各virtual ECUのA/B slotは同じSDV領域を共有します。全targetのslot imageに加え、最大image 1個分とfilesystem overheadを確保してください。本番backendはvolume単位のupdate lockでstageとcandidate確認を直列化します。更新開始前に空き容量を確認し、incoming imageサイズと1 MiBのmetadata reserveを満たさない場合はstagingを始めません。</p>
 <pre><code>chmod 0600 /secure/release.seed
 sdv-fota-sign --seed /secure/release.seed --key-id release-2026 --target vehicle \
   --version 1.1.0 --security-version 2 --trial-ms 5000 --config-schema 1 \
