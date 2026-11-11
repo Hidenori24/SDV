@@ -45,6 +45,7 @@ cp logs/latest.csv rust/sdv-core/tests/golden/cpp_latest.csv
 
 - `cpp-tests`: ビルドと `ctest`
 - `rust-tests`: `sdv-core` の `cargo test`（`fota-simulator` を含む）、`sdv-fota`、`sdv-picarx`、ホスト用署名ツール、no_std チェック、Classic 向け C ABI のスモークテスト、WASM ビルド
+- `lint`: 全 crate の `cargo fmt --check` と `cargo clippy --all-targets`（**clippy のエラーは失敗、警告は当面許容**。`sdv-fota` / `sdv-picarx` には既存の警告が残っている。新しいコードで警告を増やさない。削減は別 PR で進め、いずれ `-D warnings` にする）
 - `sec-tests`: `sdv-sec` の既知の値・フレーム MAC・ヘッダ一致、no_std の WASM ビルド、C ABI スモークテスト
 - `integration`: ビルド済みの `sdv_core.wasm` を Node で動かす結合テスト（C++ の基準ログの全行再現 + シナリオ + 期待値）
 - `golden-log`: C++ ログがコミット済みの基準ログと一致すること

@@ -68,6 +68,28 @@ jobs:
       - name: WASM build
         run: cargo build --release --target wasm32-unknown-unknown
 
+  lint:
+    name: lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: rustfmt (all crates)
+        run: |
+          for crate in sdv-core sdv-sec sdv-fota sdv-picarx; do
+            echo "== $crate"
+            cargo fmt --manifest-path rust/$crate/Cargo.toml -- --check
+          done
+      - name: clippy (errors fail the job; warnings are tolerated for now, see CONTRIBUTING.md)
+        run: |
+          for crate in sdv-core sdv-sec sdv-fota sdv-picarx; do
+            echo "== $crate"
+            cargo clippy --manifest-path rust/$crate/Cargo.toml --all-targets
+          done
+          cargo clippy --manifest-path rust/sdv-core/Cargo.toml --all-targets --features fota-simulator
+
   sec-tests:
     name: sec-tests
     runs-on: ubuntu-24.04
@@ -125,7 +147,7 @@ jobs:
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [cpp-tests, rust-tests, sec-tests, integration, golden-log]
+    needs: [cpp-tests, rust-tests, lint, sec-tests, integration, golden-log]
     runs-on: ubuntu-24.04
     steps:
       - name: All required jobs succeeded
