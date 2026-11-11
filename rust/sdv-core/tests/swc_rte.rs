@@ -37,7 +37,9 @@ fn estop_in_the_rte_overrides_swc_outputs() {
     EngineSwc::default().main_10ms(&mut rte);
     BrakeSwc::default().main_10ms(&mut rte);
     let mut steering = SteeringSwc::default();
-    for _ in 0..100 { steering.main_10ms(&mut rte, 0.01); }
+    for _ in 0..100 {
+        steering.main_10ms(&mut rte, 0.01);
+    }
     assert_eq!(rte.cmd.drive_accel_cmd, 0.0);
     assert_eq!(rte.cmd.brake_decel_cmd, 4.0);
     assert_eq!(rte.cmd.steer_angle_cmd, 0.0);
@@ -48,7 +50,9 @@ fn vehicle_dynamics_advances_time_and_speed() {
     let mut rte = Rte::default();
     rte.cmd.drive_accel_cmd = 2.0;
     let vd = VehicleDynamicsSwc::default();
-    for _ in 0..100 { vd.step_10ms(&mut rte, 0.01); }
+    for _ in 0..100 {
+        vd.step_10ms(&mut rte, 0.01);
+    }
     assert!((rte.state.t - 1.0).abs() < 1e-4);
     assert!(rte.state.v > 1.0);
 }

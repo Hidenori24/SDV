@@ -92,17 +92,32 @@ pub struct Scenario {
 
 impl Default for Scenario {
     fn default() -> Self {
-        Self { schema: SCHEMA_VERSION, name: String::new(), steps: Vec::new(), after: Level::default(), events: Vec::new() }
+        Self {
+            schema: SCHEMA_VERSION,
+            name: String::new(),
+            steps: Vec::new(),
+            after: Level::default(),
+            events: Vec::new(),
+        }
     }
 }
 
 impl Scenario {
     /// The built-in demo scenario (identical to the C++ DriverInputSWC).
     pub fn demo() -> Self {
-        let step = |until_s, throttle, brake, steer| Step { until_s, throttle, brake, steer };
+        let step = |until_s, throttle, brake, steer| Step {
+            until_s,
+            throttle,
+            brake,
+            steer,
+        };
         Self {
             name: "demo".into(),
-            steps: vec![step(2.0, 0.6, 0.0, 0.0), step(5.0, 0.2, 0.0, 0.2), step(7.0, 0.0, 0.6, 0.0)],
+            steps: vec![
+                step(2.0, 0.6, 0.0, 0.0),
+                step(5.0, 0.2, 0.0, 0.2),
+                step(7.0, 0.0, 0.6, 0.0),
+            ],
             ..Self::default()
         }
     }
@@ -123,15 +138,23 @@ impl Scenario {
     /// Events sorted by time (stable, so equal times keep their order).
     pub fn sorted_events(&self) -> Vec<Event> {
         let mut v = self.events.clone();
-        v.sort_by(|a, b| a.at_s.partial_cmp(&b.at_s).unwrap_or(std::cmp::Ordering::Equal));
+        v.sort_by(|a, b| {
+            a.at_s
+                .partial_cmp(&b.at_s)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         v
     }
 }
 
 /// Parse and validate. On error only the full list of problems is returned.
 pub fn parse(json: &str) -> Result<Scenario, Vec<ConfigError>> {
-    let s: Scenario = serde_json::from_str(json)
-        .map_err(|e| vec![ConfigError { path: "$".into(), reason: e.to_string() }])?;
+    let s: Scenario = serde_json::from_str(json).map_err(|e| {
+        vec![ConfigError {
+            path: "$".into(),
+            reason: e.to_string(),
+        }]
+    })?;
     let errors = validate(&s);
     if errors.is_empty() {
         Ok(s)
@@ -147,7 +170,10 @@ pub fn to_json(s: &Scenario) -> String {
 fn level_errors(path: &str, throttle: f32, brake: f32, steer: f32, out: &mut Vec<ConfigError>) {
     let mut chk = |name: &str, v: f32, lo: f32, hi: f32| {
         if !v.is_finite() || v < lo || v > hi {
-            out.push(ConfigError { path: format!("{path}.{name}"), reason: format!("must be in [{lo}, {hi}] (got {v})") });
+            out.push(ConfigError {
+                path: format!("{path}.{name}"),
+                reason: format!("must be in [{lo}, {hi}] (got {v})"),
+            });
         }
     };
     chk("throttle", throttle, 0.0, 1.0);
@@ -159,37 +185,73 @@ pub fn validate(s: &Scenario) -> Vec<ConfigError> {
     let mut out = Vec::new();
     let mut err = |path: String, reason: String| out.push(ConfigError { path, reason });
     if s.schema != SCHEMA_VERSION {
-        err("schema".into(), format!("unsupported schema version {} (supported: {SCHEMA_VERSION})", s.schema));
+        err(
+            "schema".into(),
+            format!(
+                "unsupported schema version {} (supported: {SCHEMA_VERSION})",
+                s.schema
+            ),
+        );
     }
     if s.steps.len() > MAX_STEPS {
-        err("steps".into(), format!("at most {MAX_STEPS} steps (got {})", s.steps.len()));
+        err(
+            "steps".into(),
+            format!("at most {MAX_STEPS} steps (got {})", s.steps.len()),
+        );
     }
     if s.events.len() > MAX_EVENTS {
-        err("events".into(), format!("at most {MAX_EVENTS} events (got {})", s.events.len()));
+        err(
+            "events".into(),
+            format!("at most {MAX_EVENTS} events (got {})", s.events.len()),
+        );
     }
     let mut prev = 0.0f32;
     for (i, st) in s.steps.iter().enumerate() {
         if !st.until_s.is_finite() || st.until_s <= prev || st.until_s > MAX_TIME_S {
             err(
                 format!("steps[{i}].until_s"),
-                format!("must be in ({prev}, {MAX_TIME_S}] and larger than the previous step (got {})", st.until_s),
+                format!(
+                    "must be in ({prev}, {MAX_TIME_S}] and larger than the previous step (got {})",
+                    st.until_s
+                ),
             );
         } else {
             prev = st.until_s;
         }
     }
-    drop(err);
     for (i, st) in s.steps.iter().enumerate() {
-        level_errors(&format!("steps[{i}]"), st.throttle, st.brake, st.steer, &mut out);
+        level_errors(
+            &format!("steps[{i}]"),
+            st.throttle,
+            st.brake,
+            st.steer,
+            &mut out,
+        );
     }
-    level_errors("after", s.after.throttle, s.after.brake, s.after.steer, &mut out);
+    level_errors(
+        "after",
+        s.after.throttle,
+        s.after.brake,
+        s.after.steer,
+        &mut out,
+    );
     for (i, e) in s.events.iter().enumerate() {
         if !e.at_s.is_finite() || e.at_s < 0.0 || e.at_s > MAX_TIME_S {
-            out.push(ConfigError { path: format!("events[{i}].at_s"), reason: format!("must be in [0, {MAX_TIME_S}] (got {})", e.at_s) });
+            out.push(ConfigError {
+                path: format!("events[{i}].at_s"),
+                reason: format!("must be in [0, {MAX_TIME_S}] (got {})", e.at_s),
+            });
         }
         if e.action.needs_target() != e.target.is_some() {
-            let reason = if e.action.needs_target() { "required for stall / resume" } else { "only allowed for stall / resume" };
-            out.push(ConfigError { path: format!("events[{i}].target"), reason: reason.into() });
+            let reason = if e.action.needs_target() {
+                "required for stall / resume"
+            } else {
+                "only allowed for stall / resume"
+            };
+            out.push(ConfigError {
+                path: format!("events[{i}].target"),
+                reason: reason.into(),
+            });
         }
     }
     out

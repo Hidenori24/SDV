@@ -24,8 +24,16 @@ fn rust_matches_cpp_reference_log() {
         let mine: Vec<f32> = r.to_csv().split(',').map(field).collect();
         // x/y are printed with 3 decimals; allow a couple of ulps of libm difference.
         for (k, (a, b)) in g.iter().zip(mine.iter()).enumerate() {
-            let tol = match k { 7 | 8 => 3e-3, 9 => 2e-4, _ => 2e-3 };
-            assert!((a - b).abs() <= tol, "row {rows} col {k}: cpp={a} rust={b}\n  cpp : {line}\n  rust: {}", r.to_csv());
+            let tol = match k {
+                7 | 8 => 3e-3,
+                9 => 2e-4,
+                _ => 2e-3,
+            };
+            assert!(
+                (a - b).abs() <= tol,
+                "row {rows} col {k}: cpp={a} rust={b}\n  cpp : {line}\n  rust: {}",
+                r.to_csv()
+            );
         }
         rows += 1;
     }
@@ -36,10 +44,14 @@ fn rust_matches_cpp_reference_log() {
 fn estop_stops_the_vehicle() {
     let mut sim = Sim::new();
     sim.input_mut().throttle = 1.0;
-    for _ in 0..300 { sim.step_10ms(); }
+    for _ in 0..300 {
+        sim.step_10ms();
+    }
     assert!(sim.state().v > 0.5);
     sim.set_estop_request(true);
-    for _ in 0..200 { sim.step_10ms(); }
+    for _ in 0..200 {
+        sim.step_10ms();
+    }
     assert_eq!(sim.state().v, 0.0);
     assert_eq!(sim.safety().system_state, sdv_core::sim::SystemState::EStop);
 }
@@ -48,8 +60,14 @@ fn estop_stops_the_vehicle() {
 fn speed_is_capped_and_never_negative() {
     let mut sim = Sim::new();
     sim.input_mut().throttle = 1.0;
-    for _ in 0..3000 { sim.step_10ms(); assert!(sim.state().v >= 0.0 && sim.state().v <= 3.0); }
+    for _ in 0..3000 {
+        sim.step_10ms();
+        assert!(sim.state().v >= 0.0 && sim.state().v <= 3.0);
+    }
     sim.input_mut().throttle = 0.0;
     sim.input_mut().brake = 1.0;
-    for _ in 0..1000 { sim.step_10ms(); assert!(sim.state().v >= 0.0); }
+    for _ in 0..1000 {
+        sim.step_10ms();
+        assert!(sim.state().v >= 0.0);
+    }
 }

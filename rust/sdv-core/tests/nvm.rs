@@ -12,7 +12,10 @@ fn accel(c: &Config) -> f32 {
 }
 
 fn commit(n: &mut Nvm<MemStorage>, accel_mps2: f32) -> u32 {
-    n.commit(&format!(r#"{{"engine":{{"max_accel_mps2":{accel_mps2}}}}}"#)).expect("valid config")
+    n.commit(&format!(
+        r#"{{"engine":{{"max_accel_mps2":{accel_mps2}}}}}"#
+    ))
+    .expect("valid config")
 }
 
 fn corrupt(n: &mut Nvm<MemStorage>, slot: Slot) {
@@ -52,7 +55,10 @@ fn partial_updates_are_stored_as_full_canonical_configs() {
     let mut n = nvm();
     commit(&mut n, 4.0);
     let stored = String::from_utf8_lossy(&n.storage().read(Slot::Active).unwrap()).to_string();
-    assert!(stored.contains("heartbeat_timeout_ms"), "the full config is stored, not just the patch");
+    assert!(
+        stored.contains("heartbeat_timeout_ms"),
+        "the full config is stored, not just the patch"
+    );
 }
 
 #[test]
@@ -62,20 +68,34 @@ fn second_commit_moves_the_previous_config_to_backup() {
     assert_eq!(commit(&mut n, 6.0), 2);
     let l = n.load();
     assert_eq!(accel(&l.config), 6.0);
-    assert_eq!(l.slots, [SlotStatus::Valid { seq: 2 }, SlotStatus::Valid { seq: 1 }]);
+    assert_eq!(
+        l.slots,
+        [SlotStatus::Valid { seq: 2 }, SlotStatus::Valid { seq: 1 }]
+    );
 }
 
 #[test]
 fn invalid_commit_is_rejected_and_changes_nothing() {
     let mut n = nvm();
     commit(&mut n, 4.0);
-    let before = (n.storage().read(Slot::Active), n.storage().read(Slot::Backup));
-    let err = n.commit(r#"{"engine":{"max_accel_mps2":99.0},"safety":{"heartbeat_timeout_ms":1}}"#).unwrap_err();
+    let before = (
+        n.storage().read(Slot::Active),
+        n.storage().read(Slot::Backup),
+    );
+    let err = n
+        .commit(r#"{"engine":{"max_accel_mps2":99.0},"safety":{"heartbeat_timeout_ms":1}}"#)
+        .unwrap_err();
     match err {
         NvmError::Invalid(e) => assert_eq!(e.len(), 2, "every problem is reported"),
         other => panic!("{other:?}"),
     }
-    assert_eq!((n.storage().read(Slot::Active), n.storage().read(Slot::Backup)), before);
+    assert_eq!(
+        (
+            n.storage().read(Slot::Active),
+            n.storage().read(Slot::Backup)
+        ),
+        before
+    );
     assert_eq!(accel(&n.load().config), 4.0);
 }
 
@@ -89,7 +109,11 @@ fn rollback_restores_the_previous_config_and_clears_the_backup() {
     assert_eq!(accel(&l.config), 4.0);
     assert_eq!(l.source, Source::Active);
     assert_eq!(l.slots[Slot::Backup as usize], SlotStatus::Empty);
-    assert_eq!(n.rollback(), Err(NvmError::NoBackup), "cannot roll back twice in a row");
+    assert_eq!(
+        n.rollback(),
+        Err(NvmError::NoBackup),
+        "cannot roll back twice in a row"
+    );
 }
 
 #[test]
@@ -98,7 +122,10 @@ fn sequence_numbers_keep_increasing_across_rollback() {
     commit(&mut n, 4.0);
     commit(&mut n, 6.0); // seq 2
     n.rollback().unwrap(); // active = old config, seq 3
-    assert_eq!(n.load().slots[Slot::Active as usize], SlotStatus::Valid { seq: 3 });
+    assert_eq!(
+        n.load().slots[Slot::Active as usize],
+        SlotStatus::Valid { seq: 3 }
+    );
     assert_eq!(commit(&mut n, 8.0), 4);
 }
 
@@ -142,7 +169,8 @@ fn truncated_or_foreign_data_counts_as_corrupt() {
     bytes.truncate(bytes.len() - 3);
     n.storage_mut().write(Slot::Active, bytes);
     assert_eq!(n.load().slots[0], SlotStatus::Corrupt);
-    n.storage_mut().write(Slot::Active, b"not an nvm record".to_vec());
+    n.storage_mut()
+        .write(Slot::Active, b"not an nvm record".to_vec());
     assert_eq!(n.load().slots[0], SlotStatus::Corrupt);
     n.storage_mut().write(Slot::Active, vec![]);
     assert_eq!(n.load().slots[0], SlotStatus::Corrupt);
@@ -180,5 +208,8 @@ fn a_sim_can_boot_from_the_nvm() {
     for _ in 0..50 {
         sim.step_10ms();
     }
-    assert!(sim.state().v > 1.5, "4 m/s^2 engine reaches more than 1.5 m/s in 0.5 s");
+    assert!(
+        sim.state().v > 1.5,
+        "4 m/s^2 engine reaches more than 1.5 m/s in 0.5 s"
+    );
 }

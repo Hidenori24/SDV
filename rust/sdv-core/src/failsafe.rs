@@ -17,7 +17,10 @@ pub struct FailsafeParams {
 
 impl Default for FailsafeParams {
     fn default() -> Self {
-        Self { driver_timeout_ticks: 20, safety_timeout_ticks: 10 }
+        Self {
+            driver_timeout_ticks: 20,
+            safety_timeout_ticks: 10,
+        }
     }
 }
 

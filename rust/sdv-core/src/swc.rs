@@ -3,8 +3,8 @@
 
 use crate::model::*;
 use crate::rte::Rte;
-use crate::scenario::Scenario;
 use crate::safety::SafetySupervisor;
+use crate::scenario::Scenario;
 
 #[derive(Default)]
 pub struct EngineSwc {
@@ -61,9 +61,13 @@ impl VehicleDynamicsSwc {
     }
     pub fn step_10ms(&self, rte: &mut Rte, dt_s: f32) {
         rte.state = step_vehicle(
-            &rte.state, dt_s,
-            rte.cmd.drive_accel_cmd, rte.cmd.brake_decel_cmd, rte.cmd.steer_angle_cmd,
-            rte.estop_active(), &self.params,
+            &rte.state,
+            dt_s,
+            rte.cmd.drive_accel_cmd,
+            rte.cmd.brake_decel_cmd,
+            rte.cmd.steer_angle_cmd,
+            rte.estop_active(),
+            &self.params,
         );
     }
 }
@@ -83,11 +87,15 @@ pub struct SafetySwc {
 }
 impl SafetySwc {
     pub fn new(params: SafetyParams) -> Self {
-        Self { supervisor: SafetySupervisor::with_params(params) }
+        Self {
+            supervisor: SafetySupervisor::with_params(params),
+        }
     }
     /// 100 ms task. `rte.safety.estop` holds the external request; the watchdog latch is OR-ed in.
     pub fn main_100ms(&mut self, rte: &mut Rte, dt_ms: u32) {
-        let (estop, state) = self.supervisor.main_100ms(rte.alive_rx, dt_ms, rte.safety.estop);
+        let (estop, state) = self
+            .supervisor
+            .main_100ms(rte.alive_rx, dt_ms, rte.safety.estop);
         rte.safety.estop = estop;
         rte.safety.system_state = state;
     }

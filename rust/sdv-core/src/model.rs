@@ -7,7 +7,9 @@ pub struct EngineParams {
 }
 impl Default for EngineParams {
     fn default() -> Self {
-        Self { max_accel_mps2: 2.0 }
+        Self {
+            max_accel_mps2: 2.0,
+        }
     }
 }
 
@@ -26,7 +28,10 @@ pub struct BrakeParams {
 }
 impl Default for BrakeParams {
     fn default() -> Self {
-        Self { max_decel_mps2: 4.0, estop_max_decel_mps2: 4.0 }
+        Self {
+            max_decel_mps2: 4.0,
+            estop_max_decel_mps2: 4.0,
+        }
     }
 }
 
@@ -45,7 +50,10 @@ pub struct SteeringParams {
 }
 impl Default for SteeringParams {
     fn default() -> Self {
-        Self { max_steer_angle_rad: 0.40, time_constant_s: 0.15 }
+        Self {
+            max_steer_angle_rad: 0.40,
+            time_constant_s: 0.15,
+        }
     }
 }
 
@@ -165,7 +173,9 @@ pub struct SafetyParams {
 }
 impl Default for SafetyParams {
     fn default() -> Self {
-        Self { heartbeat_timeout_ms: 1000 }
+        Self {
+            heartbeat_timeout_ms: 1000,
+        }
     }
 }
 
@@ -179,7 +189,12 @@ pub struct HeartbeatStatus {
 }
 impl Default for HeartbeatStatus {
     fn default() -> Self {
-        Self { engine_ok: true, brake_ok: true, steering_ok: true, vehicledynamics_ok: true }
+        Self {
+            engine_ok: true,
+            brake_ok: true,
+            steering_ok: true,
+            vehicledynamics_ok: true,
+        }
     }
 }
 
@@ -194,7 +209,12 @@ pub struct HeartbeatMonitor {
 
 /// The counter advancing resets the silence timer; otherwise silence grows by `dt_ms`.
 /// Returns true while the SWC is considered alive (`silent_ms <= timeout`).
-pub fn update_heartbeat(m: &mut HeartbeatMonitor, alive_count: u64, dt_ms: u32, p: &SafetyParams) -> bool {
+pub fn update_heartbeat(
+    m: &mut HeartbeatMonitor,
+    alive_count: u64,
+    dt_ms: u32,
+    p: &SafetyParams,
+) -> bool {
     if alive_count != m.last_count {
         m.last_count = alive_count;
         m.silent_ms = 0;
@@ -205,10 +225,15 @@ pub fn update_heartbeat(m: &mut HeartbeatMonitor, alive_count: u64, dt_ms: u32, 
 }
 
 pub fn count_failed(hb: &HeartbeatStatus) -> u32 {
-    [hb.engine_ok, hb.brake_ok, hb.steering_ok, hb.vehicledynamics_ok]
-        .iter()
-        .filter(|ok| !**ok)
-        .count() as u32
+    [
+        hb.engine_ok,
+        hb.brake_ok,
+        hb.steering_ok,
+        hb.vehicledynamics_ok,
+    ]
+    .iter()
+    .filter(|ok| !**ok)
+    .count() as u32
 }
 
 /// 0 dead -> Normal, 1 dead -> Degraded, 2 or more dead -> EStop.

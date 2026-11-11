@@ -16,7 +16,11 @@ fn c_api_exposes_bus_faults_vcu_stall_and_failsafe_flags() {
     sdv_set_input(1.0, 0.0, 0.0);
     sdv_step(200);
     assert!(out()[4] > 1.0, "speed");
-    assert_eq!(&out()[19..22], &[0.0, 0.0, 0.0], "no failsafe while healthy");
+    assert_eq!(
+        &out()[19..22],
+        &[0.0, 0.0, 0.0],
+        "no failsafe while healthy"
+    );
 
     // vehicle bus down: after > 100 ms every ECU enters E-Stop behaviour by itself (bit 1)
     sdv_set_bus(0, 0, 1);
@@ -37,7 +41,7 @@ fn c_api_exposes_bus_faults_vcu_stall_and_failsafe_flags() {
     sdv_set_vcu_stall(1);
     sdv_step(500);
     assert_eq!(out()[4], 0.0, "stopped");
-    assert_eq!(out()[19 + 0] as u32 & 2, 2);
+    assert_eq!(out()[19] as u32 & 2, 2);
 
     // reset clears the injected faults
     sdv_reset();

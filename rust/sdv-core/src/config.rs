@@ -26,7 +26,10 @@ pub struct FailsafeConfig {
 
 impl Default for FailsafeConfig {
     fn default() -> Self {
-        Self { driver_timeout_ms: 200, safety_timeout_ms: 100 }
+        Self {
+            driver_timeout_ms: 200,
+            safety_timeout_ms: 100,
+        }
     }
 }
 
@@ -75,7 +78,11 @@ pub struct Physics {
 
 impl Default for Physics {
     fn default() -> Self {
-        Self { gravity_mps2: 9.81, tire_friction_mu: 0.6, drag_coeff: 0.15 }
+        Self {
+            gravity_mps2: 9.81,
+            tire_friction_mu: 0.6,
+            drag_coeff: 0.15,
+        }
     }
 }
 
@@ -90,7 +97,11 @@ pub struct Tuning {
 
 impl Default for Tuning {
     fn default() -> Self {
-        Self { estop_max_decel_mps2: 4.0, safety: SafetyParams::default(), failsafe: FailsafeConfig::default() }
+        Self {
+            estop_max_decel_mps2: 4.0,
+            safety: SafetyParams::default(),
+            failsafe: FailsafeConfig::default(),
+        }
     }
 }
 
@@ -162,7 +173,9 @@ impl Config {
             return self.vehicle_spec.max_steer_angle_rad;
         }
         let a = (self.physics.tire_friction_mu * self.physics.gravity_mps2).max(1e-3);
-        self.vehicle_spec.max_steer_angle_rad.min((self.wheelbase() * a / (v * v)).atan())
+        self.vehicle_spec
+            .max_steer_angle_rad
+            .min((self.wheelbase() * a / (v * v)).atan())
     }
 
     /// Yaw rate the plant produces at speed `v` with the steering at full lock.
@@ -182,12 +195,19 @@ impl Config {
                     speed_mps: v,
                     max_steer_rad: self.max_steer_at_speed(v),
                     yaw_rate_rad_s: yaw,
-                    turn_radius_m: if yaw.abs() > 1e-6 { v / yaw } else { f32::INFINITY },
+                    turn_radius_m: if yaw.abs() > 1e-6 {
+                        v / yaw
+                    } else {
+                        f32::INFINITY
+                    },
                     lateral_accel_mps2: v * yaw,
                 }
             })
             .collect();
-        DerivedReport { derived: self.derived(), turn_curve }
+        DerivedReport {
+            derived: self.derived(),
+            turn_curve,
+        }
     }
 
     pub fn derived_json(&self) -> String {
@@ -197,11 +217,16 @@ impl Config {
     // ---- the parameter structs of the individual models ----
 
     pub fn engine_params(&self) -> EngineParams {
-        EngineParams { max_accel_mps2: self.vehicle_spec.max_accel_mps2 }
+        EngineParams {
+            max_accel_mps2: self.vehicle_spec.max_accel_mps2,
+        }
     }
 
     pub fn brake_params(&self) -> BrakeParams {
-        BrakeParams { max_decel_mps2: self.vehicle_spec.max_decel_mps2, estop_max_decel_mps2: self.tuning.estop_max_decel_mps2 }
+        BrakeParams {
+            max_decel_mps2: self.vehicle_spec.max_decel_mps2,
+            estop_max_decel_mps2: self.tuning.estop_max_decel_mps2,
+        }
     }
 
     pub fn steering_params(&self) -> SteeringParams {
@@ -254,7 +279,9 @@ impl std::fmt::Display for ConfigError {
 // schema 1 (read-only: converted to schema 2)
 // ---------------------------------------------------------------------------
 
-const V1_KEYS: [&str; 6] = ["engine", "brake", "steering", "vehicle", "safety", "failsafe"];
+const V1_KEYS: [&str; 6] = [
+    "engine", "brake", "steering", "vehicle", "safety", "failsafe",
+];
 
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -334,21 +361,36 @@ impl ConfigV1 {
         set!(p.drag_coeff, self.vehicle.linear_drag);
         set!(s.top_speed_mps, self.vehicle.max_speed_mps);
         set!(s.estop_decel_mps2, self.vehicle.estop_decel_mps2);
-        set!(t.safety.heartbeat_timeout_ms, self.safety.heartbeat_timeout_ms);
-        set!(t.failsafe.driver_timeout_ms, self.failsafe.driver_timeout_ms);
-        set!(t.failsafe.safety_timeout_ms, self.failsafe.safety_timeout_ms);
+        set!(
+            t.safety.heartbeat_timeout_ms,
+            self.safety.heartbeat_timeout_ms
+        );
+        set!(
+            t.failsafe.driver_timeout_ms,
+            self.failsafe.driver_timeout_ms
+        );
+        set!(
+            t.failsafe.safety_timeout_ms,
+            self.failsafe.safety_timeout_ms
+        );
         c
     }
 }
 
 fn whole_document_error(reason: impl Into<String>) -> Vec<ConfigError> {
-    vec![ConfigError { path: "$".into(), reason: reason.into() }]
+    vec![ConfigError {
+        path: "$".into(),
+        reason: reason.into(),
+    }]
 }
 
 /// Parse and validate (schema 1 is converted). On error nothing is returned except the full list of problems.
 pub fn parse(json: &str) -> Result<Config, Vec<ConfigError>> {
-    let value: serde_json::Value = serde_json::from_str(json).map_err(|e| whole_document_error(e.to_string()))?;
-    let obj = value.as_object().ok_or_else(|| whole_document_error("expected a JSON object"))?;
+    let value: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| whole_document_error(e.to_string()))?;
+    let obj = value
+        .as_object()
+        .ok_or_else(|| whole_document_error("expected a JSON object"))?;
 
     let legacy = match obj.get("schema") {
         Some(v) => match v.as_u64() {
@@ -357,7 +399,9 @@ pub fn parse(json: &str) -> Result<Config, Vec<ConfigError>> {
             _ => {
                 return Err(vec![ConfigError {
                     path: "schema".into(),
-                    reason: format!("unsupported schema version {v} (supported: 1 [converted], {SCHEMA_VERSION})"),
+                    reason: format!(
+                    "unsupported schema version {v} (supported: 1 [converted], {SCHEMA_VERSION})"
+                ),
                 }])
             }
         },
@@ -365,7 +409,9 @@ pub fn parse(json: &str) -> Result<Config, Vec<ConfigError>> {
     };
 
     let cfg = if legacy {
-        serde_json::from_value::<ConfigV1>(value).map_err(|e| whole_document_error(e.to_string()))?.into_v2()
+        serde_json::from_value::<ConfigV1>(value)
+            .map_err(|e| whole_document_error(e.to_string()))?
+            .into_v2()
     } else {
         serde_json::from_value::<Config>(value).map_err(|e| whole_document_error(e.to_string()))?
     };
@@ -386,7 +432,10 @@ struct Checker(Vec<ConfigError>);
 
 impl Checker {
     fn err(&mut self, path: &str, reason: String) {
-        self.0.push(ConfigError { path: path.into(), reason });
+        self.0.push(ConfigError {
+            path: path.into(),
+            reason,
+        });
     }
 
     fn range_f32(&mut self, path: &str, v: f32, lo: f32, hi: f32) {
@@ -406,29 +455,76 @@ impl Checker {
 pub fn validate(c: &Config) -> Vec<ConfigError> {
     let mut k = Checker(Vec::new());
     if c.schema != SCHEMA_VERSION {
-        k.err("schema", format!("unsupported schema version {} (supported: {SCHEMA_VERSION})", c.schema));
+        k.err(
+            "schema",
+            format!(
+                "unsupported schema version {} (supported: {SCHEMA_VERSION})",
+                c.schema
+            ),
+        );
     }
     let (s, p, t) = (&c.vehicle_spec, &c.physics, &c.tuning);
     k.range_f32("vehicle_spec.wheelbase_m", s.wheelbase_m, 0.05, 5.0);
     k.range_f32("vehicle_spec.wheel_radius_m", s.wheel_radius_m, 0.005, 1.0);
-    k.range_f32("vehicle_spec.max_steer_angle_rad", s.max_steer_angle_rad, 0.05, 0.6);
-    k.range_f32("vehicle_spec.steer_time_constant_s", s.steer_time_constant_s, 0.01, 2.0);
+    k.range_f32(
+        "vehicle_spec.max_steer_angle_rad",
+        s.max_steer_angle_rad,
+        0.05,
+        0.6,
+    );
+    k.range_f32(
+        "vehicle_spec.steer_time_constant_s",
+        s.steer_time_constant_s,
+        0.01,
+        2.0,
+    );
     k.range_f32("vehicle_spec.top_speed_mps", s.top_speed_mps, 0.1, 50.0);
     k.range_f32("vehicle_spec.max_accel_mps2", s.max_accel_mps2, 0.0, 10.0);
     k.range_f32("vehicle_spec.max_decel_mps2", s.max_decel_mps2, 0.1, 10.0);
-    k.range_f32("vehicle_spec.estop_decel_mps2", s.estop_decel_mps2, 0.0, 20.0);
+    k.range_f32(
+        "vehicle_spec.estop_decel_mps2",
+        s.estop_decel_mps2,
+        0.0,
+        20.0,
+    );
     k.range_f32("physics.gravity_mps2", p.gravity_mps2, 1.0, 25.0);
     k.range_f32("physics.tire_friction_mu", p.tire_friction_mu, 0.05, 1.5);
     k.range_f32("physics.drag_coeff", p.drag_coeff, 0.0, 2.0);
-    k.range_f32("tuning.estop_max_decel_mps2", t.estop_max_decel_mps2, 0.1, 15.0);
-    if t.estop_max_decel_mps2.is_finite() && s.max_decel_mps2.is_finite() && t.estop_max_decel_mps2 < s.max_decel_mps2 {
+    k.range_f32(
+        "tuning.estop_max_decel_mps2",
+        t.estop_max_decel_mps2,
+        0.1,
+        15.0,
+    );
+    if t.estop_max_decel_mps2.is_finite()
+        && s.max_decel_mps2.is_finite()
+        && t.estop_max_decel_mps2 < s.max_decel_mps2
+    {
         k.err(
             "tuning.estop_max_decel_mps2",
-            format!("must not be smaller than vehicle_spec.max_decel_mps2 ({})", s.max_decel_mps2),
+            format!(
+                "must not be smaller than vehicle_spec.max_decel_mps2 ({})",
+                s.max_decel_mps2
+            ),
         );
     }
-    k.range_u32("tuning.safety.heartbeat_timeout_ms", t.safety.heartbeat_timeout_ms, 200, 10_000);
-    k.range_u32("tuning.failsafe.driver_timeout_ms", t.failsafe.driver_timeout_ms, 50, 2000);
-    k.range_u32("tuning.failsafe.safety_timeout_ms", t.failsafe.safety_timeout_ms, 30, 1000);
+    k.range_u32(
+        "tuning.safety.heartbeat_timeout_ms",
+        t.safety.heartbeat_timeout_ms,
+        200,
+        10_000,
+    );
+    k.range_u32(
+        "tuning.failsafe.driver_timeout_ms",
+        t.failsafe.driver_timeout_ms,
+        50,
+        2000,
+    );
+    k.range_u32(
+        "tuning.failsafe.safety_timeout_ms",
+        t.failsafe.safety_timeout_ms,
+        30,
+        1000,
+    );
     k.0
 }

@@ -43,7 +43,10 @@ fn actuator_link_to_the_plant_is_not_delayed() {
     for _ in 0..20 {
         s.step_10ms();
     }
-    assert_eq!(s.rte(Node::Engine).cmd.drive_accel_cmd, s.rte(Node::Plant).cmd.drive_accel_cmd);
+    assert_eq!(
+        s.rte(Node::Engine).cmd.drive_accel_cmd,
+        s.rte(Node::Plant).cmd.drive_accel_cmd
+    );
 }
 
 #[test]
@@ -103,7 +106,11 @@ fn bus_down_is_detected_by_the_vcu_watchdog_after_the_timeout() {
     for _ in 0..90 {
         s.step_10ms();
     }
-    assert_eq!(s.safety().system_state, SystemState::Normal, "within 1 s of silence");
+    assert_eq!(
+        s.safety().system_state,
+        SystemState::Normal,
+        "within 1 s of silence"
+    );
     for _ in 0..60 {
         s.step_10ms();
     }
@@ -126,7 +133,10 @@ fn short_bus_outage_recovers_without_a_latch() {
     }
     assert!(!s.ecu_failsafe(Node::Engine).safety_timeout);
     assert_eq!(s.safety().system_state, SystemState::Normal);
-    assert!(s.rte(Node::Engine).cmd.drive_accel_cmd > 0.0, "throttle is back");
+    assert!(
+        s.rte(Node::Engine).cmd.drive_accel_cmd > 0.0,
+        "throttle is back"
+    );
 }
 
 #[test]
