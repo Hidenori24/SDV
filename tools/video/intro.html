@@ -1,0 +1,376 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<!-- 紹介動画（82 秒）。window.renderAt(t) が時刻 t の 1 フレームを描く。3D は three.js、文字と図は hud.js の 2D Canvas -->
+<style>
+html,body{margin:0;background:#000;overflow:hidden}
+#gl,#hud{position:absolute;left:0;top:0;width:1920px;height:1080px}
+</style>
+<script type="importmap">{"imports":{"three":"./node_modules/three/build/three.module.js","three/addons/":"./node_modules/three/examples/jsm/"}}</script>
+<script src="golden.js"></script>
+<script src="hud.js"></script>
+</head><body>
+<canvas id="gl"></canvas><canvas id="hud" width="1920" height="1080"></canvas>
+<script type="module">
+import * as THREE from 'three';
+import {EffectComposer} from 'three/addons/postprocessing/EffectComposer.js';
+import {RenderPass} from 'three/addons/postprocessing/RenderPass.js';
+import {UnrealBloomPass} from 'three/addons/postprocessing/UnrealBloomPass.js';
+import {OutputPass} from 'three/addons/postprocessing/OutputPass.js';
+import {SMAAPass} from 'three/addons/postprocessing/SMAAPass.js';
+
+const Q=new URLSearchParams(location.search);
+const GW=+(Q.get('gw')||1440),GH=GW*9/16;      // 3D の描画解像度（?gw=1920 で等倍。重い）
+let seed=7;const rnd=()=>{seed=(seed*1664525+1013904223)>>>0;return seed/4294967296};
+
+/* ---------- 時間割 ---------- */
+const SC=[
+ {id:'title', s:0,  e:7,   label:'OVERVIEW'},
+ {id:'arch',  s:7,  e:17,  label:'ARCHITECTURE'},
+ {id:'ecu',   s:17, e:28,  label:'ECU / BUS'},
+ {id:'safe',  s:28, e:39,  label:'SAFETY'},
+ {id:'golden',s:39, e:49,  label:'REPLAY'},
+ {id:'fota',  s:49, e:61,  label:'UPDATE'},
+ {id:'future',s:61, e:76,  label:'ROADMAP'},
+ {id:'end',   s:76, e:82,  label:''},
+];
+const DURATION=82;window.DURATION=DURATION;
+const scn=id=>SC.find(x=>x.id===id);
+
+/* ---------- 3D ---------- */
+const renderer=new THREE.WebGLRenderer({canvas:document.getElementById('gl'),antialias:false,preserveDrawingBuffer:true});
+renderer.setPixelRatio(1);renderer.setSize(GW,GH,false);
+renderer.toneMapping=THREE.ACESFilmicToneMapping;renderer.toneMappingExposure=1.15;
+renderer.shadowMap.enabled=true;renderer.shadowMap.type=THREE.PCFShadowMap;
+const scene=new THREE.Scene();
+const NIGHT=new THREE.Color(0x05080f),DAWN=new THREE.Color(0x3a2a4a);
+scene.background=NIGHT.clone();scene.fog=new THREE.FogExp2(0x05080f,0.018);
+const camera=new THREE.PerspectiveCamera(38,W/H,0.1,600);
+
+// 車体の映り込み用の環境（車の材質にだけ使う。全体に使うとソフトウェア描画では重い）
+let envTex;
+{const es=new THREE.Scene();es.background=new THREE.Color(0x020308);
+ const mk=(c,x,y,z,sx,sy,sz,i)=>{const m=new THREE.Mesh(new THREE.BoxGeometry(sx,sy,sz),new THREE.MeshBasicMaterial({color:new THREE.Color(c).multiplyScalar(i)}));m.position.set(x,y,z);es.add(m)};
+ mk(0xffc890,-8,6,-4,1,1,7,10);mk(0xffc890,8,6,6,1,1,7,10);mk(0x40e0ff,0,9,0,14,0.3,0.6,4);mk(0x3050a0,0,-2,-14,30,6,1,1.2);mk(0x8090c0,0,12,0,30,0.5,30,0.4);mk(0x6070a0,-14,3,0,1,5,30,0.5);mk(0x6070a0,14,3,0,1,5,30,0.5);
+ envTex=new THREE.PMREMGenerator(renderer).fromScene(es,0.03).texture;}
+
+const hemi=new THREE.HemisphereLight(0x4060a0,0x080808,0.55);scene.add(hemi);
+const moon=new THREE.DirectionalLight(0x9fb8ff,1.2);moon.position.set(-9,14,6);moon.castShadow=true;
+moon.shadow.mapSize.set(1024,1024);Object.assign(moon.shadow.camera,{left:-6,right:6,top:6,bottom:-6,near:1,far:40});moon.shadow.bias=-0.0006;moon.shadow.normalBias=0.02;scene.add(moon);
+
+// 道路
+function roadTex(){const c=document.createElement('canvas');c.width=512;c.height=1024;const x=c.getContext('2d');
+ x.fillStyle='#1b1d21';x.fillRect(0,0,512,1024);
+ for(let i=0;i<26000;i++){const v=20+rnd()*45|0;x.fillStyle=`rgba(${v},${v},${v+4},${0.25+rnd()*0.5})`;x.fillRect(rnd()*512,rnd()*1024,1+rnd()*2,1+rnd()*2)}
+ for(let i=0;i<40;i++){x.strokeStyle='rgba(8,8,10,0.5)';x.lineWidth=1;x.beginPath();let px=rnd()*512,py=rnd()*1024;x.moveTo(px,py);for(let k=0;k<6;k++){px+=rnd()*30-15;py+=rnd()*40;x.lineTo(px,py)}x.stroke()}
+ x.fillStyle='#d8d8cc';x.fillRect(40,0,9,1024);x.fillRect(463,0,9,1024);
+ x.fillStyle='#e8d890';x.fillRect(251,60,10,400);x.fillRect(251,572,10,400);
+ const t=new THREE.CanvasTexture(c);t.wrapS=t.wrapT=THREE.RepeatWrapping;t.repeat.set(1,30);t.anisotropy=8;t.colorSpace=THREE.SRGBColorSpace;return t}
+const rt=roadTex();
+const road=new THREE.Mesh(new THREE.PlaneGeometry(11,480),new THREE.MeshStandardMaterial({map:rt,roughness:0.5,metalness:0.0}));
+road.rotation.x=-Math.PI/2;road.position.set(-1.7,0,-120);road.receiveShadow=true;scene.add(road);
+const ground=new THREE.Mesh(new THREE.PlaneGeometry(600,600),new THREE.MeshLambertMaterial({color:0x0a0c10}));
+ground.rotation.x=-Math.PI/2;ground.position.set(0,-0.02,-120);scene.add(ground);
+// 地面のグリッド（x-ray 表示のときだけ見える）
+const grid=new THREE.GridHelper(44,22,0x1fd8ff,0x1fd8ff);grid.material.transparent=true;grid.material.opacity=0;grid.material.blending=THREE.AdditiveBlending;grid.material.depthWrite=false;grid.position.y=0.02;scene.add(grid);
+
+// 街灯（点光源は、車に近い 2 本ぶんだけ持って付け替える）
+const posts=[];const SP=26,NP=12;
+for(let i=0;i<NP;i++){const p=new THREE.Group();const side=i%2?1:-1;
+ const pm=new THREE.MeshStandardMaterial({color:0x2a2d33,roughness:0.6,metalness:0.7});
+ const pole=new THREE.Mesh(new THREE.CylinderGeometry(0.09,0.12,7,10),pm);pole.position.y=3.5;p.add(pole);
+ const arm=new THREE.Mesh(new THREE.BoxGeometry(2.2,0.1,0.12),pm);arm.position.set(-side*1.05,7,0);p.add(arm);
+ const b=new THREE.Mesh(new THREE.BoxGeometry(0.7,0.08,0.3),new THREE.MeshBasicMaterial({color:new THREE.Color(0xffc27a).multiplyScalar(4)}));b.position.set(-side*1.9,6.93,0);p.add(b);
+ p.position.x=side*6.6-1.7;p.userData={i,side};scene.add(p);posts.push(p)}
+const lampL=[new THREE.PointLight(0xffb060,110,36,1.8),new THREE.PointLight(0xffb060,110,36,1.8)];scene.add(...lampL);
+// 遠景のビル
+{const c=document.createElement('canvas');c.width=256;c.height=256;const x=c.getContext('2d');x.fillStyle='#04060a';x.fillRect(0,0,256,256);
+ for(let py=6;py<250;py+=10)for(let px=6;px<250;px+=9)if(rnd()<0.34){x.fillStyle=rnd()<0.75?'#ffd9a0':'#7fe8ff';x.globalAlpha=0.4+rnd()*0.6;x.fillRect(px,py,4,5)}
+ const tx=new THREE.CanvasTexture(c);tx.colorSpace=THREE.SRGBColorSpace;tx.wrapS=tx.wrapT=THREE.RepeatWrapping;
+ for(let i=0;i<70;i++){const w=6+rnd()*14,h=10+rnd()*60,d=6+rnd()*12;const t2=tx.clone();t2.repeat.set(w/14,h/14);t2.needsUpdate=true;
+  const m=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),new THREE.MeshBasicMaterial({map:t2,color:new THREE.Color(1.6,1.6,1.6)}));
+  const side=rnd()<0.5?-1:1;m.position.set(side*(22+rnd()*120),h/2,-150-rnd()*160);scene.add(m)}}
+// 星
+let stars;{const n=700,p=new Float32Array(n*3);for(let i=0;i<n;i++){const a=rnd()*Math.PI*2,e=0.08+rnd()*1.2,r=420;p[i*3]=Math.cos(a)*Math.cos(e)*r;p[i*3+1]=Math.sin(e)*r;p[i*3+2]=Math.sin(a)*Math.cos(e)*r}
+ const sg=new THREE.BufferGeometry();sg.setAttribute('position',new THREE.BufferAttribute(p,3));stars=new THREE.Points(sg,new THREE.PointsMaterial({color:0xcfe0ff,size:2,sizeAttenuation:false,transparent:true,opacity:0.8,fog:false}));scene.add(stars)}
+// 夜明けの光
+const glow=new THREE.Mesh(new THREE.PlaneGeometry(900,160),new THREE.ShaderMaterial({transparent:true,depthWrite:false,fog:false,uniforms:{k:{value:0}},
+ vertexShader:'varying vec2 u;void main(){u=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}',
+ fragmentShader:'varying vec2 u;uniform float k;void main(){float a=pow(1.-u.y,2.2)*exp(-pow((u.x-.5)*2.6,2.));vec3 c=mix(vec3(1.,.42,.25),vec3(1.,.75,.5),1.-u.y);gl_FragColor=vec4(c*2.2,a*k);}'}));
+glow.position.set(0,78,-400);scene.add(glow);
+
+/* ---------- 車（断面をつないだ曲面。前が -z） ---------- */
+const car=new THREE.Group();scene.add(car);
+const se=(c,n)=>Math.sign(c)*Math.pow(Math.abs(c),2/n);   // 超楕円
+const HL=2.25;                                           // 全長の半分
+function bodyP(u,th){
+ const s=0.5-0.5*Math.cos(Math.PI*u),e=Math.abs(2*s-1);  // 端に断面を集める
+ const plan=Math.pow(Math.max(1e-4,1-Math.pow(e,7)),0.28),endR=Math.pow(Math.max(1e-4,1-Math.pow(e,9)),0.33);
+ const w=0.93*plan*(0.962+0.038*Math.sin(Math.PI*s));
+ const yt=0.70+0.27*ss(s/0.34)-0.10*ss((s-0.8)/0.2),yb=0.27+0.10*Math.pow(e,5);
+ const yc=(yt+yb)/2,h=(yt-yb)/2*endR;
+ return [w*se(Math.cos(th),4.5),yc+h*se(Math.sin(th),3.2),lerp(-HL,HL,s)]}
+function cabP(u,th){
+ const s=lerp(0.25,0.87,u),k=Math.min(ss(u/0.34),1-ss((u-0.55)/0.45));
+ const roof=0.50*Math.pow(k,0.75)+0.002,wg=0.80*(0.93+0.07*Math.sin(Math.PI*u));
+ const c=Math.cos(th),sn=Math.sin(th),tumble=1-0.20*Math.pow(Math.max(0,sn),1.3);
+ return [wg*se(c,3.5)*tumble,0.93+roof*se(sn,2.6)*(sn<0?0.3:1),lerp(-HL,HL,s)]}
+function loft(nS,nR,fn){const pos=[],idx=[];
+ for(let i=0;i<=nS;i++)for(let j=0;j<nR;j++)pos.push(...fn(i/nS,j/nR*Math.PI*2));
+ for(let i=0;i<nS;i++)for(let j=0;j<nR;j++){const a=i*nR+j,b=i*nR+(j+1)%nR,c=(i+1)*nR+j,d=(i+1)*nR+(j+1)%nR;idx.push(a,b,c,b,d,c)}
+ const geo=new THREE.BufferGeometry();geo.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));geo.setIndex(idx);geo.computeVertexNormals();return geo}
+function loftLines(nS,nR,fn,ds,dr){const p=[];const P=(i,j)=>fn(i/nS,(j%nR)/nR*Math.PI*2);
+ for(let i=ds;i<nS;i+=ds)for(let j=0;j<nR;j++)p.push(...P(i,j),...P(i,j+1));
+ for(let j=0;j<nR;j+=dr)for(let i=0;i<nS;i++)p.push(...P(i,j),...P(i+1,j));
+ const geo=new THREE.BufferGeometry();geo.setAttribute('position',new THREE.Float32BufferAttribute(p,3));return geo}
+const paint=new THREE.MeshPhysicalMaterial({color:0x202a3a,metalness:0.8,roughness:0.3,clearcoat:1,clearcoatRoughness:0.08,envMap:envTex,envMapIntensity:1.1,transparent:true});
+const glass=new THREE.MeshPhysicalMaterial({color:0x05080c,metalness:0.9,roughness:0.05,envMap:envTex,envMapIntensity:1.3,transparent:true,opacity:0.95});
+const body=new THREE.Mesh(loft(72,56,bodyP),paint),cab=new THREE.Mesh(loft(48,48,cabP),glass);body.castShadow=cab.castShadow=true;car.add(body,cab);
+const edgeMat=new THREE.LineBasicMaterial({color:0x35e6ff,transparent:true,opacity:0,blending:THREE.AdditiveBlending,depthWrite:false});
+car.add(new THREE.LineSegments(loftLines(72,56,bodyP,4,7),edgeMat),new THREE.LineSegments(loftLines(48,48,cabP,6,8),edgeMat));
+// 車輪とホイールハウス
+const wheels=[];const tireM=new THREE.MeshStandardMaterial({color:0x0b0b0c,roughness:0.85,transparent:true}),rimM=new THREE.MeshStandardMaterial({color:0xa8b2be,metalness:1,roughness:0.25,envMap:envTex,transparent:true}),archM=new THREE.MeshBasicMaterial({color:0x020203,transparent:true});
+const WR=0.34;
+for(const [x,z] of [[-0.8,-1.42],[0.8,-1.42],[-0.8,1.38],[0.8,1.38]]){
+ const arch=new THREE.Mesh(new THREE.CylinderGeometry(0.44,0.44,0.26,48),archM);arch.rotation.z=Math.PI/2;arch.position.set(x*0.995,WR+0.02,z);car.add(arch);
+ const w=new THREE.Group(),spin=new THREE.Group();w.add(spin);
+ const tire=new THREE.Mesh(new THREE.TorusGeometry(0.245,0.095,20,56),tireM);tire.rotation.y=Math.PI/2;tire.scale.z=1.25;tire.castShadow=true;spin.add(tire);
+ const rim=new THREE.Mesh(new THREE.CylinderGeometry(0.175,0.175,0.2,40),rimM);rim.rotation.z=Math.PI/2;spin.add(rim);
+ for(let k=0;k<5;k++){const sp=new THREE.Mesh(new THREE.BoxGeometry(0.215,0.33,0.05),rimM);sp.rotation.x=k*Math.PI*2/5;sp.position.x=0;spin.add(sp)}
+ const ring=new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.CylinderGeometry(WR,WR,0.24,40),40),edgeMat);ring.rotation.z=Math.PI/2;w.add(ring);
+ w.position.set(x*1.02,WR,z);w.userData.spin=spin;car.add(w);wheels.push(w)}
+// 灯火
+const hlM=new THREE.MeshBasicMaterial({color:new THREE.Color(0xdff2ff).multiplyScalar(3.4)});
+const tlM=new THREE.MeshBasicMaterial({color:new THREE.Color(0xff1a1a).multiplyScalar(2.5)});
+for(const x of [-0.5,0.5]){const h=new THREE.Mesh(new THREE.BoxGeometry(0.5,0.035,0.05),hlM);h.position.set(x,0.6,-HL-0.005);car.add(h)}
+const head=new THREE.SpotLight(0xcfe6ff,150,48,0.5,0.6,1.6);head.position.set(0,0.62,-2.1);head.target.position.set(0,0,-16);car.add(head,head.target);
+const tail=new THREE.Mesh(new THREE.BoxGeometry(1.36,0.035,0.05),tlM);tail.position.set(0,0.76,HL+0.005);car.add(tail);
+const tailL=new THREE.PointLight(0xff2020,6,6,2);tailL.position.set(0,0.75,2.8);car.add(tailL);
+// 接地の影
+{const c=document.createElement('canvas');c.width=128;c.height=256;const x=c.getContext('2d');const gr=x.createRadialGradient(64,128,10,64,128,120);gr.addColorStop(0,'rgba(0,0,0,0.85)');gr.addColorStop(1,'rgba(0,0,0,0)');x.fillStyle=gr;x.scale(1,2);x.fillRect(0,0,128,128);
+ x.setTransform(1,0,0,1,0,0);const m=new THREE.Mesh(new THREE.PlaneGeometry(2.9,5.8),new THREE.MeshBasicMaterial({map:new THREE.CanvasTexture(c),transparent:true,depthWrite:false}));m.rotation.x=-Math.PI/2;m.position.y=0.012;car.add(m);}
+// 車内の ECU ノードとバス
+const NODES={VCU:[0,0.80,0.1,0x35e6ff],ENG:[0,0.62,1.35,0x6dffb0],BRK:[0,0.52,-0.5,0xffc04d],STR:[0,0.64,-1.5,0xc79bff]};
+const nodeObj={};const nodeMats=[];
+for(const k in NODES){const [x,y,z,c]=NODES[k];const m=new THREE.MeshBasicMaterial({color:new THREE.Color(c).multiplyScalar(2.2),transparent:true,opacity:0});
+ const b=new THREE.Mesh(new THREE.BoxGeometry(0.36,0.13,0.36),m);b.position.set(x,y,z);car.add(b);nodeObj[k]=b;nodeMats.push(m)}
+const busMat=new THREE.LineBasicMaterial({color:0x35e6ff,transparent:true,opacity:0,blending:THREE.AdditiveBlending,depthWrite:false});
+{const p=[];const v=NODES.VCU;for(const k of ['ENG','BRK','STR']){const n=NODES[k];p.push(v[0],v[1],v[2],v[0],v[1],n[2],v[0],v[1],n[2],n[0],n[1],n[2])}
+ for(const [x,z] of [[-0.8,-1.42],[0.8,-1.42]])p.push(0,0.64,-1.5,x,WR,z);for(const [x,z] of [[-0.8,1.38],[0.8,1.38]])p.push(0,0.62,1.35,x,WR,z);
+ const bg=new THREE.BufferGeometry();bg.setAttribute('position',new THREE.Float32BufferAttribute(p,3));car.add(new THREE.LineSegments(bg,busMat))}
+const alarm=new THREE.PointLight(0xff2010,0,14,1.5);alarm.position.set(0,2.4,0);car.add(alarm);
+
+const composer=new EffectComposer(renderer);composer.setSize(GW,GH);
+composer.addPass(new RenderPass(scene,camera));
+composer.addPass(new UnrealBloomPass(new THREE.Vector2(GW,GH),0.5,0.5,0.9));
+composer.addPass(new OutputPass());
+if(Q.get('smaa')!=='0')composer.addPass(new SMAAPass(GW,GH));
+
+/* カメラ: [t, 位置xyz, 注視点xyz, 画面の横ずらし(px)] */
+const CK=[
+ [0,   -1.0,0.6,-14,  0,0.8,0,   380],
+ [3.5, -3.0,1.0,-9.0, 0,0.75,0,  520],
+ [6.4, -3.6,1.3,-7.8, 0,0.75,0,  480],
+ [8.6, 4.6,1.5,-6.0,  0,0.75,0,  -340],
+ [12.5,6.6,2.2,-1.0,  0,0.7,0,   -400],
+ [17,  5.6,3.6,3.6,   0,0.6,0,   -420],
+ [22.5,1.5,10.5,2.5,  0,0.5,-0.2,-470],
+ [28,  -4.5,3.2,6.5,  0,0.7,0,   -430],
+ [33.5,-5.6,1.6,4.6,  0,0.75,0,  -430],
+ [39,  -6.2,1.4,-2.0, 0,0.75,0,  -430],
+ [44,  -5.0,2.0,-5.6, 0,0.75,0,  -430],
+ [49,  -2.4,1.3,-8.2, 0,0.75,0,  -440],
+ [55,  3.4,1.5,-7.6,  0,0.75,0,  -440],
+ [61,  5.2,2.6,6.8,   0,0.9,-2,  0],
+ [68,  2.4,4.2,11.5,  0,1.2,-8,  0],
+ [76,  0,2.4,12,      0,1.6,-12, 0],
+ [82,  0,3.4,15.5,    0,2.2,-14, 0],
+];
+
+/* 走行: 安全のシーンでは、故障注入の基準ログの車速に合わせて減速・停止する */
+const stall=GOLDEN.stall,demo=GOLDEN.demo;   // 行: t,x,y,yaw,v,throttle,brake,steer,state,estop（20 ms ごと）
+const rowAt=(arr,tt)=>arr[clamp(Math.round(tt/0.02)-1,0,arr.length-1)];
+const SAFE=scn('safe');
+const logT=t=>lerp(2.4,6.4,clamp((t-SAFE.s-1.2)/(SAFE.e-SAFE.s-3.0)));   // 動画の時刻 → ログの時刻
+function speedAt(t){const cruise=17;
+ if(t<SAFE.s)return cruise;
+ if(t<SAFE.e)return lerp(cruise,rowAt(stall,logT(t))[4]/2.27*cruise,A(t,SAFE.s,1.2));
+ return lerp(0,cruise,ss((t-SAFE.e)/3))}
+const DIST=[];{let s=0;for(let f=0;f<=DURATION*30+2;f++){DIST.push(s);s+=speedAt(f/30)/30}}
+const XR=[[0,0],[2.6,0],[5,0.5],[7,0.55],[9,1],[27,1],[29,0.5],[38,0.5],[40,0.2],[48,0.2],[50,0.7],[60,0.7],[62,0.3],[75,0.25],[78,0],[82,0]];
+function xray(t){let i=0;while(i<XR.length-2&&t>XR[i+1][0])i++;return lerp(XR[i][1],XR[i+1][1],ss((t-XR[i][0])/(XR[i+1][0]-XR[i][0])))}
+
+const V3=new THREE.Vector3();
+function proj(obj){obj.getWorldPosition(V3);V3.project(camera);return [(V3.x*0.5+0.5)*W,(-V3.y*0.5+0.5)*H]}
+
+function update3D(t){
+ const s=DIST[Math.min(DIST.length-1,Math.round(t*30))];
+ rt.offset.y=(s/16)%1;                       // テクスチャ 1 枚 = 480/30 = 16 m
+ const near=[];
+ for(const p of posts){p.position.z=((p.userData.i*SP+s)%(NP*SP))-NP*SP+40;near.push(p)}
+ near.sort((a,b)=>Math.abs(a.position.z+4)-Math.abs(b.position.z+4));
+ lampL.forEach((l,i)=>l.position.set(near[i].position.x-near[i].userData.side*1.9,6.7,near[i].position.z));
+ grid.position.z=(s%2);
+ const st=(t>=SAFE.s&&t<SAFE.e)?rowAt(stall,logT(t)):null;
+ const steer=st?st[7]*0.35:Math.sin(t*0.5)*0.03;
+ wheels.forEach((w,i)=>{w.userData.spin.rotation.x=-s/WR;if(i<2)w.rotation.y=steer});
+ car.position.x=Math.sin(t*0.37)*0.12;car.rotation.y=Math.cos(t*0.37)*0.004;
+ car.position.z=-46*ss((t-63.5)/11);
+ const xr=xray(t);
+ paint.opacity=1-0.8*xr;glass.opacity=0.95-0.78*xr;tireM.opacity=rimM.opacity=1-0.6*xr;archM.opacity=1-0.9*xr;
+ paint.depthWrite=glass.depthWrite=archM.depthWrite=xr<0.3;
+ edgeMat.opacity=0.8*Math.min(1,xr*1.6);
+ for(const m of nodeMats)m.opacity=clamp(xr*1.5-0.15)*(0.8+0.2*Math.sin(t*6.28));
+ busMat.opacity=clamp(xr*1.5-0.15)*0.9;
+ grid.material.opacity=0.10*xr;
+ const state=st?st[8]:0,es=state===2;
+ alarm.intensity=es?12*(0.6+0.4*Math.sin(t*14)):(state===1?8:0);alarm.color.set(es?0xff2010:0xffa020);
+ tlM.color.set(0xff1a1a).multiplyScalar(es||(st&&st[6]>0)?7:2.5);tailL.intensity=es?14:6;
+ const dk=ss((t-scn('future').s-1)/9);         // 夜明け
+ scene.background.copy(NIGHT).lerp(DAWN,dk*0.75);scene.fog.color.copy(scene.background);scene.fog.density=lerp(0.018,0.008,dk);
+ hemi.intensity=lerp(0.55,1.5,dk);hemi.color.set(0x4060a0).lerp(new THREE.Color(0xc090b0),dk);
+ glow.material.uniforms.k.value=dk;stars.material.opacity=0.8*(1-dk*0.8);moon.color.set(0x9fb8ff).lerp(new THREE.Color(0xffb890),dk);
+ const c=splineAt(CK,t);camera.position.set(c[0],Math.max(0.35,c[1]),c[2]);camera.lookAt(c[3],c[4],c[5]);
+ if(Math.abs(c[6])>1)camera.setViewOffset(W,H,-c[6],0,W,H);else camera.clearViewOffset();
+ camera.updateProjectionMatrix();camera.updateMatrixWorld();car.updateMatrixWorld(true);
+ composer.render();
+ return {state,st};
+}
+
+/* ---------- HUD ---------- */
+initHud(document.getElementById('hud'));
+const sceneA=(sc,t)=>Math.min(A(t,sc.s+0.1,0.7),1-A(t,sc.e-0.6,0.6));
+const X=1000,PW=820;
+
+function sTitle(t,a){withA(a,()=>{
+ const lg=g.createLinearGradient(0,0,1300,0);lg.addColorStop(0,'rgba(2,5,10,0.85)');lg.addColorStop(1,'rgba(2,5,10,0)');g.fillStyle=lg;g.fillRect(0,540,1300,540);
+ slide(A(t,1.2,0.9),-40,()=>txt('SDV Playground',106,720,120,WH,{w:900}));
+ slide(A(t,2.0,0.9),-40,()=>{g.fillStyle=CY;g.fillRect(110,756,80,4);
+  txt('SDV（Software-Defined Vehicle）を自作していくための',110,826,38,WH,{w:500});txt('最小アーキテクチャと実装ベース',110,880,38,WH,{w:500})});
+ slide(A(t,3.0,0.9),-40,()=>txt('AUTOSAR-like  /  C++（参照実装）+ Rust  /  2D シミュレータ → RCカー相当の実機',110,948,25,DIM));
+})}
+
+function sArch(t,a){const s0=scn('arch').s;withA(a,()=>{
+ heading('01  ARCHITECTURE','AUTOSAR（Classic寄り）を参考にした構造',A(t,s0+0.4));
+ const rows=[
+  ['Application Layer（SWC）',CY,'DriverInput / Engine / Brake / Steering','VehicleDynamics / SafetySupervisor'],
+  ['RTE',GR,'Rte_Read / Rte_Write で信号 I/F を固定','Rust 実装では ECU ごとに 1 つ'],
+  ['BSW',AM,'TimeBase / Com（仮想バス）/ Nvm（Config）','Diag + Watchdog / Logging'],
+  ['Platform',PU,'OS・I/O・時刻・ファイルなどの依存を抽象化','']];
+ rows.forEach((r,i)=>{const y=290+i*146;slide(A(t,s0+1.2+i*1.0,0.7),40,()=>{panel(X,y,PW,128,{c:r[1],bar:128});txt(r[0],X+28,y+44,26,r[1],{w:700});txt(r[2],X+28,y+84,27,WH);if(r[3])txt(r[3],X+28,y+116,23,DIM)})});
+ slide(A(t,s0+5.6,0.7),40,()=>{let x=X;x+=chip('C++  参照実装（1 プロセス・1 RTE）',x,890,DIM,23)+14;chip('Rust  主役',x,890,CY,23,{fill:true});
+  txt('sdv-core / sdv-sec / sdv-fota / sdv-picarx',X,978,25,CY,{mono:true})});
+ withA(A(t,s0+2.5,0.8),()=>{tag('VCU',proj(nodeObj.VCU),CY,46,-120);tag('Steering ECU',proj(nodeObj.STR),PU,-46,-150);tag('Engine ECU',proj(nodeObj.ENG),GR,-46,-70)});
+})}
+
+function sEcu(t,a){const s0=scn('ecu').s;withA(a,()=>{
+ heading('02  ECU / BUS','ECU ごとの RTE を仮想バスで接続',A(t,s0+0.4));
+ slide(A(t,s0+1.0,0.7),40,()=>{panel(X,286,PW,560,{bar:0});
+  const cx=X+410;const N=(s,x,y,c,sub,hw=122)=>{g.fillStyle='rgba(8,18,28,0.96)';g.fillRect(x-hw,y-36,hw*2,72);g.strokeStyle=c;g.lineWidth=2.5;g.strokeRect(x-hw,y-36,hw*2,72);txt(s,x,y+(sub?-2:9),24,c,{w:700,al:'center'});if(sub)txt(sub,x,y+25,18,DIM,{al:'center'})};
+  const by=470;g.fillStyle='rgba(109,255,176,0.14)';g.fillRect(X+50,by-13,720,26);g.strokeStyle=GR;g.lineWidth=2;g.strokeRect(X+50,by-13,720,26);
+  line(cx,366,cx,by-13,CY,2);const ex=[X+150,cx,X+670];ex.forEach(x=>{line(x,by+13,x,574,CY,2);line(x,646,cx+(x-cx)*0.45,734,AM,4)});
+  const pk=(x1,y1,x2,y2,ph,c,per=1.0)=>{const k=((t/per+ph)%1+1)%1;g.fillStyle=c;g.beginPath();g.arc(lerp(x1,x2,k),lerp(y1,y2,k),5.5,0,7);g.fill()};
+  txt('車載バス（遅延 / 欠損 / 断を注入できる）',cx,by+8,20,GR,{al:'center',w:700});
+  N('VCU / ゲートウェイ ECU',cx,330,CY,'DriverInput・Safety（Watchdog）',190);N('Engine ECU',ex[0],610,GR);N('Brake ECU',ex[1],610,AM);N('Steering ECU',ex[2],610,PU);N('Plant（ECUではない）',cx,770,WH,'VehicleDynamics',160);
+  pk(cx,366,cx,by-13,0,CY,0.7);ex.forEach((x,i)=>{pk(x,by+13,x,574,0.2+i*0.1,CY,0.7);pk(x,574,x,by+13,0.6+i*0.13,GR,0.9);pk(x,646,cx+(x-cx)*0.45,734,0.1*i,AM,0.6)});
+  txt('太線: アクチュエータ線は直結。バス障害の影響を受けない',cx,828,20,AM,{al:'center'});});
+ const rows=[['DriverInput','20 ms',CY],['Safety','10 ms',RD],['Alive','10 ms',GR],['VehicleState','10 ms',WH]];
+ slide(A(t,s0+4.2,0.7),40,()=>{let x=X;rows.forEach(r=>{x+=chip(r[0]+' '+r[1],x,872,r[2],19,{mono:true})+10})});
+ slide(A(t,s0+5.6,0.7),40,()=>txt('10 ms 固定ステップ。遅延 0・欠損 0 なら C++ 版と同じログになる',X,976,27,WH));
+ withA(A(t,s0+3,0.8)*(1-A(t,s0+9.6,0.5)),()=>{tag('VCU',proj(nodeObj.VCU),CY,46,70);tag('Steering',proj(nodeObj.STR),PU,46,-60);tag('Brake',proj(nodeObj.BRK),AM,46,-50);tag('Engine',proj(nodeObj.ENG),GR,46,70)});
+})}
+
+function sSafe(t,a,S){const s0=SAFE.s;const lt=logT(t);const sc=[CY,AM,RD][S.state];withA(a,()=>{
+ heading('03  SAFETY','E-Stop（安全停止）が必ず効く',A(t,s0+0.4));
+ slide(A(t,s0+0.9,0.7),40,()=>{panel(X,286,PW,430,{c:sc,bar:0});
+  txt('故障注入: sdv_sim --stall steering:3 --stall brake:3.5 の基準ログ',X+26,326,20,DIM);
+  const gx=X+70,gy=350,gw=710,gh=250;const T0=2.4,T1=6.4;const px=tt=>gx+(tt-T0)/(T1-T0)*gw,py=v=>gy+gh-v/2.4*gh;
+  g.strokeStyle='rgba(147,174,189,0.22)';g.lineWidth=1;for(let i=0;i<=4;i++){const y=gy+gh*i/4;g.beginPath();g.moveTo(gx,y);g.lineTo(gx+gw,y);g.stroke()}
+  txt('車速 m/s',gx-8,gy+4,18,DIM,{al:'right'});txt('2.4',gx-8,gy+26,18,DIM,{al:'right',mono:true});txt('0',gx-8,gy+gh+4,18,DIM,{al:'right',mono:true});
+  const ev=[[3.0,'Steering 停止',PU,0],[3.5,'Brake 停止',AM,1],[4.12,'Degraded',AM,2],[4.62,'EStop',RD,3]];
+  ev.forEach(e=>{if(lt>=e[0]){line(px(e[0]),gy,px(e[0]),gy+gh,e[2],1.5,[6,5]);txt(e[1],px(e[0])-8,gy+gh-14-(3-e[3])*28,18,e[2],{w:700,al:'right'})}});
+  g.strokeStyle=sc;g.lineWidth=4;g.lineJoin='round';g.beginPath();let first=true;for(const r of stall){if(r[0]<T0)continue;if(r[0]>lt)break;const x=px(r[0]),y=py(r[4]);first?g.moveTo(x,y):g.lineTo(x,y);first=false}g.stroke();
+  line(px(lt),gy-6,px(lt),gy+gh+6,WH,2);
+  for(let k=3;k<=6;k++)txt(k+'.0 s',px(k),gy+gh+30,18,DIM,{al:'center',mono:true});
+  chip(['Normal','Degraded','EStop'][S.state],X+26,650,[GR,AM,RD][S.state],26,{fill:true});
+  txt('t = '+lt.toFixed(2)+' s   v = '+rowAt(stall,lt)[4].toFixed(2)+' m/s',X+794,684,24,WH,{mono:true,al:'right'});});
+ const rows=[['Watchdog（VCU）','Alive 途絶 > 1000 ms。1 つ → Degraded、2 つ以上 → EStop（ラッチ）',CY],['ECU の受信側フェイルセーフ','Safety 途絶 > 100 ms で自律的に EStop 相当。バス断・VCU 停止でも止まる',AM]];
+ rows.forEach((r,i)=>slide(A(t,s0+4.6+i*1.3,0.7),40,()=>{const y=740+i*112;panel(X,y,PW,96,{c:r[2],bar:96});txt(r[0],X+26,y+40,25,r[2],{w:700});txt(r[1],X+26,y+76,22,WH)}));
+ if(S.state===2)withA(0.7+0.3*Math.sin(t*14),()=>txt('EStop',470,330,84,RD,{w:900,al:'center',glow:'rgba(255,40,20,0.8)',gb:30}));
+ else if(S.state===1)txt('Degraded',470,330,60,AM,{w:900,al:'center',glow:'rgba(255,170,40,0.7)'});
+})}
+
+function sGolden(t,a){const s0=scn('golden').s;withA(a,()=>{
+ heading('04  REPLAY','同一入力でリプレイできる',A(t,s0+0.4));
+ slide(A(t,s0+0.9,0.7),40,()=>{panel(X,286,PW,440,{bar:0});
+  const ox=X+250,oy=690,sc=66;const P=r=>[ox+r[1]*sc,oy-r[2]*sc];
+  g.strokeStyle='rgba(147,174,189,0.16)';g.lineWidth=1;for(let i=-3;i<=8;i++){g.beginPath();g.moveTo(ox+i*sc,300);g.lineTo(ox+i*sc,712);g.stroke()}for(let j=0;j<=6;j++){g.beginPath();g.moveTo(X+14,oy-j*sc);g.lineTo(X+806,oy-j*sc);g.stroke()}
+  const k1=clamp((t-s0-1.4)/3.2),k2=clamp((t-s0-2.4)/3.2);
+  const draw=(k,c,lw)=>{g.strokeStyle=c;g.lineWidth=lw;g.lineJoin=g.lineCap='round';g.beginPath();const n=Math.floor(demo.length*k);for(let i=0;i<n;i++){const p=P(demo[i]);i?g.lineTo(p[0],p[1]):g.moveTo(p[0],p[1])}g.stroke();if(n>0&&k<1){const p=P(demo[n-1]);g.fillStyle=c;g.beginPath();g.arc(p[0],p[1],7,0,7);g.fill()}};
+  draw(k1,'rgba(238,246,251,0.5)',12);draw(k2,CY,4);
+  txt('走行軌跡 x–y（10 秒のデモシナリオ）',X+26,326,20,DIM);
+  g.fillStyle='rgba(238,246,251,0.5)';g.fillRect(X+26,352,34,10);txt('C++ 参照実装（基準ログ）',X+70,364,22,WH);g.fillStyle=CY;g.fillRect(X+26,388,34,4);txt('Rust 実装',X+70,398,22,CY);
+  withA(A(t,s0+5.8,0.5),()=>chip('基準ログ 4 本を全行再現',X+462,640,GR,25,{fill:true}));});
+ const st=[['368','Rust のテスト'],['90','C++ のテスト'],['TDD','全実装をテスト駆動で'],['ci-ok','PR のマージ条件']];
+ st.forEach((r,i)=>slide(A(t,s0+4.4+i*0.35,0.6),40,()=>{const x=X+i*207;panel(x,748,193,128,{cut:10,bar:0});txt(r[0],x+96,810,i<2?52:40,CY,{w:700,al:'center',mono:true});txt(r[1],x+96,852,i===2?18:21,WH,{al:'center'})}));
+ slide(A(t,s0+6.6,0.7),40,()=>{let x=X;x+=chip('Rust',x,902,CY,23,{mono:true})+10;txt('→',x,935,24,DIM);x+=36;x+=chip('WebAssembly',x,902,CY,23,{mono:true})+10;txt('→',x,935,24,DIM);x+=36;chip('ブラウザ GUI（GitHub Pages）',x,902,CY,23,{fill:true});
+  txt('サーバー不要。故障注入、Config / NVM の編集、シナリオ再生ができる',X,992,24,WH)});
+})}
+
+function sFota(t,a){const s0=scn('fota').s;withA(a,()=>{
+ heading('05  UPDATE','Config 更新と FOTA。失敗時はロールバック',A(t,s0+0.4));
+ const steps=['署名','導入','trial 起動','health check','commit'];
+ const ph=clamp((t-s0-1.6)/5.4)*5;
+ slide(A(t,s0+0.9,0.7),40,()=>{panel(X,286,PW,392,{bar:0});
+  txt('FOTA（rust/sdv-fota、ADR-0005）',X+26,328,22,CY,{w:700});
+  let x=X+26;steps.forEach((s,i)=>{const on=ph>=i+0.5,act=ph>=i&&ph<i+1;const c=on?GR:(act?CY:'#4a6474');const w=chip(s,x,350,c,22,{fill:on});x+=w;if(i<4){line(x+3,369,x+19,369,c,2);x+=22}});
+  const sw=350,sy=440;const trial=ph>=2,commit=ph>=4.5;
+  const slot=(sx,name,ver,stt,c)=>{g.fillStyle='rgba(8,18,28,0.96)';g.fillRect(sx,sy,sw,150);g.strokeStyle=c;g.lineWidth=2.5;g.strokeRect(sx,sy,sw,150);txt(name,sx+20,sy+40,23,DIM,{w:700});txt(ver,sx+20,sy+96,46,c,{w:700,mono:true});txt(stt,sx+sw-20,sy+132,22,c,{al:'right',w:700})};
+  slot(X+40,'スロット A','v1',commit?'Backup':'Active',commit?DIM:GR);
+  g.fillStyle='rgba(53,230,255,0.10)';g.fillRect(X+430,sy,sw*clamp(ph-1),150);
+  slot(X+430,'スロット B',ph>=1?'v2':'—',commit?'Active':(trial?'trial 中':(ph>=1?'導入済み':'空')),commit?GR:(trial?AM:CY));
+  txt('起動失敗・不合格・Commit なしのときは、自動で v1 に戻す',X+410,640,22,AM,{al:'center',w:700});});
+ slide(A(t,s0+3.2,0.7),40,()=>{panel(X,700,PW,96,{c:AM,bar:96});txt('Config / NVM（ADR-0003）',X+26,740,25,AM,{w:700});txt('検証 → A/B 2 面 + CRC32 → 試験適用 → 不合格なら自動ロールバック',X+26,776,22,WH)});
+ slide(A(t,s0+4.6,0.7),40,()=>{panel(X,816,PW,96,{c:PU,bar:96});txt('sdv-sec',X+26,856,25,PU,{w:700,mono:true});txt('SHA-256 / Ed25519 検証 / フレーム MAC（no_std、C ABI）',X+26,892,22,WH)});
+ slide(A(t,s0+7.4,0.7),40,()=>txt('Pi 5 / Linux の統合テストで確認済み。実機での確認は未実施',X,976,24,DIM));
+})}
+
+function sFuture(t,a){const s0=scn('future').s;withA(a,()=>{
+ {const lg=g.createLinearGradient(0,0,1500,0);lg.addColorStop(0,'rgba(4,6,12,0.8)');lg.addColorStop(0.6,'rgba(4,6,12,0.6)');lg.addColorStop(1,'rgba(4,6,12,0)');g.fillStyle=lg;g.fillRect(0,110,1500,240)}
+ slide(A(t,s0+0.5),-30,()=>{txt('06  ROADMAP',110,170,24,AM,{mono:true,w:700});g.fillStyle=AM;g.fillRect(110,186,56,3);txt('今後: シミュレータから実機へ',110,262,58,WH,{w:700});txt('実機は PiCar-X + Raspberry Pi 5。以下は未完了の項目',110,312,26,WH)});
+ const cards=[
+  ['実機','Robot HAT の I2C / GPIO 接続と PiCar-X での確認','信号契約はシミュレーションと共通。速度センサなしの開ループ制御を評価する',CY],
+  ['ECU 構成','ECU 構成を設定で切り替える','機能 ECU（案A）に加えて、ドメイン統合（案B）、中央 + ゾーン（案C）を試す',GR],
+  ['FOTA 段階2','SWC を実 WASM モジュールにして差し替える','現状は論理イメージ（案A）。段階2 は別 ADR で扱う',PU],
+  ['AUTOSAR Classic','BSW / MCAL / Bootloader との結合','現状は責務境界の案。Classic 準拠とは扱わない',AM]];
+ cards.forEach((c,i)=>{const col=i%2,row=i>>1;const x=110+col*870,y=640+row*170;slide(A(t,s0+2.0+i*1.8,0.8),col?40:-40,()=>{panel(x,y,830,150,{c:c[3],bg:'rgba(6,11,18,0.84)',bar:150});
+  txt(c[0],x+28,y+42,21,c[3],{w:700});txt(c[1],x+28,y+86,29,WH,{w:700});txt(c[2],x+28,y+124,20,DIM)})});
+})}
+
+function sEnd(t,a){withA(a,()=>{
+ g.fillStyle='rgba(2,6,12,0.5)';g.fillRect(0,0,W,H);
+ txt('SDV Playground',W/2,440,116,WH,{w:900,al:'center'});
+ txt('部品単体 → 統合 → SDV化',W/2,524,34,CY,{al:'center',w:700});
+ txt('設計判断は ADR に残し、PR は小さく、動くものから順に出す',W/2,592,28,WH,{al:'center'});
+ g.font=`700 32px ${MONO}`;const w=g.measureText('github.com/Hidenori24/SDV').width+72;g.strokeStyle=CY;g.lineWidth=2;g.strokeRect(W/2-w/2,664,w,72);
+ txt('github.com/Hidenori24/SDV',W/2,712,32,CY,{al:'center',mono:true,w:700});
+ txt('MIT License',W/2,796,22,DIM,{al:'center',mono:true});
+})}
+
+function frameHUD(t,S){
+ if(S.state===2){const p=0.16+0.1*Math.sin(t*14);const rg=g.createRadialGradient(W/2,H/2,H*0.3,W/2,H/2,H);rg.addColorStop(0,'rgba(255,0,0,0)');rg.addColorStop(1,`rgba(255,20,10,${p})`);g.fillStyle=rg;g.fillRect(0,0,W,H)}
+ frameChrome(t,{title:'SDV Playground',scenes:SC,duration:DURATION,status:[['Normal','Degraded','EStop'][S.state],[GR,AM,RD][S.state]]});
+ const a=x=>sceneA(scn(x),t),on=x=>t>scn(x).s-0.2&&t<scn(x).e+0.2;
+ if(on('title'))sTitle(t,a('title'));
+ if(on('arch'))sArch(t,a('arch'));
+ if(on('ecu'))sEcu(t,a('ecu'));
+ if(on('safe'))sSafe(t,a('safe'),S);
+ if(on('golden'))sGolden(t,a('golden'));
+ if(on('fota'))sFota(t,a('fota'));
+ if(on('future'))sFuture(t,a('future'));
+ if(t>scn('end').s-0.2)sEnd(t,Math.min(A(t,scn('end').s+0.3,0.9),1-A(t,DURATION-0.8,0.8)));
+ frameFade(t,DURATION);
+}
+
+window.renderAt=function(t){const S=update3D(t);g.clearRect(0,0,W,H);g.globalAlpha=1;frameHUD(t,S);return true};
+document.fonts.load(`900 40px ${JP}`).then(()=>{window.renderAt(0);window.READY=true});
+</script></body></html>

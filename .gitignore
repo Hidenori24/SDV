@@ -63,3 +63,10 @@ web/sdv_core.wasm
 
 # simulator output (generated on every run)
 logs/
+
+# tools/video（紹介動画の生成物）
+tools/video/node_modules/
+tools/video/out/
+tools/video/golden.js
+tools/video/audio_*.wav
+tools/video/still_*.jpg
