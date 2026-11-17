@@ -111,6 +111,7 @@ tools/      図の生成・可視化・説明動画の生成などの補助ス�
 - [rust/README.md](rust/README.md) : Rust 実装の構成・WASM API
 - [rust/sdv-sec/README.md](rust/sdv-sec/README.md) : 通信の基礎ライブラリ（SHA-256・Ed25519 検証・フレーム MAC、C ABI）
 - [rust/sdv-fota/README.md](rust/sdv-fota/README.md) : FOTA（署名済みパッケージの検証、A/B 更新、trial / commit / rollback、Pi 5 の導入・起動、Classic 向け C ABI）
+- [docs/notes/pi_bringup.md](docs/notes/pi_bringup.md) : Raspberry Pi の初回セットアップと、車体なしでできる確認（`tools/pi/bringup_check.sh`）
 - [rust/sdv-picarx/README.md](rust/sdv-picarx/README.md) : PiCar-X プラットフォーム（Robot HAT・車両ホスト・仮想 ECU ワーカー）
 - [docs/design/fota_classic_architecture.md](docs/design/fota_classic_architecture.md) : AUTOSAR Classic を基準にした ECU / FOTA の責務境界案
 - [e2e/README.md](e2e/README.md) : GUI のブラウザ E2E テスト（少数のスモークテスト）

@@ -1,5 +1,9 @@
 # Pi 5 FOTA host workflow
 
+> First day with a new Pi? Start with [docs/notes/pi_bringup.md](../notes/pi_bringup.md) (Japanese): OS install, build,
+> tests and a FOTA dry run in a temporary directory, with nothing installed on the system. Come back here for the
+> real data volume and the systemd units.
+
 This is the development workflow for the Linux application-image backend. It updates only files
 under `/var/lib/sdv-fota`; it does not write the Pi OS, EEPROM, boot partition, or raw devices.
 The host CLI can install from a local package file or stream a package from an HTTPS URL. HTTPS

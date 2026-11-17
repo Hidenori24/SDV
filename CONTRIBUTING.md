@@ -73,6 +73,8 @@ cargo build --release --target aarch64-unknown-linux-gnu --manifest-path rust/sd
 cargo test  --target aarch64-unknown-linux-gnu --manifest-path rust/sdv-fota/Cargo.toml
 ```
 
+**成果物（`sdv-aarch64-binaries`）は glibc 2.39 以上の OS でしか起動できない**（Ubuntu 24.04 の sysroot でリンクするため。[#187](https://github.com/Hidenori24/SDV/issues/187)）。Pi の上でビルドする場合は関係ない。実機での最初の確認は [docs/notes/pi_bringup.md](docs/notes/pi_bringup.md)。
+
 エミュレーションでは時間依存のテストが不安定になる。CI の `aarch64` ジョブは次のようにしている（実機のテストの代わりにはならない）。
 - `sdv-sec` / `sdv-core`: 全テストを実行
 - `sdv-fota`: 全テストを実行。時間依存のテストが稀に揺らぐので最大 3 回試す（決定的な失敗は毎回落ちるので見逃さない）
