@@ -308,7 +308,7 @@ impl Drop for HttpsPackageSource {
 pub struct FileSlotStorage {
     root: PathBuf,
     pending: Option<PendingImage>,
-    update_lock: Option<File>,
+    update_lock: Option<UpdateLock>,
 }
 
 struct PendingImage {
@@ -536,7 +536,27 @@ impl ImageStorage for FileSlotStorage {
     }
 }
 
-fn acquire_update_lock(root: &Path) -> Result<File, Error> {
+/// Exclusive per-target image update lock.
+///
+/// Dropping it unlocks explicitly instead of only closing the descriptor: a process forked by
+/// another thread shares the open file description until its exec closes the CLOEXEC copy, and a
+/// plain close would keep the lock held for that window.
+struct UpdateLock(File);
+
+impl AsRawFd for UpdateLock {
+    fn as_raw_fd(&self) -> RawFd {
+        self.0.as_raw_fd()
+    }
+}
+
+impl Drop for UpdateLock {
+    fn drop(&mut self) {
+        // SAFETY: the descriptor remains open until after this Drop implementation returns.
+        let _ = unsafe { flock(self.0.as_raw_fd(), LOCK_UN) };
+    }
+}
+
+fn acquire_update_lock(root: &Path) -> Result<UpdateLock, Error> {
     ensure_secure_directory(root, true)?;
     let file = OpenOptions::new()
         .create(true)
@@ -548,7 +568,7 @@ fn acquire_update_lock(root: &Path) -> Result<File, Error> {
     validate_owned_file(&file)?;
     // SAFETY: `file` owns a valid descriptor; flock does not retain the descriptor pointer.
     if unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) } == 0 {
-        Ok(file)
+        Ok(UpdateLock(file))
     } else {
         let error = io::Error::last_os_error();
         if error.kind() == io::ErrorKind::WouldBlock {
@@ -2027,6 +2047,43 @@ mod output_hold_fd_tests {
                 available_bytes: available,
             }) if required == required_bytes && available == required_bytes - 1
         ));
+    }
+
+    /// A process forked by another thread (before its exec closes CLOEXEC descriptors) shares
+    /// the lock's open file description. Releasing the lock must not wait for that process.
+    #[test]
+    fn update_lock_is_released_even_while_a_forked_child_holds_a_duplicate() {
+        let root = std::env::temp_dir().join(format!(
+            "sdv-fota-lock-release-{}-{}",
+            std::process::id(),
+            NEXT_PATH.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let lock = super::acquire_update_lock(&root).unwrap();
+        // Model the fork-to-exec window deterministically: a child that keeps a duplicate.
+        // SAFETY: `lock` owns a valid descriptor; F_DUPFD returns a new descriptor without CLOEXEC.
+        let inherited = unsafe { libc::fcntl(lock.as_raw_fd(), libc::F_DUPFD, 0) };
+        assert!(inherited >= 0);
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        // SAFETY: `inherited` is the descriptor duplicated above and is not used afterwards.
+        unsafe { libc::close(inherited) };
+
+        drop(lock);
+        let reacquired = super::acquire_update_lock(&root);
+
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = fs::remove_dir_all(&root);
+        assert!(
+            reacquired.is_ok(),
+            "lock still held: {:?}",
+            reacquired.err()
+        );
     }
 
     #[test]
