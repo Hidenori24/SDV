@@ -19,6 +19,7 @@ Pi上の一つのRustプロセス内で、VCU・Engine・Brake・Steeringを仮�
 対象外: 4 輪の差動駆動のキット（Freenove 4WD など）。操舵の方式が違い、今のモデルに合わない。
 
 ## 残っている実機作業
+- **最初にやること**: Pi だけ（車体なし）でできる確認は [pi_bringup.md](pi_bringup.md)。OS の導入 → ビルド → テスト → FOTA のドライランを 1 コマンドで行う
 - Robot HATのI2C/GPIOをLinux Platform実装へ接続し、PiCar-Xで確認する
 - 速度センサのない構成で開ループ制御を評価する
 - 実機での操作入口、車両寸法、最大舵角、速度上限を決めてConfigへ反映する
