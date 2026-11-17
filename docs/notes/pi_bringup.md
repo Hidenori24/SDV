@@ -10,7 +10,10 @@ Raspberry Pi 本体と SD カードがある状態から、**車体（PiCar-X / 
 |---|---|---|---|
 | **0（この文書）** | Pi、SD カード、電源、ネットワーク | OS を入れる → ビルド → テスト → FOTA のドライラン | なし（何も動かない。システムにも書かない） |
 | 1 | + USB メモリ（または SD の空きパーティション） | FOTA のデータボリュームと systemd で、車両アプリを FOTA の管理下で起動する | 低（モーターはつながっていない） |
-| 2 | + PiCar-X（Robot HAT） | I2C / GPIO の確認、較正、E-Stop とフェイルセーフの確認 | **あり（車が動く）。タイヤを浮かせて始める** |
+| 組み立て | + PiCar-X のキット | SunFounder の説明書どおりに組み立てる（サーボの 0° 合わせを含む）。SunFounder のサンプルで、モーターとサーボが動くことを確かめる | あり（タイヤを浮かせる） |
+| 2 | + 組み立てた PiCar-X（Robot HAT） | このプロジェクトのソフトで I2C / GPIO の確認、較正、E-Stop とフェイルセーフの確認 | **あり（車が動く）。タイヤを浮かせて始める** |
+
+段階 0・1 と組み立ては並行して進められます（段階 0・1 は車体を使わないため）。
 
 段階 1・2 は、この文書の末尾と [fota-pi5-operations.md](../design/fota-pi5-operations.md)、[`rust/sdv-picarx/README.md`](../../rust/sdv-picarx/README.md) に続きます。
 
@@ -19,8 +22,11 @@ Raspberry Pi 本体と SD カードがある状態から、**車体（PiCar-X / 
 ### 1. OS を SD カードに書き込む
 パソコンで [Raspberry Pi Imager](https://www.raspberrypi.com/software/) を使います。
 
-- **OS は 64-bit を選ぶ**: 「Raspberry Pi OS (other)」→ **Raspberry Pi OS Lite (64-bit)**。画面は使わないので Lite（デスクトップなし）で足ります
+- **OS は Raspberry Pi OS Lite (64-bit) の最新版（Debian 13 "Trixie" ベース）**: Imager で「Raspberry Pi OS (other)」→ **Raspberry Pi OS Lite (64-bit)**。画面は使わないので Lite（デスクトップなし）で足ります（モニタをつなぎたいなら通常版の 64-bit でも構いません）
   - 32-bit の OS では動きません（このソフトは aarch64 向け）。確認スクリプトが最初に検査します
+  - 「Legacy」と書かれた Bookworm（Debian 12）ベースは選ばない: glibc が 2.36 のため、CI が作るビルド済みバイナリが起動できません（下の「glibc」の節）。Pi の上でビルドする分には動きます
+  - SunFounder（PiCar-X のメーカー）も、Pi 5 と Trixie 64-bit での動作確認をフォーラムで回答しています。ただし同社のインストーラが Trixie で失敗した報告もあり、そのときの回避策として Bookworm が挙げられています。組み立ての節を見てください
+  - Ubuntu などの他の OS は勧めません。SunFounder のソフトも Pi 5 の GPIO まわりも Raspberry Pi OS を前提にしています
 - 書き込む前の設定（歯車、または「設定を編集する」）で、次を入れておくと、画面とキーボードなしで始められます
   - ホスト名（例: `sdv-pi`）、ユーザー名とパスワード
   - Wi-Fi（有線 LAN ならつなぐだけ）
@@ -92,6 +98,17 @@ RESULT: OK
 
 ## CI が作るバイナリを使う場合の注意（glibc）
 GitHub Actions の `aarch64` ジョブは、ビルド済みのバイナリ（成果物 `sdv-aarch64-binaries`）を保存しています。ただし **glibc 2.39 以上の OS でしか起動できません**（[#187](https://github.com/Hidenori24/SDV/issues/187)）。Debian 13（trixie）系の Raspberry Pi OS は 2.41 なので動く見込み、Debian 12（bookworm）系は 2.36 なので起動できない見込みです（どちらも実機では未確認）。確認スクリプトが glibc の版と、使えるかどうかを表示します。**Pi の上でビルドする（この手順）場合は関係ありません。**
+
+## PiCar-X の組み立て（SunFounder のソフトを使う）
+
+組み立ては [SunFounder の説明書](https://docs.sunfounder.com/projects/picar-x-v20/ja/latest/index.html) に従います。**このプロジェクトのソフト（`sdv-picarx`）には、組み立て用のサーボの 0° 合わせや、メーカーのサンプルに当たる機能はありません。** この段階は SunFounder のソフト（robot-hat など）を使います。
+
+- **SD カードを分けるのがいちばんきれいです**: SunFounder 用の SD と、このプロジェクト用の SD。SunFounder のインストーラは Python のパッケージや音声の設定（`i2samp.sh`）をシステムに入れるためです。同じ SD に両方入れても構いませんが、**両方を同時に動かさない**（どちらも Robot HAT の同じ I2C デバイスに書きます）
+- SunFounder のソフトは**決められた順番で入れます**（robot-hat → vilib → picar-x）。順番やブランチ名（`-b 2.5.x` など）は版によって変わるので、**入れる時点の説明書を見てください**。Trixie でインストーラが失敗したら、まず説明書とフォーラムで最新の手順を確かめます
+- 説明書のとおり、**サーボのアームを付ける前に 0° 合わせ**をします
+- 組み立てたら、**タイヤを浮かせて** SunFounder のサンプル（較正のスクリプトなど）でモーターとサーボが動くことを確かめます。ここで動けば、ハードと配線は正常です。段階 2 でうまく動かないとき、原因をこのプロジェクトのソフトに絞れます
+- このとき、**ステアの中立がどの値か、モーターがどちら向きに回るか**をメモしておくと、段階 2 の較正の参考になります（ただし値の単位や基準は SunFounder のソフトとこのプロジェクトで同じとは限らないので、段階 2 であらためて測ります）
+- 電源: 段階 0 では Pi 5 用の USB-C 電源を使います。車体のバッテリーから Pi に給電する場合の扱いは、SunFounder の説明書に従ってください
 
 ## 次の段階（予告）
 
