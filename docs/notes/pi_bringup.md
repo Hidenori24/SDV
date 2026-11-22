@@ -26,7 +26,7 @@ Raspberry Pi 本体と SD カードがある状態から、**車体（PiCar-X / 
   - 32-bit の OS では動きません（このソフトは aarch64 向け）。確認スクリプトが最初に検査します
   - 「Legacy」と書かれた Bookworm（Debian 12）ベースは選ばない: glibc が 2.36 のため、CI が作るビルド済みバイナリが起動できません（下の「glibc」の節）。Pi の上でビルドする分には動きます
   - SunFounder（PiCar-X のメーカー）も、Pi 5 と Trixie 64-bit での動作確認をフォーラムで回答しています。ただし同社のインストーラが Trixie で失敗した報告もあり、そのときの回避策として Bookworm が挙げられています。組み立ての節を見てください
-  - Ubuntu などの他の OS は勧めません。SunFounder のソフトも Pi 5 の GPIO まわりも Raspberry Pi OS を前提にしています
+  - Ubuntu などの他の OS は勧めません。SunFounder のソフトも Pi 5 の GPIO まわりも Raspberry Pi OS を前提にしています。それでも Ubuntu Server で進める場合は [pi_bringup_ubuntu.md](pi_bringup_ubuntu.md)（パソコンなしでスマホから SD に書く手順つき）を使ってください
 - 書き込む前の設定（歯車、または「設定を編集する」）で、次を入れておくと、画面とキーボードなしで始められます
   - ホスト名（例: `sdv-pi`）、ユーザー名とパスワード
   - Wi-Fi（有線 LAN ならつなぐだけ）
