@@ -1,0 +1,12 @@
+// Cloudflare Workers: serves the browser demo (web/ + sdv_core.wasm) as static assets.
+// Build: `bash tools/cloudflare/build.sh` (creates dist/). Deploy: `npx wrangler deploy`.
+// "name" must match the Worker name in the Cloudflare dashboard (Workers Builds checks it).
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "sdv",
+  "compatibility_date": "2026-11-24",
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "404-page"
+  }
+}

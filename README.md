@@ -77,6 +77,7 @@ flowchart TB
 
 - GitHub Pages で公開（`.github/workflows/pages.yml`）。公開 URL は Settings → Pages で確認（`https://<ユーザー名>.github.io/SDV/` の想定）。初回のみ Source を **GitHub Actions** に設定
 - Pagesには同じコースを更新前に走り、停車中にFOTAしてから再走行する [FOTAデモ](web/fota-demo.html) と、Pi 5/Linuxの [FOTA実装・手順](web/fota.html) もあります。デモはブラウザ内だけで動作します。
+- Cloudflare Workers（静的アセット）にも置けます。設定は `wrangler.jsonc`、ビルドは `tools/cloudflare/build.sh`（`sdv_core.wasm` をビルドして `web/` と一緒に `dist/` にまとめる。Rust が無い環境では rustup で最小構成を入れる）。Workers Builds の設定は、ビルドコマンド `bash tools/cloudflare/build.sh`、デプロイコマンド `npx wrangler deploy`、ルートディレクトリ `/`。`wrangler.jsonc` の `name` は、ダッシュボードの Worker 名と同じにする
 - ローカルで試す手順は [web/README.md](web/README.md)
 
 ## リポジトリ構成
