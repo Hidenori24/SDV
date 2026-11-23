@@ -70,3 +70,7 @@ tools/video/out/
 tools/video/golden.js
 tools/video/audio_*.wav
 tools/video/still_*.jpg
+
+# Cloudflare Workers build output (tools/cloudflare/build.sh)
+/dist/
+.wrangler/
