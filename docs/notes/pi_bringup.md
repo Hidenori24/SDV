@@ -22,6 +22,8 @@ Raspberry Pi 本体と SD カードがある状態から、**車体（PiCar-X / 
 ### 1. OS を SD カードに書き込む
 パソコンで [Raspberry Pi Imager](https://www.raspberrypi.com/software/) を使います。
 
+> **パソコンが無いとき**は、Android のスマホから書き込めます。[pi_bringup_phone.md](pi_bringup_phone.md) で SD の書き込みから SSH で入るところまで進めてから、下の「2. ログインして、道具を入れる」に戻ってください。
+
 - **OS は Raspberry Pi OS Lite (64-bit) の最新版（Debian 13 "Trixie" ベース）**: Imager で「Raspberry Pi OS (other)」→ **Raspberry Pi OS Lite (64-bit)**。画面は使わないので Lite（デスクトップなし）で足ります（モニタをつなぎたいなら通常版の 64-bit でも構いません）
   - 32-bit の OS では動きません（このソフトは aarch64 向け）。確認スクリプトが最初に検査します
   - 「Legacy」と書かれた Bookworm（Debian 12）ベースは選ばない: glibc が 2.36 のため、CI が作るビルド済みバイナリが起動できません（下の「glibc」の節）。Pi の上でビルドする分には動きます
